@@ -29,22 +29,22 @@ A resource is a host object scripts can call. `path` and `name` form its fully q
 Call `register` before `start`. `start` creates the SQLite database, mounts the HTTP API, and listens.
 
 ```typescript
-import Fastify from 'fastify';
-import { StellariumNode } from 'stellarium-ts';
-import type { Resource } from 'requestscript';
+import Fastify from "fastify";
+import { StellariumNode } from "stellarium-ts";
+import type { Resource } from "requestscript";
 
 const weather: Resource = {
   metadata: {},
-  path: 'com.example',
-  name: 'Weather',
+  path: "com.example",
+  name: "Weather",
   functions: [
     {
-      name: 'temperature',
-      parameters: [{ name: 'city', type: 'string' }],
-      returnType: 'int32',
+      name: "temperature",
+      parameters: [{ name: "city", type: "string" }],
+      returnType: "int32",
       exec: async (args) => {
-        const city = args.find((arg) => arg.name === 'city')?.value;
-        return city === 'Oslo' ? 12 : 20;
+        const city = args.find((arg) => arg.name === "city")?.value;
+        return city === "Oslo" ? 12 : 20;
       },
     },
   ],
@@ -58,21 +58,21 @@ await node.start(fastify, {
   port: 3000,
   // Omit this to run standalone. Set it to copy peers and resources
   // from a node that is already up.
-  startingPeer: 'http://127.0.0.1:3001',
+  startingPeer: "http://127.0.0.1:3001",
 });
 ```
 
 `StellariumNodeOptions`:
 
-| Option | Default | Purpose |
-| --- | --- | --- |
-| `port` | `3000` | Port Fastify listens on |
-| `startingPeer` | none | Origin of a peer to bootstrap from, with no `/v1` suffix |
+| Option         | Default | Purpose                                                  |
+| -------------- | ------- | -------------------------------------------------------- |
+| `port`         | `3000`  | Port Fastify listens on                                  |
+| `startingPeer` | none    | Origin of a peer to bootstrap from, with no `/v1` suffix |
 
 Importing `StellariumNode` loads [dotenv](https://github.com/motdotla/dotenv), so a `.env` file in the working directory is applied automatically.
 
-| Variable | Purpose |
-| --- | --- |
+| Variable   | Purpose                                                                                                                                                       |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BASE_URL` | Public URL prefix stored on resources this node hosts. Peers call `{BASE_URL}/run`. Set it to this node's API prefix, for example `http://127.0.0.1:3000/v1`. |
 
 The node stores peers and resources it learns from other nodes in `requestscript.db` in the current working directory. That file is created on startup.
@@ -90,12 +90,12 @@ A script that names a resource registered on this process runs `exec` locally. A
 
 Routes are mounted at `/v1`.
 
-| Method and path | Body | Purpose |
-| --- | --- | --- |
-| `GET /v1/` | — | Liveness check. Responds `{ "hello": "world" }` |
-| `GET /v1/peers` | — | Peers stored on this node: `{ "peers": [{ "baseUrl", "name" }] }` |
-| `GET /v1/resources` | — | Resources registered here and resources learned from peers |
-| `POST /v1/run` | JSON string | Run one `request` script |
+| Method and path     | Body        | Purpose                                                           |
+| ------------------- | ----------- | ----------------------------------------------------------------- |
+| `GET /v1/`          | —           | Liveness check. Responds `{ "hello": "world" }`                   |
+| `GET /v1/peers`     | —           | Peers stored on this node: `{ "peers": [{ "baseUrl", "name" }] }` |
+| `GET /v1/resources` | —           | Resources registered here and resources learned from peers        |
+| `POST /v1/run`      | JSON string | Run one `request` script                                          |
 
 `GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, and functions (`name`, `returnType`, `parameters`). Function implementations stay on the node that hosts them.
 
@@ -115,7 +115,7 @@ Resources are bound with `const <name>: <path>.<ResourceName>` and called with n
 
 ## Developing
 
-This repository is the library above. It uses pnpm.
+This repository uses `pnpm`.
 
 ```sh
 pnpm install
@@ -124,3 +124,7 @@ pnpm dev     # reload src/server.ts when it changes
 ```
 
 `pnpm build` emits `dist/`, which is what the package exports. Start a node from your own process with `StellariumNode`, as shown above.
+
+### Contributing
+
+Stellarium has a backlog [here](https://github.com/orgs/qualletio/projects/7/views/1)
