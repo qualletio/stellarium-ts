@@ -1,0 +1,55 @@
+{
+  "name": "stellarium-ts",
+  "version": "0.1.0",
+  "description": "A Stellarium Node in TypeScript.",
+  "homepage": "https://github.com/qualletio/stellarium-ts#readme",
+  "bugs": {
+    "url": "https://github.com/qualletio/stellarium-ts/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qualletio/stellarium-ts.git"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc",
+    "prepack": "pnpm build",
+    "start": "node dist/server.js",
+    "dev": "node --watch src/server.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "decentralized",
+    "stellarium",
+    "requestscript"
+  ],
+  "author": "Christopher Poulsen <christopher.poulsen@quallet.io>",
+  "license": "ISC",
+  "packageManager": "pnpm@10.20.0",
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.5",
+    "fastify": "^5.12.5",
+    "requestscript": "^1.0.5",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1"
+  }
+}
