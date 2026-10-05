@@ -8,6 +8,8 @@ Stellarium is a decentralized API platform built on the [RequestScript](https://
 
 This package is the node. You embed it in a Fastify server, register the RequestScript resources that live on this process, and optionally bootstrap peer and resource lists from a node that is already running.
 
+Join us in the `Discussions` tab, or our discord: https://discord.gg/WWTWKmYWv6.
+
 ## Running a node
 
 ### Prerequisites
