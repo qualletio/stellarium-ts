@@ -21,8 +21,6 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 return ${resource.name.toLowerCase()}.${functionName}(${parameters.map(p => `${p.name}: ${p.value}`).join(', ')})
             }`;
 
-            console.log(query);
-
             const url = resource.metadata.baseUrl as string | undefined;
             if (!url) {
                 throw new Error(`Resource ${resource.name} does not have a url`);
