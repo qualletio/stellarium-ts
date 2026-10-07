@@ -73,11 +73,11 @@ await node.start(fastify, {
 
 Importing `StellariumNode` loads [dotenv](https://github.com/motdotla/dotenv), so a `.env` file in the working directory is applied automatically.
 
-| Variable              | Purpose                                                                                                                                                       |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `BASE_URL`            | Public URL prefix stored on resources this node hosts. Peers call `{BASE_URL}/run`. Set it to this node's API prefix, for example `http://127.0.0.1:3000/v1`. |
-| `SIGNING_PRIVATE_KEY` | The base64url encoded ED25519 private key used to sign data for publishing to peers.                                                                          |
-| `SIGNING_PUBLIC_KEY`  | The base64url ED25519 public key used to verify data for publishing to peers. Must be paired with the private key.                                            |
+| Variable              | Purpose                                                                                                                                                                         |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BASE_URL`            | Public URL prefix stored on resources this node hosts. Peers call `{BASE_URL}/run`. Set it to this node's API prefix, for example `http://127.0.0.1:3000`. Do not include `/v1` |
+| `SIGNING_PRIVATE_KEY` | The base64url encoded ED25519 private key used to sign data for publishing to peers.                                                                                            |
+| `SIGNING_PUBLIC_KEY`  | The base64url ED25519 public key used to verify data for publishing to peers. Must be paired with the private key.                                                              |
 
 Signing keys can be generated with the following script:
 
