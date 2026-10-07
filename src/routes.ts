@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify'
 import type { Service } from './service.js';
 import { interpretParsed, parseScript, type Resource, type ResourceFunction } from 'requestscript';
 import { ResourceWithBaseUrl } from './resource/resource.js';
+import { Peer } from './peer/repository.js';
 
 interface RouteOptions {
     service: Service;
@@ -25,6 +26,12 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, option
         return { peers };
     });
 
+    fastify.put('/peers', async (request, reply) => {
+        const peer = request.body as Peer;
+        await options.service.peerRepository.createIfNotExists(peer);
+        return { success: true };
+    });
+
     /**
      * Returns the list of resources that are available on the server.
      * Does not return resources that are external to the server.
@@ -43,6 +50,14 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, option
                 baseUrl: resource.baseUrl,
             })),
         }
+    });
+
+    fastify.put('/all-resources', async (request, reply) => {
+        const resources = request.body as ResourceWithBaseUrl[];
+
+        await options.service.resourceRepository.saveAll(resources);
+
+        return { success: true };
     });
 
     // End Meta Routes

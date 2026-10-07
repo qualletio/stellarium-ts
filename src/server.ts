@@ -7,6 +7,7 @@ import { Resource } from 'requestscript';
 import { createTables } from './db/db.js';
 
 export interface StellariumNodeOptions {
+    baseUrl: string;
     port?: number;
     startingPeer?: string;
 }
@@ -33,9 +34,9 @@ export class StellariumNode {
             }
 
             if (options.startingPeer) {
-                const startupService = new StartupService(service, options.startingPeer);
+                const startupService = new StartupService(fastify.log, service, options.startingPeer, options.baseUrl);
 
-                Promise.resolve(startupService.loadFromPeer()).catch(err => {
+                Promise.resolve(startupService.seedFromPeer()).catch(err => {
                     fastify.log.error(err);
                     process.exit(1);
                 });
