@@ -73,9 +73,29 @@ await node.start(fastify, {
 
 Importing `StellariumNode` loads [dotenv](https://github.com/motdotla/dotenv), so a `.env` file in the working directory is applied automatically.
 
-| Variable   | Purpose                                                                                                                                                       |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `BASE_URL` | Public URL prefix stored on resources this node hosts. Peers call `{BASE_URL}/run`. Set it to this node's API prefix, for example `http://127.0.0.1:3000/v1`. |
+| Variable              | Purpose                                                                                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BASE_URL`            | Public URL prefix stored on resources this node hosts. Peers call `{BASE_URL}/run`. Set it to this node's API prefix, for example `http://127.0.0.1:3000/v1`. |
+| `SIGNING_PRIVATE_KEY` | The base64url encoded ED25519 private key used to sign data for publishing to peers.                                                                          |
+| `SIGNING_PUBLIC_KEY`  | The base64url ED25519 public key used to verify data for publishing to peers. Must be paired with the private key.                                            |
+
+Signing keys can be generated with the following script:
+
+```bash
+node --input-type=module -e '
+import { generateKeyPairSync } from "node:crypto";
+
+const { publicKey, privateKey } = generateKeyPairSync("ed25519", {
+  publicKeyEncoding: { type: "spki", format: "der" },
+  privateKeyEncoding: { type: "pkcs8", format: "der" },
+});
+
+console.log(JSON.stringify({
+  publicKey: publicKey.toString("base64url"),
+  privateKey: privateKey.toString("base64url"),
+}, null, 2));
+'
+```
 
 The node stores peers and resources it learns from other nodes in `requestscript.db` in the current working directory. That file is created on startup.
 
@@ -85,6 +105,8 @@ When `startingPeer` is set, the node waits until it is listening, then:
 
 1. `GET {startingPeer}/v1/peers`. If this node has no peers yet, it stores the returned list. An existing list is left as-is.
 2. `GET {startingPeer}/v1/resources`. Each resource is stored with the `baseUrl` that peer advertised.
+3. Broadcasts self to all peers in the network.
+4. Broadcasts its internal Resources to the network.
 
 A script that names a resource registered on this process runs `exec` locally. A script that names a resource learned from a peer is forwarded: this node posts a RequestScript request to `{baseUrl}/run` and returns that peer's `returnValue`.
 
