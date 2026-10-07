@@ -16,6 +16,26 @@ export class ResourceRepository {
         );
     }
 
+    async saveAll(resources: ResourceWithBaseUrl[]): Promise<void> {
+        for (const resource of resources) {
+            const existingResource = await this.db.get(
+                'SELECT * FROM resources WHERE path = ? AND name = ?',
+                [resource.path, resource.name]
+            );
+
+            // TODO: A signature must accompany the resource to ensure the base url change is only made by the owner of the resource.
+            // This will avoid MITM attacks.
+            if (existingResource) {
+                await this.db.run(
+                    'UPDATE resources SET base_url = ?, updated_at = ? WHERE path = ? AND name = ?',
+                    [resource.baseUrl, new Date().toISOString(), resource.path, resource.name]
+                );
+            } else {
+                await this.create(resource, resource.baseUrl);
+            }
+        }
+    }
+
     async getResource(key: string): Promise<Resource | undefined> {
         const resource = this.resources.find(r => `${r.path}.${r.name}` === key);
         if (resource) {
@@ -57,6 +77,10 @@ export class ResourceRepository {
                 baseUrl: result.base_url,
             }
         }
+    }
+
+    async getInternalResources(): Promise<ResourceWithBaseUrl[]> {
+        return this.resources.map(r => ({ ...r, baseUrl: process.env.BASE_URL! }));
     }
 
     async getExternalResources(): Promise<Resource[]> {

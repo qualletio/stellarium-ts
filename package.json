@@ -28,7 +28,7 @@
     "prepack": "pnpm build",
     "start": "node dist/server.js",
     "dev": "node --watch src/server.ts",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest --passWithNoTests"
   },
   "engines": {
     "node": ">=20"
@@ -43,7 +43,9 @@
   "packageManager": "pnpm@10.20.0",
   "devDependencies": {
     "@types/node": "^26.6.4",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vite": "^8.3.3",
+    "vitest": "^4.1.11"
   },
   "dependencies": {
     "dotenv": "^18.0.5",

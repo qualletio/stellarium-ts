@@ -2,17 +2,27 @@ import { Resource } from "requestscript";
 import { Peer, PeerRepository } from "./peer/repository.js";
 import { Service } from "./service.js";
 import { ResourceWithBaseUrl } from "./resource/resource.js";
+import { FastifyBaseLogger } from "fastify";
 
 export class StartupService {
-    constructor(private readonly service: Service, private readonly startingPeer: string) {}
+    constructor(private readonly log: FastifyBaseLogger, private readonly service: Service, private readonly startingPeer: string, private readonly baseUrl: string) {}
 
     // If the peer list is empty, populate it using the peer start parameter.
-    async loadFromPeer(): Promise<void> {
+    async seedFromPeer(): Promise<void> {
+        this.log.info(`Seeding from peer ${this.startingPeer}`);
+        
         await this.populatePeers();
         await this.populateResources();
+
+        // This must be the last step that only runs if the previous steps were successful.
+        await this.broadcastSelf();
+
+        this.log.info(`Finished seeding from peer ${this.startingPeer}`);
     }
 
     async populatePeers(): Promise<void> {
+        this.log.info(`Populating peers from ${this.startingPeer}`);
+
         const peerList = await this.service.peerRepository.getPeerList();
         if (peerList.length > 0) {
             return;
@@ -29,9 +39,13 @@ export class StartupService {
                 await this.service.peerRepository.create(peer);
             }
         }
+
+        this.log.info(`Populated ${data.peers.length} peers`);
     }
 
     async populateResources(): Promise<void> {
+        this.log.info(`Populating resources from ${this.startingPeer}`);
+        
         const response = await fetch(`${this.startingPeer}/v1/resources`);
         const data = await response.json() as { resources: ResourceWithBaseUrl[] };
         if (!data.resources) {
@@ -43,5 +57,51 @@ export class StartupService {
                 await this.service.resourceRepository.create(resource, resource.baseUrl);
             }
         }
+
+        this.log.info(`Populated ${data.resources.length} resources`);
+    }
+
+    async broadcastSelf(): Promise<void> {
+        this.log.info(`Broadcasting self to peers`);
+        
+        // Let the peers know about this node.
+        const peers = await this.service.peerRepository.getPeerList();
+        for (const peer of peers) {
+            const response = await fetch(`${peer.baseUrl}/v1/peers`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    baseUrl: this.baseUrl,
+                    name: this.baseUrl,
+                }),
+            });
+            if (!response.ok) {
+                this.log.warn(`Failed to broadcast self to node ${peer.baseUrl}: ${response.statusText}`);
+            }
+        }
+
+        this.log.info(`Broadcasted self to ${peers.length} peers`);
+
+        this.log.info(`Broadcasting resources to peers`);
+
+        // Let the peers know about the resources available on this node.
+        const resources = await this.service.resourceRepository.getInternalResources();
+        for (const peer of peers) {
+            const response = await fetch(`${peer.baseUrl}/v1/all-resources`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(resources),
+            });
+
+            if (!response.ok) {
+                this.log.warn(`Failed to broadcast resources to node ${peer.baseUrl}: ${response.statusText}`);
+            }
+        }
+
+        this.log.info(`Broadcasted ${resources.length} resources to ${peers.length} peers`);
     }
 }

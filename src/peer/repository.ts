@@ -27,6 +27,20 @@ export class PeerRepository {
         );
     }
 
+    async createIfNotExists(peer: Peer): Promise<void> {
+
+        const existingPeer = await this.db.get(
+            'SELECT * FROM peer WHERE base_url = ?',
+            [peer.baseUrl, peer.name]
+        );
+
+        if (existingPeer) {
+            return;
+        }
+
+        await this.create(peer);
+    }
+
     async deleteAll(): Promise<void> {
         await this.db.run('DELETE FROM peer');
     }
