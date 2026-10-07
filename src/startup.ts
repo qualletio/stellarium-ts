@@ -87,7 +87,7 @@ export class StartupService {
         this.log.info(`Broadcasting resources to peers`);
 
         // Let the peers know about the resources available on this node.
-        const resources = await this.service.resourceRepository.getAllResources();
+        const resources = await this.service.resourceRepository.getInternalResources();
         for (const peer of peers) {
             const response = await fetch(`${peer.baseUrl}/v1/all-resources`, {
                 method: 'PUT',

@@ -79,6 +79,10 @@ export class ResourceRepository {
         }
     }
 
+    async getInternalResources(): Promise<ResourceWithBaseUrl[]> {
+        return this.resources.map(r => ({ ...r, baseUrl: process.env.BASE_URL! }));
+    }
+
     async getExternalResources(): Promise<Resource[]> {
         const results = await this.db.get(
             'SELECT * FROM resources',
