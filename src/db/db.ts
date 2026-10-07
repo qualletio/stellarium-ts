@@ -13,42 +13,51 @@ export async function createTables() {
         CREATE TABLE IF NOT EXISTS peer (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             base_url TEXT NOT NULL,
+            public_key TEXT NOT NULL,
             name TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
 
-            UNIQUE (base_url)
+            UNIQUE (public_key),
+            UNIQUE (base_url),
             UNIQUE (name)
         );
 
-        CREATE TABLE IF NOT EXISTS resources (
+        CREATE TABLE IF NOT EXISTS resource (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            peer_id INTEGER NOT NULL,
             path TEXT NOT NULL,
             name TEXT NOT NULL,
             base_url TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
 
-            UNIQUE (path, name)
+            FOREIGN KEY (peer_id) REFERENCES peer(id),
+
+            UNIQUE (path, name),
             UNIQUE (base_url)
         );
 
-        CREATE TABLE IF NOT EXISTS resource_functions (
+        CREATE TABLE IF NOT EXISTS resource_function (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             resource_id INTEGER NOT NULL,
             name TEXT NOT NULL,
             return_type TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+
+            FOREIGN KEY (resource_id) REFERENCES resource(id),
         );
 
-        CREATE TABLE IF NOT EXISTS resource_function_parameters (
+        CREATE TABLE IF NOT EXISTS resource_function_parameter (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             resource_function_id INTEGER NOT NULL,
             name TEXT NOT NULL,
             parameter_type TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+
+            FOREIGN KEY (resource_function_id) REFERENCES resource_function(id),
         );
     `);
 }

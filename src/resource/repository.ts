@@ -1,5 +1,7 @@
+import { verifyData } from "@/crypto/utils.js";
 import { Resource, ResourceFunctionParameter } from "requestscript";
 import { Database } from "sqlite";
+import { Peer } from "@/peer/repository.js";
 
 export interface ResourceWithBaseUrl extends Resource {
     baseUrl: string;
@@ -16,7 +18,11 @@ export class ResourceRepository {
         );
     }
 
-    async saveAll(resources: ResourceWithBaseUrl[]): Promise<void> {
+    async saveAll(resources: ResourceWithBaseUrl[], existingPeer: Peer, signature: string): Promise<boolean> {
+        if (!verifyData({ resources }, existingPeer.publicKey, signature)) {
+            return false;
+        }
+
         for (const resource of resources) {
             const existingResource = await this.db.get(
                 'SELECT * FROM resources WHERE path = ? AND name = ?',
@@ -34,6 +40,8 @@ export class ResourceRepository {
                 await this.create(resource, resource.baseUrl);
             }
         }
+
+        return true;
     }
 
     async getResource(key: string): Promise<Resource | undefined> {
