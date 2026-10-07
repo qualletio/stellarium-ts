@@ -26,7 +26,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 throw new Error(`Resource ${resource.name} does not have a url`);
             }
 
-            const result = await fetch(`${url}/run`, {
+            const result = await fetch(`${url}/v1/run`, {
                 method: 'POST',
                 body: query,
             });
