@@ -1,11 +1,19 @@
 import { Resource } from "requestscript";
 import { Peer, PeerRepository } from "./peer/repository.js";
 import { Service } from "./service.js";
-import { ResourceWithBaseUrl } from "./resource/resource.js";
+import { ResourceWithBaseUrl } from "./resource/repository.js";
 import { FastifyBaseLogger } from "fastify";
+import { signData } from "./crypto/utils.js";
 
 export class StartupService {
-    constructor(private readonly log: FastifyBaseLogger, private readonly service: Service, private readonly startingPeer: string, private readonly baseUrl: string) {}
+    constructor(
+        private readonly log: FastifyBaseLogger,
+        private readonly service: Service,
+        private readonly startingPeer: string,
+        private readonly baseUrl: string,
+        private readonly publicKey: string,
+        private readonly privateKey: string,
+    ) {}
 
     // If the peer list is empty, populate it using the peer start parameter.
     async seedFromPeer(): Promise<void> {
@@ -66,6 +74,12 @@ export class StartupService {
         
         // Let the peers know about this node.
         const peers = await this.service.peerRepository.getPeerList();
+
+        const signature = signData({
+            baseUrl: this.baseUrl,
+            name: this.baseUrl,
+        }, this.privateKey);
+
         for (const peer of peers) {
             const response = await fetch(`${peer.baseUrl}/v1/peers`, {
                 method: 'PUT',
@@ -75,8 +89,11 @@ export class StartupService {
                 body: JSON.stringify({
                     baseUrl: this.baseUrl,
                     name: this.baseUrl,
+                    publicKey: this.publicKey,
+                    signature,
                 }),
             });
+
             if (!response.ok) {
                 this.log.warn(`Failed to broadcast self to node ${peer.baseUrl}: ${response.statusText}`);
             }

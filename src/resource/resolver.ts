@@ -1,5 +1,5 @@
 import { Resource, ResourceResolver } from "requestscript";
-import { ResourceRepository } from "./resource.js";
+import { ResourceRepository } from "./repository.js";
 
 /**
  * CombinationResourceResolver is a resource resolver that combines multiple resource resolvers.

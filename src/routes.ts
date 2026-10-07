@@ -1,11 +1,22 @@
 import type { FastifyPluginAsync } from 'fastify'
 import type { Service } from './service.js';
 import { interpretParsed, parseScript, type Resource, type ResourceFunction } from 'requestscript';
-import { ResourceWithBaseUrl } from './resource/resource.js';
+import { ResourceWithBaseUrl } from './resource/repository.js';
 import { Peer } from './peer/repository.js';
+import { verifyData } from './crypto/utils.js';
 
 interface RouteOptions {
     service: Service;
+}
+
+interface PeerRequest extends Peer {
+    signature: string;
+}
+
+interface ResourceRequest {
+    publicKey: string;
+    signature: string;
+    resources: ResourceWithBaseUrl[];
 }
 
 /**
@@ -27,8 +38,8 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, option
     });
 
     fastify.put('/peers', async (request, reply) => {
-        const peer = request.body as Peer;
-        await options.service.peerRepository.createIfNotExists(peer);
+        const peer = request.body as PeerRequest;
+        await options.service.peerRepository.createIfNotExists(peer, peer.signature);
         return { success: true };
     });
 
@@ -53,9 +64,20 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, option
     });
 
     fastify.put('/all-resources', async (request, reply) => {
-        const resources = request.body as ResourceWithBaseUrl[];
+        const resourceRequest = request.body as ResourceRequest;
+        
+        const resources = resourceRequest.resources;
 
-        await options.service.resourceRepository.saveAll(resources);
+        const existingPeer = await options.service.peerRepository.getPeerByPublicKey(resourceRequest.publicKey);
+
+        if (!existingPeer) {
+            return reply.status(400).send({ error: 'Peer not found' });
+        }
+
+        const success = await options.service.resourceRepository.saveAll(resources, existingPeer, resourceRequest.signature);
+        if (!success) {
+            return reply.status(400).send({ error: 'Invalid signature' });
+        }
 
         return { success: true };
     });

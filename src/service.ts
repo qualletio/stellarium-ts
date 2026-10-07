@@ -2,7 +2,7 @@ import { Resource, ResourceInvoker, ResourceResolver } from "requestscript";
 import db from "./db/db.js";
 import { PeerRepository } from "./peer/repository.js";
 import { CombinationResourceResolver } from "./resource/resolver.js";
-import { ResourceRepository } from "./resource/resource.js";
+import { ResourceRepository } from "./resource/repository.js";
 import { CombinationResourceInvoker } from "./resource/invoker.js";
 
 export interface Service {
