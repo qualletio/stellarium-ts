@@ -123,11 +123,11 @@ Routes are mounted at `/v1`.
 
 `GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, and functions (`name`, `returnType`, `parameters`). Function implementations stay on the node that hosts them.
 
-`POST /v1/run` accepts the script source as a JSON string (`Content-Type: application/json`). The declaration must be a `request`. A successful run responds `200` with `{ "returnValue": ... }`. A script that is not a request responds `400` with `{ "error": "Invalid script" }`. Any other failure responds `500` with `{ "error": "Internal server error" }`.
+`POST /v1/run` accepts the script source as raw text (`Content-Type: text/plain`). The declaration must be a `request`. A successful run responds `200` with the response body in `application/json` format `{ "returnValue": ... }`. A script that is not a request responds `400` with `{ "error": "Invalid script" }`. Any other failure responds `500` with `{ "error": "Internal server error" }`.
 
 ```sh
 curl -X POST http://127.0.0.1:3000/v1/run \
-  -H 'Content-Type: application/json' \
+  -H 'Content-Type: text/plain' \
   -d '"request GetTemperature {\n  const weather: com.example.Weather\n\n  return weather.temperature(city: \"Oslo\")\n}"'
 ```
 
