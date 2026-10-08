@@ -29,7 +29,7 @@ export class PeerRepository {
         );
     }
 
-    async createIfNotExists(peer: Peer, signature: string): Promise<void> {
+    async createIfNotExists(peer: Peer, signature: string, expiry: string): Promise<void> {
 
         const existingPeer = await this.db.get(
             'SELECT * FROM peer WHERE base_url = ?',
@@ -38,7 +38,7 @@ export class PeerRepository {
 
         // If the peer already exists, verify the signature before updating.
         if (existingPeer) {
-            if (verifyData(peer, existingPeer.publicKey, signature)) {
+            if (verifyData({ ...peer, expiry }, existingPeer.publicKey, signature) && new Date(expiry) > new Date()) {
                 await this.db.run('UPDATE peer SET base_url = ?, name = ?, updated_at = ? WHERE public_key = ?', [peer.baseUrl, peer.name, new Date().toISOString(), peer.publicKey]);
                 return;
             }

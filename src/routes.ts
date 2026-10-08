@@ -11,12 +11,14 @@ interface RouteOptions {
 
 interface PeerRequest extends Peer {
     signature: string;
+    expiry: string;
 }
 
 interface ResourceRequest {
     publicKey: string;
     signature: string;
     resources: ResourceWithBaseUrl[];
+    expiry: string;
 }
 
 /**
@@ -39,7 +41,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, option
 
     fastify.put('/peers', async (request, reply) => {
         const peer = request.body as PeerRequest;
-        await options.service.peerRepository.createIfNotExists(peer, peer.signature);
+        await options.service.peerRepository.createIfNotExists(peer, peer.signature, peer.expiry);
         return { success: true };
     });
 
@@ -74,7 +76,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, option
             return reply.status(400).send({ error: 'Peer not found' });
         }
 
-        const success = await options.service.resourceRepository.saveAll(resources, existingPeer, resourceRequest.signature);
+        const success = await options.service.resourceRepository.saveAll(resources, existingPeer, resourceRequest.signature, resourceRequest.expiry);
         if (!success) {
             return reply.status(400).send({ error: 'Invalid signature' });
         }

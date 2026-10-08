@@ -18,8 +18,8 @@ export class ResourceRepository {
         );
     }
 
-    async saveAll(resources: ResourceWithBaseUrl[], existingPeer: Peer, signature: string): Promise<boolean> {
-        if (!verifyData({ resources }, existingPeer.publicKey, signature)) {
+    async saveAll(resources: ResourceWithBaseUrl[], existingPeer: Peer, signature: string, expiry: string): Promise<boolean> {
+        if (!verifyData({ resources, expiry }, existingPeer.publicKey, signature) || new Date(expiry) < new Date()) {
             return false;
         }
 
