@@ -75,9 +75,13 @@ export class StartupService {
         // Let the peers know about this node.
         const peers = await this.service.peerRepository.getPeerList();
 
-        const signature = signData({
+        // 10 minutes
+        const peerSignatureExpiry = new Date(Date.now() + 1000 * 60 * 10).toISOString();
+
+        const peerSignature = signData({
             baseUrl: this.baseUrl,
             name: this.baseUrl,
+            expiry: peerSignatureExpiry,
         }, this.privateKey);
 
         for (const peer of peers) {
@@ -90,7 +94,8 @@ export class StartupService {
                     baseUrl: this.baseUrl,
                     name: this.baseUrl,
                     publicKey: this.publicKey,
-                    signature,
+                    signature: peerSignature,
+                    expiry: peerSignatureExpiry,
                 }),
             });
 
@@ -105,13 +110,26 @@ export class StartupService {
 
         // Let the peers know about the resources available on this node.
         const resources = await this.service.resourceRepository.getInternalResources();
+
+        // 10 minutes
+        const resourceSignatureExpiry = new Date(Date.now() + 1000 * 60 * 10).toISOString();
+
+        const resourceSignature = signData({
+            resources,
+            expiry: resourceSignatureExpiry,
+        }, this.privateKey);
+
         for (const peer of peers) {
             const response = await fetch(`${peer.baseUrl}/v1/all-resources`, {
                 method: 'PUT',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify(resources),
+                body: JSON.stringify({
+                    resources,
+                    expiry: resourceSignatureExpiry,
+                    signature: resourceSignature,
+                }),
             });
 
             if (!response.ok) {
