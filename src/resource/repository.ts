@@ -1,136 +1,114 @@
-import { verifyData } from "@/crypto/utils.js";
-import { Resource, ResourceFunctionParameter } from "requestscript";
-import { Database } from "sqlite";
-import { Peer } from "@/peer/repository.js";
-
+import { verifyData } from "../crypto/utils.js";
+import type { Resource } from "requestscript";
+import type { Database } from "sqlite";
+import type { Peer } from "../peer/repository.js";
+import type { MonetizationManifest, Signed } from "../protocol/types.js";
+import { wireJson } from "../protocol/canonical.js";
+import { manifestSchema } from "../protocol/schema.js";
 export interface ResourceWithBaseUrl extends Resource {
     baseUrl: string;
+    monetization?: Signed<MonetizationManifest>;
 }
-
 export class ResourceRepository {
-    constructor(private readonly db: Database, private resources: Resource[] = []) {}
-
-    async create(resource: Resource, baseUrl: string): Promise<void> {
-        const createdAt = new Date().toISOString();
+    constructor(
+        private readonly db: Database,
+        private resources: Resource[] = [],
+        private readonly baseUrl = "",
+    ) {}
+    async create(
+        resource: ResourceWithBaseUrl,
+        baseUrl: string,
+        ownerKey?: string,
+    ): Promise<void> {
+        const now = new Date().toISOString();
+        const existing = await this.db.get(
+            "SELECT owner_key FROM resources WHERE path = ? AND name = ?",
+            resource.path,
+            resource.name,
+        );
+        if (existing?.owner_key && existing.owner_key !== ownerKey)
+            throw new Error("Resource owner mismatch");
+        const functions = resource.functions.map((fn) => ({
+            name: fn.name,
+            returnType: fn.returnType,
+            parameters: fn.parameters,
+        }));
         await this.db.run(
-            'INSERT INTO resources (path, name, base_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-            [resource.path, resource.name, baseUrl, createdAt, createdAt]
+            `INSERT INTO resources (path,name,base_url,owner_key,functions_json,monetization_json,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(path,name) DO UPDATE SET base_url=excluded.base_url,
+      owner_key=COALESCE(resources.owner_key,excluded.owner_key),functions_json=excluded.functions_json,
+      monetization_json=excluded.monetization_json,updated_at=excluded.updated_at`,
+            resource.path,
+            resource.name,
+            baseUrl,
+            ownerKey ?? null,
+            JSON.stringify(functions),
+            resource.monetization ? wireJson(resource.monetization) : null,
+            now,
+            now,
         );
     }
-
-    async saveAll(resources: ResourceWithBaseUrl[], existingPeer: Peer, signature: string, expiry: string): Promise<boolean> {
-        if (!verifyData({ resources, expiry }, existingPeer.publicKey, signature) || new Date(expiry) < new Date()) {
-            return false;
-        }
-
-        for (const resource of resources) {
-            const existingResource = await this.db.get(
-                'SELECT * FROM resources WHERE path = ? AND name = ?',
-                [resource.path, resource.name]
-            );
-
-            // TODO: A signature must accompany the resource to ensure the base url change is only made by the owner of the resource.
-            // This will avoid MITM attacks.
-            if (existingResource) {
-                await this.db.run(
-                    'UPDATE resources SET base_url = ?, updated_at = ? WHERE path = ? AND name = ?',
-                    [resource.baseUrl, new Date().toISOString(), resource.path, resource.name]
-                );
-            } else {
-                await this.create(resource, resource.baseUrl);
-            }
-        }
-
+    async saveAll(
+        resources: ResourceWithBaseUrl[],
+        peer: Peer,
+        signature: string,
+    ): Promise<boolean> {
+        if (!verifyData({ resources }, peer.publicKey, signature)) return false;
+        for (const resource of resources)
+            await this.create(resource, resource.baseUrl, peer.publicKey);
         return true;
     }
-
     async getResource(key: string): Promise<Resource | undefined> {
-        const resource = this.resources.find(r => `${r.path}.${r.name}` === key);
-        if (resource) {
-            return resource;
-        }
-
-        // Split the key with format path.path.path.*.Name
-        const pathName = key.split('.');
-        const name = pathName.pop();
-        const path = pathName.join('.');
-
-        const result = await this.db.get(
-            'SELECT * FROM resources WHERE path = ? AND name = ?',
-            [path, name]
+        const local = this.resources.find((r) => `${r.path}.${r.name}` === key);
+        if (local) return local;
+        const parts = key.split(".");
+        const name = parts.pop();
+        const row = await this.db.get(
+            "SELECT * FROM resources WHERE path=? AND name=?",
+            parts.join("."),
+            name,
         );
-
-        if (!result) {
-            return undefined;
-        }
-
-        const resourceFunctions = await this.db.all(
-            'SELECT * FROM resource_functions WHERE resource_id = ?',
-            [result.id]
-        );
-
+        return row ? this.decode(row) : undefined;
+    }
+    private decode(row: Record<string, string>): ResourceWithBaseUrl {
+        const monetization = row.monetization_json
+            ? manifestSchema.parse(JSON.parse(row.monetization_json))
+            : undefined;
         return {
-            path: result.path,
-            name: result.name,
-            functions: await Promise.all(resourceFunctions.map(async f => ({
-                name: f.name,
-                returnType: f.return_type,
-                parameters: await this.getResourceParameters(f.id),
-                // The ExternalResourceInvoker will handle the execution of the function
-                exec: async (): Promise<void> => {
-                    return void 0;
-                }
-            }))),
-            metadata: {
-                baseUrl: result.base_url,
-            }
-        }
+            path: row.path,
+            name: row.name,
+            baseUrl: row.base_url,
+            monetization,
+            functions: JSON.parse(row.functions_json).map((fn: object) => ({
+                ...fn,
+                exec: async () => {
+                    throw new Error("Remote resource must be forwarded");
+                },
+            })),
+            metadata: { baseUrl: row.base_url, monetization },
+        };
     }
-
     async getInternalResources(): Promise<ResourceWithBaseUrl[]> {
-        return this.resources.map(r => ({ ...r, baseUrl: process.env.BASE_URL! }));
-    }
-
-    async getExternalResources(): Promise<Resource[]> {
-        const results = await this.db.get(
-            'SELECT * FROM resources',
-        );
-
-        if (!results) {
-            return [];
-        }
-
-        return Promise.all(results.map(async (r: any) => ({
-            path: r.path,
-            name: r.name,
-            functions: await Promise.all(r.resource_functions.map(async (f: any) => ({
-                name: f.name,
-                returnType: f.return_type,
-                parameters: await this.getResourceParameters(f.id),
-            }))),
-            metadata: {
-                baseUrl: r.base_url,
-            }
-        })));
-    }
-
-    async getResourceParameters(resourceFunctionId: number): Promise<ResourceFunctionParameter[]> {
-        return (await this.db.all('SELECT * FROM resource_function_parameters WHERE resource_function_id = ?', [resourceFunctionId])).map(p => ({
-            name: p.name,
-            type: p.parameter_type,
+        return this.resources.map((r) => ({
+            ...r,
+            baseUrl: this.baseUrl,
+            monetization: r.metadata.monetization as
+                Signed<MonetizationManifest> | undefined,
         }));
     }
-
+    async getExternalResources(): Promise<ResourceWithBaseUrl[]> {
+        return (await this.db.all("SELECT * FROM resources")).map((row) =>
+            this.decode(row),
+        );
+    }
     async getAllResources(): Promise<ResourceWithBaseUrl[]> {
-        const externalResources = await this.getExternalResources();
-
-        let resources: ResourceWithBaseUrl[] = [];
-        for (const resource of Object.values(this.resources)) {
-            resources.push({ ...resource, baseUrl: process.env.BASE_URL! });
-        }
-        for (const resource of externalResources) {
-            resources.push({ ...resource, baseUrl: resource.metadata.baseUrl as string });
-        }
-        return resources;
+        const local = await this.getInternalResources();
+        const keys = new Set(local.map((r) => `${r.path}.${r.name}`));
+        return [
+            ...local,
+            ...(await this.getExternalResources()).filter(
+                (r) => !keys.has(`${r.path}.${r.name}`),
+            ),
+        ];
     }
 }

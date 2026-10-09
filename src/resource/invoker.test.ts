@@ -1,130 +1,86 @@
-import { Resource, ResourceFunctionCallParameter } from "requestscript";
+import { describe, expect, it, vi } from "vitest";
+import type { Resource } from "requestscript";
 import { CombinationResourceInvoker } from "./invoker.js";
-import { describe, expect, it } from "vitest";
-
-describe('CombinationResourceInvoker', () => {
-    describe('buildQuery', () => {
-        it('should build a valid query with no parameters', async () => {
-            const invoker = new CombinationResourceInvoker();
-            const resource = {
-                name: 'TestResource',
-                path: 'test.resource',
-                functions: [
-                    {
-                        name: 'testFunction',
-                        exec: async (parameters: ResourceFunctionCallParameter[]) => {
-                            return { result: 'testValue' };
-                        },
-                    },
-                ],
-            } as Resource;
-
-            expect(invoker.buildQuery(resource, 'testFunction', [])).toBe(
-                `request InvokeTestResourcetestFunction {
-            const testresource = test.resource.TestResource
-
-            return testresource.testFunction()
-        }`
-            );
+const resource = (exec = async () => "ok"): Resource => ({
+    path: "example",
+    name: "Test",
+    metadata: {},
+    functions: [
+        {
+            name: "call",
+            parameters: [{ name: "value", type: "string" }],
+            returnType: "string",
+            exec,
+        },
+    ],
+});
+describe("direct Resource invocation", () => {
+    it("forwards arguments as JSON data, without generating executable source", async () => {
+        const target = resource();
+        target.metadata.baseUrl = "https://peer.example";
+        const fetcher = vi.fn(
+            async () =>
+                new Response(
+                    JSON.stringify({ returnValue: "ok", executions: [] }),
+                    { status: 200 },
+                ),
+        );
+        const input = '" ); return malicious() // ${secret}';
+        await new CombinationResourceInvoker(
+            undefined,
+            undefined,
+            fetcher as typeof fetch,
+        ).invoke(target, "call", [{ name: "value", value: input }]);
+        const [url, options] = fetcher.mock.calls[0] as unknown as [
+            string,
+            RequestInit,
+        ];
+        expect(url).toBe("https://peer.example/v1/run");
+        expect(JSON.parse(options.body as string)).toMatchObject({
+            kind: "invocation",
+            parameters: [{ name: "value", value: input }],
         });
-
-        it('should build a valid query with one parameter', async () => {
-            const invoker = new CombinationResourceInvoker();
-            const resource = {
-                name: 'TestResource',
-                path: 'test.resource',
-                functions: [
-                    {
-                        name: 'testFunction',
-                        parameters: [
-                            {
-                                name: 'testParameter',
-                                type: 'string',
-                            },
-                        ],
-                        exec: async (parameters: ResourceFunctionCallParameter[]) => {
-                            return { result: 'testValue' };
-                        },
-                    },
-                ],
-            } as Resource;
-
-            expect(invoker.buildQuery(resource, 'testFunction', [{ name: 'testParameter', value: 'testValue' }])).toBe(
-                `request InvokeTestResourcetestFunction {
-            const testresource = test.resource.TestResource
-
-            return testresource.testFunction(testParameter: "testValue")
-        }`
-            );
+        expect(JSON.parse(options.body as string)).not.toHaveProperty("source");
+    });
+    it("rejects nested calls across asynchronous function execution", async () => {
+        const invoker = new CombinationResourceInvoker();
+        const target = resource(async () => {
+            await Promise.resolve();
+            return (await invoker.invoke(resource(), "call", [
+                { name: "value", value: "nested" },
+            ])) as string;
         });
-
-        it('should build a valid query with many parameters', async () => {
-            const invoker = new CombinationResourceInvoker();
-            const resource = {
-                name: 'TestResource',
-                path: 'test.resource',
-                functions: [
-                    {
-                        name: 'testFunction',
-                        parameters: [
-                            {
-                                name: 'testParameter',
-                                type: 'string',
-                            },
-                            {
-                                name: 'testParameter2',
-                                type: 'int32',
-                            },
-                            {
-                                name: 'testParameter3',
-                                type: 'bool',
-                            },
-                            {
-                                name: 'testParameter4',
-                                type: 'float64',
-                            },
-                            {
-                                name: 'testParameter5',
-                                type: '[]string',
-                            },
-                            {
-                                name: 'testParameter6',
-                                type: '[]int32',
-                            },
-                            {
-                                name: 'testParameter7',
-                                type: '[]bool',
-                            },
-                            {
-                                name: 'testParameter8',
-                                type: '[]float64',
-                            },
-                        ],
-                        exec: async (parameters: ResourceFunctionCallParameter[]) => {
-                            return { result: 'testValue' };
-                        },
-                    },
-                ],
-            } as Resource;
-
-            expect(invoker.buildQuery(
-                resource, 'testFunction', 
-                [
-                    { name: 'testParameter', value: 'testValue' },
-                    { name: 'testParameter2', value: 1 },
-                    { name: 'testParameter3', value: true },
-                    { name: 'testParameter4', value: 1.5 },
-                    { name: 'testParameter5', value: ['testValue1', 'testValue2'] },
-                    { name: 'testParameter6', value: [1, 2] },
-                    { name: 'testParameter7', value: [true, false] },
-                    { name: 'testParameter8', value: [1.1, 2.2] }
-                ])).toBe(
-                `request InvokeTestResourcetestFunction {
-            const testresource = test.resource.TestResource
-
-            return testresource.testFunction(testParameter: "testValue", testParameter2: 1, testParameter3: true, testParameter4: 1.5, testParameter5: ["testValue1", "testValue2"], testParameter6: [1, 2], testParameter7: [true, false], testParameter8: [1.1, 2.2])
-        }`
-            );
-        });
+        await expect(
+            invoker.invoke(target, "call", [{ name: "value", value: "root" }]),
+        ).rejects.toThrow("Nested Resource");
+    });
+    it("rejects a nested remote invocation before making an HTTP request", async () => {
+        const fetcher = vi.fn();
+        const invoker = new CombinationResourceInvoker(
+            undefined,
+            undefined,
+            fetcher as typeof fetch,
+        );
+        const remote = resource();
+        remote.metadata.baseUrl = "https://peer.example";
+        const root = resource(
+            async () =>
+                invoker.invoke(remote, "call", [
+                    { name: "value", value: "nested" },
+                ]) as Promise<string>,
+        );
+        await expect(
+            invoker.invoke(root, "call", [{ name: "value", value: "root" }]),
+        ).rejects.toThrow("Nested Resource");
+        expect(fetcher).not.toHaveBeenCalled();
+    });
+    it("validates output before returning a successful invocation", async () => {
+        const target = resource();
+        target.functions[0].exec = async () => 17;
+        await expect(
+            new CombinationResourceInvoker().invoke(target, "call", [
+                { name: "value", value: "input" },
+            ]),
+        ).rejects.toThrow("declared type");
     });
 });

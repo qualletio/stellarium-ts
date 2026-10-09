@@ -1,74 +1,72 @@
-import { verifyData } from "@/crypto/utils.js";
-import { Database } from "sqlite";
-
+import { verifyData } from "../crypto/utils.js";
+import type { Database } from "sqlite";
 export interface Peer {
     baseUrl: string;
     name: string;
     publicKey: string;
 }
-
 export class PeerRepository {
     constructor(private readonly db: Database) {}
-
     async create(peer: Peer): Promise<void> {
-
-        // Check if the peer already exists
-        const existingPeer = await this.db.get(
-            'SELECT * FROM peer WHERE base_url = ?',
-            [peer.baseUrl, peer.name]
-        );
-
-        if (existingPeer) {
-            return;
-        }
-
-        const createdAt = new Date().toISOString();
+        const now = new Date().toISOString();
         await this.db.run(
-            'INSERT INTO peer (base_url, name, public_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-            [peer.baseUrl, peer.name, createdAt, createdAt]
+            "INSERT OR IGNORE INTO peer(base_url,name,public_key,created_at,updated_at) VALUES(?,?,?,?,?)",
+            peer.baseUrl,
+            peer.name,
+            peer.publicKey,
+            now,
+            now,
         );
     }
-
-    async createIfNotExists(peer: Peer, signature: string, expiry: string): Promise<void> {
-
-        const existingPeer = await this.db.get(
-            'SELECT * FROM peer WHERE base_url = ?',
-            [peer.baseUrl, peer.name]
-        );
-
-        // If the peer already exists, verify the signature before updating.
-        if (existingPeer) {
-            if (verifyData({ ...peer, expiry }, existingPeer.publicKey, signature) && new Date(expiry) > new Date()) {
-                await this.db.run('UPDATE peer SET base_url = ?, name = ?, updated_at = ? WHERE public_key = ?', [peer.baseUrl, peer.name, new Date().toISOString(), peer.publicKey]);
-                return;
-            }
-            return;
+    async createIfNotExists(
+        peer: Peer,
+        signature: string,
+        expiry: string,
+    ): Promise<boolean> {
+        const timestamp = Date.parse(expiry);
+        if (!Number.isFinite(timestamp) || timestamp <= Date.now())
+            return false;
+        const existing = await this.getPeerByPublicKey(peer.publicKey);
+        try {
+            if (
+                !verifyData(
+                    {
+                        baseUrl: peer.baseUrl,
+                        name: peer.name,
+                        publicKey: peer.publicKey,
+                        expiry,
+                    },
+                    existing?.publicKey ?? peer.publicKey,
+                    signature,
+                )
+            )
+                return false;
+        } catch {
+            return false;
         }
-
-        await this.create(peer);
+        if (existing)
+            await this.db.run(
+                "UPDATE peer SET base_url=?,name=?,updated_at=? WHERE public_key=?",
+                peer.baseUrl,
+                peer.name,
+                new Date().toISOString(),
+                peer.publicKey,
+            );
+        else await this.create(peer);
+        return true;
     }
-
     async deleteAll(): Promise<void> {
-        await this.db.run('DELETE FROM peer');
+        await this.db.run("DELETE FROM peer");
     }
-
     async getPeerList(): Promise<Peer[]> {
-        const results = await this.db.all('SELECT * FROM peer');
-
-        return results.map(result => ({
-            baseUrl: result.base_url,
-            name: result.name,
-            publicKey: result.public_key,
-        }));
+        return this.db.all(
+            "SELECT base_url AS baseUrl,name,public_key AS publicKey FROM peer",
+        );
     }
-
     async getPeerByPublicKey(publicKey: string): Promise<Peer | undefined> {
-        const result = await this.db.get('SELECT * FROM peer WHERE public_key = ?', [publicKey]);
-
-        if (result) {
-            return result;
-        }
-
-        return undefined;
+        return this.db.get(
+            "SELECT base_url AS baseUrl,name,public_key AS publicKey FROM peer WHERE public_key=?",
+            publicKey,
+        );
     }
 }

@@ -1,0 +1,36 @@
+{
+  "deploymentId": "stellarium-sip1-sepolia-example",
+  "chainId": 84532,
+  "usdc": "0x0000000000000000000000000000000000000001",
+  "chainlinkEthUsdFeed": "0x0000000000000000000000000000000000000002",
+  "baseGasOracle": "0x420000000000000000000000000000000000000F",
+  "vrfCoordinator": "0x0000000000000000000000000000000000000003",
+  "vrfKeyHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+  "vrfSubscriptionId": "1",
+  "stewards": [
+    "0x0000000000000000000000000000000000000011",
+    "0x0000000000000000000000000000000000000012",
+    "0x0000000000000000000000000000000000000013",
+    "0x0000000000000000000000000000000000000014",
+    "0x0000000000000000000000000000000000000015"
+  ],
+  "initialSeeds": [
+    "0x0000000000000000000000000000000000000011",
+    "0x0000000000000000000000000000000000000012",
+    "0x0000000000000000000000000000000000000013"
+  ],
+  "parameters": {
+    "minimumRelayStakeUsdc": "1000000",
+    "minimumArbitratorStakeUsdc": "1000000",
+    "arbitrationFeeUsdc": "1000000",
+    "reputationCoefficients": ["1", "1", "1", "1", "1", "100"],
+    "feeOverheadGas": "100000",
+    "transactionOverheadBytes": "128",
+    "maximumGasPriceWei": "200000000000",
+    "vrfConfirmations": 3,
+    "vrfCallbackGasLimit": 300000,
+    "votingDelaySeconds": "86400",
+    "votingPeriodSeconds": "259200",
+    "quorumBps": "2000"
+  }
+}

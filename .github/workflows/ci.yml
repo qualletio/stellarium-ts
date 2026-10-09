@@ -35,8 +35,28 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Compile contracts and check size
+        run: pnpm contracts:build
+
+      - name: Typecheck implementation and tests
+        run: pnpm typecheck
+
       - name: Build
         run: pnpm build
+
+      - name: Verify protocol vectors
+        run: pnpm vectors:check
+
+      - name: Contract tests
+        run: pnpm contracts:test
+
+      - name: Local deployment plan
+        run: pnpm deploy:plan
 
       - name: Test
         run: pnpm test

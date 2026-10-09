@@ -1,0 +1,15 @@
+[profile.default]
+src = "contracts/src"
+test = "contracts/test"
+script = "contracts/script"
+out = "build/foundry"
+cache_path = "build/foundry-cache"
+solc = "scripts/solc-wrapper.mjs"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+code_size_limit = 200000
+remappings = ["@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/", "@openzeppelin/contracts-upgradeable/=node_modules/@openzeppelin/contracts-upgradeable/"]
+[fuzz]
+runs = 256

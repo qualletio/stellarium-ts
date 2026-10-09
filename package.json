@@ -1,57 +1,88 @@
 {
-  "name": "stellarium-ts",
-  "version": "0.1.0",
-  "description": "A Stellarium Node in TypeScript.",
-  "homepage": "https://github.com/qualletio/stellarium-ts#readme",
-  "bugs": {
-    "url": "https://github.com/qualletio/stellarium-ts/issues"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/qualletio/stellarium-ts.git"
-  },
-  "type": "module",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
+    "name": "stellarium-ts",
+    "version": "0.1.0",
+    "description": "A Stellarium Node in TypeScript.",
+    "homepage": "https://github.com/qualletio/stellarium-ts#readme",
+    "bugs": {
+        "url": "https://github.com/qualletio/stellarium-ts/issues"
     },
-    "./package.json": "./package.json"
-  },
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "files": [
-    "dist"
-  ],
-  "scripts": {
-    "build": "rm -rf dist && tsc",
-    "prepack": "pnpm build",
-    "start": "node dist/server.js",
-    "dev": "node --watch src/server.ts",
-    "test": "vitest --passWithNoTests"
-  },
-  "engines": {
-    "node": ">=20"
-  },
-  "keywords": [
-    "decentralized",
-    "stellarium",
-    "requestscript"
-  ],
-  "author": "Christopher Poulsen <christopher.poulsen@quallet.io>",
-  "license": "ISC",
-  "packageManager": "pnpm@10.20.0",
-  "devDependencies": {
-    "@types/node": "^26.6.4",
-    "typescript": "^7.0.2",
-    "vite": "^8.3.3",
-    "vitest": "^4.1.11"
-  },
-  "dependencies": {
-    "dotenv": "^18.0.5",
-    "fastify": "^5.12.5",
-    "requestscript": "^1.0.5",
-    "sqlite": "^5.1.1",
-    "sqlite3": "^6.0.1"
-  }
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/qualletio/stellarium-ts.git"
+    },
+    "type": "module",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        },
+        "./package.json": "./package.json",
+        "./sdk": {
+            "types": "./dist/sdk/index.d.ts",
+            "default": "./dist/sdk/index.js"
+        },
+        "./protocol": {
+            "types": "./dist/protocol/index.d.ts",
+            "default": "./dist/protocol/index.js"
+        }
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "files": [
+        "dist"
+    ],
+    "scripts": {
+        "build": "rm -rf dist && tsc",
+        "prepack": "pnpm build",
+        "start": "node dist/server.js",
+        "dev": "node --watch src/server.ts",
+        "test": "vitest run",
+        "lint": "eslint . --fix",
+        "format": "prettier --write .",
+        "contracts:build": "node scripts/compile-contracts.mjs",
+        "contracts:test": "forge test",
+        "deploy:plan": "node scripts/deploy.mjs --config docs/deployment.example.json",
+        "check": "pnpm typecheck && pnpm test && pnpm contracts:build && pnpm build && pnpm vectors:check && pnpm contracts:test",
+        "vectors:check": "node scripts/protocol-vectors.mjs --check",
+        "typecheck": "tsc -p tsconfig.test.json"
+    },
+    "engines": {
+        "node": ">=20"
+    },
+    "keywords": [
+        "decentralized",
+        "stellarium",
+        "requestscript"
+    ],
+    "author": "Christopher Poulsen <christopher.poulsen@quallet.io>",
+    "license": "ISC",
+    "packageManager": "pnpm@10.20.0",
+    "devDependencies": {
+        "@eslint/js": "^10.0.1",
+        "@openzeppelin/contracts": "^5.6.1",
+        "@openzeppelin/contracts-upgradeable": "^5.6.1",
+        "@types/node": "^26.6.4",
+        "@typescript/native": "npm:typescript@^7.0.2",
+        "@typescript-eslint/eslint-plugin": "^8.71.1",
+        "@typescript-eslint/parser": "^8.71.1",
+        "eslint": "^10.12.0",
+        "eslint-config-prettier": "^10.1.8",
+        "eslint-plugin-prettier": "^5.5.6",
+        "globals": "^17.13.0",
+        "prettier": "^3.9.9",
+        "solc": "0.8.30",
+        "typescript": "npm:@typescript/typescript6@^6.0.2",
+        "typescript-eslint": "^8.71.1",
+        "vite": "^8.3.3",
+        "vitest": "^4.1.11"
+    },
+    "dependencies": {
+        "dotenv": "^18.0.5",
+        "fastify": "^5.12.5",
+        "requestscript": "1.0.5",
+        "sqlite": "^5.1.1",
+        "sqlite3": "^6.0.1",
+        "viem": "^2.57.4",
+        "zod": "^4.6.5"
+    }
 }

@@ -1,0 +1,151 @@
+{
+  "canonicalizationVersion": 1,
+  "requestscriptVersion": "1.0.5",
+  "domain": {
+    "name": "Stellarium",
+    "version": "1",
+    "chainId": 84532,
+    "verifyingContract": "0x0000000000000000000000000000000000000010"
+  },
+  "source": "request Forecast { const weather: example.Weather return weather.forecast(city: \"Oslo\") }",
+  "requestHash": "0x6a5fe456ec2508ab5021d5941a5075e95ca1a495b129f144f42e665ab1d252ca",
+  "parameters": [
+    {
+      "name": "city",
+      "value": "Oslo"
+    }
+  ],
+  "parametersHash": "0x4dcda0849f23e8fc202a87a0faed3ceb7c3023098eeb66f1cb3be819aeebe997",
+  "values": [
+    {
+      "value": null,
+      "canonicalJson": "null",
+      "hash": "0xefbde2c3aee204a69b7696d4b10ff31137fe78e3946306284f806e2dfc68b805"
+    },
+    {
+      "value": {
+        "b": 2,
+        "a": "hello"
+      },
+      "canonicalJson": "{\"a\":\"hello\",\"b\":2}",
+      "hash": "0xe4ff94b61620afe24d7e3a35d1a880272c0cb4feee8dba3f80ce25da77d5c397"
+    },
+    {
+      "value": [
+        "12",
+        true
+      ],
+      "canonicalJson": "[\"12\",true]",
+      "hash": "0x126900875c26b8351c6b0a3e0378da58eeafdbdfaa70353aa44334bd4f20966b"
+    }
+  ],
+  "signatures": [
+    {
+      "primaryType": "RequestAuthorization",
+      "message": {
+        "protocolVersion": 1,
+        "requestId": "0x72859a6ae50aa97f593f23df1c78bb1fd78cfc493fcef64159d6486223196833",
+        "caller": "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf",
+        "budgetUsdc": "10000000",
+        "requestHash": "0x6a5fe456ec2508ab5021d5941a5075e95ca1a495b129f144f42e665ab1d252ca",
+        "executionAuthority": "0x1efF47bc3a10a45D4B230B5d10E37751FE6AA718",
+        "issuedAt": "1791547200",
+        "expiresAt": "1791550800",
+        "nonce": "9007199254740993"
+      },
+      "structHash": "0x3902ea726a3b20707667d6abd8f7195ea19202c12fc5671cbe91768231dd4253",
+      "typedHash": "0x31c79fbf3e034328541b9f5ff0d4d37a89cf97ab3f27f120d3bd7ad53bc841c7",
+      "signedBy": "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf",
+      "signature": "0x65f0f6b01b85f92ebcdcfe9da1483e2b4ec1c39acb0cf7c8adf3dc0e951217590259dbe3eaf4973006997ea35f85fd735373d8cfec37a4baf55e3249911b61741c"
+    },
+    {
+      "primaryType": "InvocationGrant",
+      "message": {
+        "protocolVersion": 1,
+        "requestId": "0x72859a6ae50aa97f593f23df1c78bb1fd78cfc493fcef64159d6486223196833",
+        "authorizationHash": "0x31c79fbf3e034328541b9f5ff0d4d37a89cf97ab3f27f120d3bd7ad53bc841c7",
+        "invocationNonce": "0x7ab1577440dd7bedf920cb6de2f9fc6bf7ba98c78c85a3fa1f8311aac95e1759",
+        "providerPaymentIdentity": "0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF",
+        "resourceId": "0x915f28c4adf6e3b848b9f6bfd7acb012a2f8bae40cdf15df9b44d3f5c560d71e",
+        "manifestRevision": "1",
+        "functionNameHash": "0x513a6d19ef4581c264d9142eb2570c36bc2b3c546d42ee41fd0b6dd71fd60a61",
+        "parametersHash": "0x4dcda0849f23e8fc202a87a0faed3ceb7c3023098eeb66f1cb3be819aeebe997",
+        "quoteId": "0x238ad53218834f943da60c8bafd36c36692dcb35e6d76bdd93202f5c04c0baff",
+        "grossPriceUsdc": "1000000",
+        "issuedAt": "1791547201",
+        "expiresAt": "1791550800"
+      },
+      "structHash": "0x93071215fa61fcdca91374f91761379ace3228c8d36e9043d680923508dd1a44",
+      "typedHash": "0x8a723bf83527c700b77bb808cdcf61564c099ec4bbb72da4ad6186b734f3ef78",
+      "signedBy": "0x1efF47bc3a10a45D4B230B5d10E37751FE6AA718",
+      "signature": "0x8508187eae219818386f91c818fd9bd80071a5c75d1be7a3d79db36285d1f6b5021482c4e66a7f9e7d0c3f0a699fa75671380aa09d0841db899f91b0998532ef1b"
+    },
+    {
+      "primaryType": "ExecutionReceipt",
+      "message": {
+        "protocolVersion": 1,
+        "receiptId": "0x083cb09a72849e6512faaeb13d1a9467c5aaaae976ef6ff7597fb61ed081e1a9",
+        "requestId": "0x72859a6ae50aa97f593f23df1c78bb1fd78cfc493fcef64159d6486223196833",
+        "authorizationHash": "0x31c79fbf3e034328541b9f5ff0d4d37a89cf97ab3f27f120d3bd7ad53bc841c7",
+        "invocationId": "0x8a723bf83527c700b77bb808cdcf61564c099ec4bbb72da4ad6186b734f3ef78",
+        "invocationGrantHash": "0x8a723bf83527c700b77bb808cdcf61564c099ec4bbb72da4ad6186b734f3ef78",
+        "manifestRevision": "1",
+        "providerPaymentIdentity": "0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF",
+        "paymentRecipient": "0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF",
+        "receiptSigner": "0xe1AB8145F7E55DC933d51a18c793F901A3A0b276",
+        "resourceId": "0x915f28c4adf6e3b848b9f6bfd7acb012a2f8bae40cdf15df9b44d3f5c560d71e",
+        "functionNameHash": "0x513a6d19ef4581c264d9142eb2570c36bc2b3c546d42ee41fd0b6dd71fd60a61",
+        "parametersHash": "0x4dcda0849f23e8fc202a87a0faed3ceb7c3023098eeb66f1cb3be819aeebe997",
+        "responseHash": "0x7f8b6b088b6d74c2852fc86c796dca07b44eed6fb3daf5e6b59f7c364db14528",
+        "quoteId": "0x238ad53218834f943da60c8bafd36c36692dcb35e6d76bdd93202f5c04c0baff",
+        "grossPriceUsdc": "1000000",
+        "relay": "0x6813Eb9362372EEF6200f3b1dbC3f819671cBA69",
+        "relayFeeUsdc": "100000",
+        "executedAt": "1791547202",
+        "issuedAt": "1791547202"
+      },
+      "structHash": "0x47b7ceb492b75d8e02c0ef14421166549da36cd848e40a675e870dfb1ced02e3",
+      "typedHash": "0x07016b249f272083203c0cd3ebc9be9da9ebe67a8b8430c156d7a146e77b3732",
+      "signedBy": "0xe1AB8145F7E55DC933d51a18c793F901A3A0b276",
+      "signature": "0x45ea38b9210ffa76c990ea38308eb9fac9217d65cd0ebebca4a21a9a5e2228d31cd242dff18264210936b89df71d5df68eb291f681bb733a0e312b188cb936431c"
+    },
+    {
+      "primaryType": "Acceptance",
+      "message": {
+        "protocolVersion": 1,
+        "receiptHash": "0x07016b249f272083203c0cd3ebc9be9da9ebe67a8b8430c156d7a146e77b3732",
+        "issuedAt": "1791547203"
+      },
+      "structHash": "0x62654ebcdfe61d23dd5b6b081e2cb3d0c1085616408a42e15b914720684953fb",
+      "typedHash": "0xaf8dacedcbb07ad782864309ea4eeaaa70001a789daeb9763a5a762d9f0c1e97",
+      "signedBy": "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf",
+      "signature": "0x4bf2e334749c1a2ce490e29bd9ac582c697bedaad02a3c22aa327a9bb631294e7d21993e42b4f37e2e3e315b15ae7158c988622370ddecc645b8dbea31995c191c"
+    },
+    {
+      "primaryType": "MonetizationManifest",
+      "message": {
+        "protocolVersion": 1,
+        "resourceId": "0x915f28c4adf6e3b848b9f6bfd7acb012a2f8bae40cdf15df9b44d3f5c560d71e",
+        "manifestRevision": "1",
+        "paymentIdentity": "0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF",
+        "paymentRecipient": "0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF",
+        "receiptSigner": "0xe1AB8145F7E55DC933d51a18c793F901A3A0b276",
+        "evidenceEncryptionPublicKey": "X25519-key-test-vector",
+        "usdc": "0xE57bFE9F44b819898F47BF37E5AF72a0783e1141",
+        "quoteRegistryId": "0xd1adaede68d344519025e2ff574650cd99d3830fe6d274c7a7843cdc00e17938",
+        "functions": [
+          {
+            "name": "forecast",
+            "grossPriceUsdc": "1000000",
+            "quoteId": "0x238ad53218834f943da60c8bafd36c36692dcb35e6d76bdd93202f5c04c0baff"
+          }
+        ],
+        "issuedAt": "1791547200"
+      },
+      "structHash": "0x9cbac0a0948ff1ca3d858778fe8b077d8db5e8313a7509b94a71114cf9dc2aec",
+      "typedHash": "0x2c1aa0c279d41b6a09d38acea90279b3f12da217530db8279a6aea0040bcc457",
+      "signedBy": "0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF",
+      "signature": "0x5af9c5dfffa02b5a533b3f2815455f0f57e0f88b0f1f0197088486c72d4a20097b8d9c96a91f17fa1c716b38b6b05a879c2eb4993a811de97669c04cbfb8a9071c"
+    }
+  ]
+}
