@@ -134,7 +134,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         }
 
         const result = await options.service.resourceInvoker.invoke(resource, resourceRequest.functionName, resourceRequest.parameters);
-        
+
         return { returnValue: result };
     });
 

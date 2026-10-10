@@ -14,16 +14,19 @@ export class CombinationResourceInvoker implements ResourceInvoker {
      */
     async invoke(resource: Resource, functionName: string, parameters: ResourceFunctionCallParameter[]): Promise<any> {
         if (resource.metadata.baseUrl) {
-            const source = this.buildQuery(resource, functionName, parameters);
-
             const url = resource.metadata.baseUrl as string | undefined;
             if (!url) {
                 throw new Error(`Resource ${resource.name} does not have a url`);
             }
 
-            const result = await fetch(`${url}/v1/run`, {
+            const result = await fetch(`${url}/v1/run/resource`, {
                 method: 'POST',
-                body: JSON.stringify({ source }),
+                body: JSON.stringify({ 
+                    resourcePath: resource.path, 
+                    resourceName: resource.name, 
+                    functionName, 
+                    parameters 
+                }),
                 headers: {
                     'Content-Type': 'application/json',
                 },
@@ -43,26 +46,5 @@ export class CombinationResourceInvoker implements ResourceInvoker {
 
             return await fn.exec(parameters);
         }
-    }
-
-    buildQuery(resource: Resource, functionName: string, parameters: ResourceFunctionCallParameter[]): string {
-        const resourceVariableName = resource.name.toLowerCase();
-
-        return `
-        request Invoke${resource.name}${functionName} {
-            const ${resourceVariableName} = ${resource.path}.${resource.name}
-
-            return ${resourceVariableName}.${functionName}(${parameters.map(p => `${p.name}: ${this.buildParameterValue(p)}`).join(', ')})
-        }`.trim();
-    }
-
-    buildParameterValue(parameter: ResourceFunctionCallParameter): unknown {
-        if (typeof parameter.value === 'string') {
-            return `"${parameter.value}"`;
-        }
-        if (Array.isArray(parameter.value)) {
-            return `[${parameter.value.map(v => this.buildParameterValue({ name: parameter.name, value: v })).join(', ')}]`;
-        }
-        return parameter.value;
     }
 }
