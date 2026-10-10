@@ -1,5 +1,5 @@
 import { Resource, ResourceFunctionCallParameter } from "requestscript";
-import { CombinationResourceInvoker } from "./invoker.js";
+import { CombinationResourceInvoker } from "../../resource/invoker.js";
 import { describe, expect, it } from "vitest";
 
 describe('CombinationResourceInvoker', () => {

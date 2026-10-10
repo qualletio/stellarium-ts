@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { signData, verifyData } from "./utils.js";
+import { signData, verifyData } from "../../crypto/utils.js";
 import { describe, expect, test } from "vitest";
 
 export interface Base64KeyPair {

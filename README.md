@@ -139,7 +139,12 @@ Resources are bound with `const <name>: <path>.<ResourceName>` and called with n
 
 ## Developing
 
-This repository uses `pnpm`.
+This repository uses `pnpm` and is organized as a monorepo.
+
+### Modules
+
+- packages/stellarium-ts: the main package for stellarium-ts, helps run a Stellarium node using Typescript.
+- apps/operator: the centralized operator that interacts with the Solana blockchain and stores receipt records.
 
 ```sh
 pnpm install
