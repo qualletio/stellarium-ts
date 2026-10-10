@@ -33,7 +33,6 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             const data = await result.json() as { returnValue: any };
             return data.returnValue;
         } else {
-
             const fn = resource.functions.find(f => f.name === functionName);
             if (!fn) {
                 throw new Error(`Function ${functionName} not found in resource ${resource.name}`);

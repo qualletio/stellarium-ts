@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify'
 import type { Service } from './service.js';
-import { interpretParsed, parseScript, type Resource, type ResourceFunction } from 'requestscript';
+import { interpretParsed, parseScript, ResourceFunctionCallParameter, type Resource, type ResourceFunction } from 'requestscript';
 import { ResourceWithBaseUrl } from './resource/repository.js';
 import { Peer } from './peer/repository.js';
 import { verifyData } from './crypto/utils.js';
@@ -19,6 +19,18 @@ interface ResourceRequest {
     signature: string;
     resources: ResourceWithBaseUrl[];
     expiry: string;
+}
+
+interface ResourceRequestFunctionCallParameter {
+    name: string;
+    value: unknown;
+}
+
+interface ResourceRunRequest {
+    resourcePath: string;
+    resourceName: string;
+    functionName: string;
+    parameters: ResourceRequestFunctionCallParameter[];
 }
 
 /**
@@ -107,6 +119,19 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, option
         } catch (error) {
             reply.status(500).send({ error: 'Internal server error' });
         }
+    });
+
+    fastify.post('/run/resource', async (request, reply) => {
+        const resourceRequest = request.body as ResourceRunRequest;
+        
+        const resource = await options.service.resourceRepository.getInternalResource(resourceRequest.resourcePath, resourceRequest.resourceName);
+        if (!resource) {
+            return reply.status(400).send({ error: 'Resource not found' });
+        }
+
+        const result = await options.service.resourceInvoker.invoke(resource, resourceRequest.functionName, resourceRequest.parameters);
+        
+        return { returnValue: result };
     });
 
     // End Run Routes
