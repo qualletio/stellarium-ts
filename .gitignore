@@ -42,3 +42,19 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Rust
+debug/
+target/
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
+
+# Solana
+.keys/
+.learning/
+proof-artifacts/
+.local-ledger/
+
+# Turbo
+.turbo

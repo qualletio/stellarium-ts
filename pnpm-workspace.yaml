@@ -1,2 +1,10 @@
+packages:
+  - apps/*
+  - packages/*
+
+allowBuilds:
+  sqlite3: true
+
 onlyBuiltDependencies:
+  - esbuild
   - sqlite3
