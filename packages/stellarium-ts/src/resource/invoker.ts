@@ -14,7 +14,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
      */
     async invoke(resource: Resource, functionName: string, parameters: ResourceFunctionCallParameter[]): Promise<any> {
         if (resource.metadata.baseUrl) {
-            const query = this.buildQuery(resource, functionName, parameters);
+            const source = this.buildQuery(resource, functionName, parameters);
 
             const url = resource.metadata.baseUrl as string | undefined;
             if (!url) {
@@ -23,7 +23,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
 
             const result = await fetch(`${url}/v1/run`, {
                 method: 'POST',
-                body: JSON.stringify({ query }),
+                body: JSON.stringify({ source }),
                 headers: {
                     'Content-Type': 'application/json',
                 },
