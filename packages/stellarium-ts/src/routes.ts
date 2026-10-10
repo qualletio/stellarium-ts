@@ -33,6 +33,10 @@ interface ResourceRunRequest {
     parameters: ResourceRequestFunctionCallParameter[];
 }
 
+interface RunRequest {
+    source: string;
+}
+
 /**
  * Encapsulates the routes
  * @param fastify Encapsulated Fastify Instance
@@ -101,10 +105,10 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     // Start Run Routes
 
     fastify.post('/run', async (request, reply) => {
-        const source: string = request.body as string;
+        const runRequest = request.body as RunRequest;
         
         try {
-            const script = parseScript(source);
+            const script = parseScript(runRequest.source);
 
             if (script.declaration.kind !== 'request') {
                 return reply.status(400).send({ error: 'Invalid script' });
