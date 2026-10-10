@@ -38,7 +38,7 @@ interface ResourceRunRequest {
  * @param fastify Encapsulated Fastify Instance
  * @param options plugin options, refer to https://fastify.dev/docs/latest/Reference/Plugins/#plugin-options
  */
-const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, options) {
+const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
 
     // Start Meta Routes
 
@@ -130,12 +130,12 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, option
         }
 
         const result = await options.service.resourceInvoker.invoke(resource, resourceRequest.functionName, resourceRequest.parameters);
-        
+
         return { returnValue: result };
     });
 
     // End Run Routes
-}
+};
 
 // ESM
 export default routes;
