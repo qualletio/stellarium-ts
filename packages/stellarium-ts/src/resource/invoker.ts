@@ -23,7 +23,10 @@ export class CombinationResourceInvoker implements ResourceInvoker {
 
             const result = await fetch(`${url}/v1/run`, {
                 method: 'POST',
-                body: query,
+                body: JSON.stringify({ query }),
+                headers: {
+                    'Content-Type': 'application/json',
+                },
             });
 
             if (!result.ok) {
