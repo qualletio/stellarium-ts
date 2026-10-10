@@ -44,6 +44,14 @@ export class ResourceRepository {
         return true;
     }
 
+    async getResourceByName(name: string): Promise<Resource | undefined> {
+        return this.resources.find(r => r.name === name);
+    }
+
+    async getInternalResource(path: string, name: string): Promise<Resource | undefined> {
+        return this.resources.find(r => r.path === path && r.name === name);
+    }
+
     async getResource(key: string): Promise<Resource | undefined> {
         const resource = this.resources.find(r => `${r.path}.${r.name}` === key);
         if (resource) {
