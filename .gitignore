@@ -58,3 +58,6 @@ proof-artifacts/
 
 # Turbo
 .turbo
+
+# RequestScript
+requestscript.db

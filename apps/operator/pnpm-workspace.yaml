@@ -1,5 +1,0 @@
-allowBuilds:
-  esbuild: true
-permissions:
-  drizzle-kit:
-    skills: true

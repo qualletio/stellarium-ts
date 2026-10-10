@@ -13,7 +13,6 @@
   "author": "",
   "license": "ISC",
   "type": "module",
-  "packageManager": "pnpm@12.11.2",
   "devDependencies": {
     "@types/pg": "^8.23.1",
     "drizzle-kit": "1.0.0-rc.4",
