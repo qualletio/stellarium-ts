@@ -3,8 +3,15 @@ packages:
   - packages/*
 
 allowBuilds:
+  esbuild: true
   sqlite3: true
 
 onlyBuiltDependencies:
   - esbuild
   - sqlite3
+
+minimumReleaseAge: 0
+
+permissions:
+  drizzle-kit:
+    skills: true

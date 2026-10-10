@@ -41,7 +41,6 @@
   ],
   "author": "Christopher Poulsen <christopher.poulsen@quallet.io>",
   "license": "ISC",
-  "packageManager": "pnpm@12.11.2",
   "devDependencies": {
     "@types/node": "^26.6.4",
     "turbo": "^2.11.7",
