@@ -33,12 +33,16 @@ interface ResourceRunRequest {
     parameters: ResourceRequestFunctionCallParameter[];
 }
 
+interface RunRequest {
+    source: string;
+}
+
 /**
  * Encapsulates the routes
  * @param fastify Encapsulated Fastify Instance
  * @param options plugin options, refer to https://fastify.dev/docs/latest/Reference/Plugins/#plugin-options
  */
-const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, options) {
+const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
 
     // Start Meta Routes
 
@@ -101,10 +105,10 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, option
     // Start Run Routes
 
     fastify.post('/run', async (request, reply) => {
-        const source: string = request.body as string;
+        const runRequest = request.body as RunRequest;
         
         try {
-            const script = parseScript(source);
+            const script = parseScript(runRequest.source);
 
             if (script.declaration.kind !== 'request') {
                 return reply.status(400).send({ error: 'Invalid script' });
@@ -135,7 +139,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, option
     });
 
     // End Run Routes
-}
+};
 
 // ESM
 export default routes;
