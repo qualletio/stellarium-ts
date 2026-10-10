@@ -28,7 +28,8 @@
     "prepack": "pnpm build",
     "start": "node dist/server.js",
     "dev": "node --watch src/server.ts",
-    "test": "vitest --passWithNoTests",
+    "test": "vitest --passWithNoTests --exclude 'dist/**'",
+    "lint": "biome lint src",
     "check-types": "tsc --noEmit"
   },
   "engines": {
@@ -42,6 +43,7 @@
   "author": "Christopher Poulsen <christopher.poulsen@quallet.io>",
   "license": "ISC",
   "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
     "@types/node": "^26.6.4",
     "turbo": "^2.11.7",
     "typescript": "^7.0.2",
