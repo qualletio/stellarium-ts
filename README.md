@@ -141,6 +141,10 @@ Resources are bound with `const <name>: <path>.<ResourceName>` and called with n
 
 This repository uses `pnpm` and is organized as a monorepo.
 
+For local Solana, PostgreSQL, operator, and paid two-node testing, see the
+[local end-to-end runbook](docs/local-e2e.md). It includes the current source
+blockers, local identity and secret setup, and transaction/balance verification.
+
 ### Modules
 
 - packages/stellarium-ts: the main package for stellarium-ts, helps run a Stellarium node using Typescript.

@@ -1,8 +1,9 @@
-import type { FastifyPluginAsync } from 'fastify'
-import type { Service } from './service.js';
-import { interpretParsed, parseScript, type Resource, type ResourceFunction } from 'requestscript';
-import { ResourceWithBaseUrl } from './resource/repository.js';
+import type { FastifyPluginAsync } from 'fastify';
+import { interpretParsed, parseScript } from 'requestscript';
 import { Peer } from './peer/repository.js';
+import { PaymentVoucher } from './resource/invoker.js';
+import { StellariumResource, StellariumResourceFunction } from './resource/repository.js';
+import type { Service } from './service.js';
 import { verifyData } from './crypto/utils.js';
 
 interface RouteOptions {
@@ -17,8 +18,25 @@ interface PeerRequest extends Peer {
 interface ResourceRequest {
     publicKey: string;
     signature: string;
-    resources: ResourceWithBaseUrl[];
+    resources: StellariumResource[];
     expiry: string;
+}
+
+interface ResourceRequestFunctionCallParameter {
+    name: string;
+    value: unknown;
+}
+
+interface ResourceRunRequest {
+    resourcePath: string;
+    resourceName: string;
+    functionName: string;
+    parameters: ResourceRequestFunctionCallParameter[];
+    paymentVoucher?: PaymentVoucher;
+}
+
+interface RunRequest {
+    source: string;
 }
 
 /**
@@ -26,7 +44,7 @@ interface ResourceRequest {
  * @param fastify Encapsulated Fastify Instance
  * @param options plugin options, refer to https://fastify.dev/docs/latest/Reference/Plugins/#plugin-options
  */
-const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, options) {
+const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
 
     // Start Meta Routes
 
@@ -52,15 +70,20 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, option
     fastify.get('/resources', async (request, reply) => {
         const resources = await options.service.resourceRepository.getAllResources();
         return {
-            resources: resources.map((resource: ResourceWithBaseUrl) => ({
+            resources: resources.map((resource: StellariumResource) => ({
                 path: resource.path,
                 name: resource.name,
-                functions: resource.functions.map((fn: ResourceFunction) => ({
+                functions: resource.functions.map((fn: StellariumResourceFunction) => ({
                     name: fn.name,
                     returnType: fn.returnType,
                     parameters: fn.parameters,
+                    paymentManifest: fn.paymentManifest ? ({
+                        costLamports: fn.paymentManifest.costLamports,
+                        recipientAddress: fn.paymentManifest.recipientAddress,
+                    }) : undefined,
                 })),
                 baseUrl: resource.baseUrl,
+
             })),
         }
     });
@@ -89,10 +112,10 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, option
     // Start Run Routes
 
     fastify.post('/run', async (request, reply) => {
-        const source: string = request.body as string;
+        const runRequest = request.body as RunRequest;
         
         try {
-            const script = parseScript(source);
+            const script = parseScript(runRequest.source);
 
             if (script.declaration.kind !== 'request') {
                 return reply.status(400).send({ error: 'Invalid script' });
@@ -109,8 +132,40 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, option
         }
     });
 
+    fastify.post('/run/resource', async (request, reply) => {
+        const resourceRequest = request.body as ResourceRunRequest;
+        const paymentVoucher = resourceRequest.paymentVoucher;
+
+        if (paymentVoucher) {
+            const isValid = verifyData(paymentVoucher, paymentVoucher.publicKey, paymentVoucher.signature);
+            if (!isValid) {
+                return reply.status(400).send({ error: 'Invalid payment voucher' });
+            }
+        }
+        const resource = await options.service.resourceRepository.getInternalResource(resourceRequest.resourcePath, resourceRequest.resourceName);
+        if (!resource) {
+            return reply.status(400).send({ error: 'Resource not found' });
+        }
+
+        const result = await options.service.resourceInvoker.invoke(resource, resourceRequest.functionName, resourceRequest.parameters);
+
+        // A voucher is optional. Settlement runs only after a successful invoke. Run this on a separate thread to avoid blocking the main thread.
+        if (paymentVoucher) {
+            setTimeout(async () => {
+                await options.service.operatorClient.settlePayment({
+                    voucher: paymentVoucher,
+                    resourcePath: resourceRequest.resourcePath,
+                    resourceName: resourceRequest.resourceName,
+                    parameters: resourceRequest.parameters,
+                });
+            }, 0);
+        }
+
+        return { returnValue: result };
+    });
+
     // End Run Routes
-}
+};
 
 // ESM
 export default routes;

@@ -1,11 +1,16 @@
-import type { NodePgDatabase as Database } from 'drizzle-orm/node-postgres';
+import type { Connection, PublicKey, Signer } from '@solana/web3.js';
+import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { EscrowService } from './escrow/escrowService.js';
+import { PaymentService } from './paymentService.js';
 
 export interface Service {
-    db: Database;
+    escrowService: EscrowService;
+    paymentService: PaymentService;
 }
 
-export function createService(db: Database): Service {
+export function createService(db: NodePgDatabase, escrowProgramId: PublicKey, authority: Signer, connection: Connection): Service {
     return {
-        db,
+        escrowService: new EscrowService(db, escrowProgramId, authority, connection),
+        paymentService: new PaymentService(db),
     };
 }

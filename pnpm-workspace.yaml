@@ -5,6 +5,8 @@ packages:
 allowBuilds:
   esbuild: true
   sqlite3: true
+  bufferutil: false
+  utf-8-validate: false
 
 onlyBuiltDependencies:
   - esbuild
