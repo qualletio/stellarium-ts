@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify'
 import type { Service } from './service.js';
 import { interpretParsed, parseScript, type Resource, type ResourceFunction } from 'requestscript';
-import { StellariumResource } from './resource/repository.js';
+import { StellariumResource, StellariumResourceFunction } from './resource/repository.js';
 import { Peer } from './peer/repository.js';
 import { verifyData } from './crypto/utils.js';
 
@@ -71,12 +71,17 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             resources: resources.map((resource: StellariumResource) => ({
                 path: resource.path,
                 name: resource.name,
-                functions: resource.functions.map((fn: ResourceFunction) => ({
+                functions: resource.functions.map((fn: StellariumResourceFunction) => ({
                     name: fn.name,
                     returnType: fn.returnType,
                     parameters: fn.parameters,
+                    paymentManifest: fn.paymentManifest ? ({
+                        costLamports: fn.paymentManifest.costLamports,
+                        recipientAddress: fn.paymentManifest.recipientAddress,
+                    }) : undefined,
                 })),
                 baseUrl: resource.baseUrl,
+
             })),
         }
     });
