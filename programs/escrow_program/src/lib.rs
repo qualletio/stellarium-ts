@@ -1,11 +1,11 @@
 use solana_program::{
-    account_info::{AccountInfo, next_account_info},
+    account_info::{next_account_info, AccountInfo},
     entrypoint,
     entrypoint::ProgramResult,
     program::{invoke, invoke_signed, set_return_data},
     program_error::ProgramError,
     pubkey::Pubkey,
-    sysvar::{Sysvar, rent::Rent},
+    sysvar::{rent::Rent, Sysvar},
 };
 
 use solana_sdk_ids::system_program;
@@ -15,7 +15,9 @@ entrypoint!(process_instruction);
 
 // TODO: Replace None with Some(solana_program::pubkey!("YOUR_PUBLIC_KEY"))
 // before deployment. Use the same wallet as the program's upgrade authority.
-pub const ESCROW_AUTHORITY: Option<Pubkey> = None;
+pub const ESCROW_AUTHORITY: Option<Pubkey> = Some(solana_program::pubkey!(
+    "EjmMczWqevGUXrxmoJqWKj51sjLpWpFXczWqu5Pzerxk"
+));
 pub const ESCROW_SEED: &[u8] = b"escrow";
 pub const DISCRIMINATOR: &[u8; 8] = b"ESCROW01";
 pub const ESCROW_LEN: usize = 8 + 32 + 32 + 1;

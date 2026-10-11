@@ -1,5 +1,11 @@
 # Stellarium Operator
 
+For a source-audited local setup with PostgreSQL, a Solana validator, and
+on-chain verification, see the [local end-to-end runbook](../../docs/local-e2e.md).
+This README describes intended behavior in several places (including escrow
+authorization and durable payment replay protection) that the current source
+does not yet implement. Consult the runbook's blocker list before testing.
+
 The operator creates Solana escrow accounts and submits authority-controlled SOL
 withdrawals. Its configured signer is the escrow authority and transaction fee
 payer. The deployed escrow program must have the same public key configured in
