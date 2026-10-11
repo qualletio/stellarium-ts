@@ -17,7 +17,7 @@ if (!apiToken) throw new Error('OPERATOR_API_TOKEN is required');
 const connection = new Connection(process.env.SOLANA_RPC_URL ?? 'https://api.devnet.solana.com', 'confirmed');
 
 const db = drizzle(process.env.DATABASE_URL!);
-const service = createService(db, { connection, programId: escrowProgramId, signer: privateKey });
+const service = createService(db, escrowProgramId, privateKey, connection);
 
 fastify.register(routes, { prefix: '/v1', service, apiToken });
 
