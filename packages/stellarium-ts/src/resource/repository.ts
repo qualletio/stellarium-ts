@@ -1,24 +1,66 @@
 import { verifyData } from "@/crypto/utils.js";
-import { Resource, ResourceFunctionParameter } from "requestscript";
+import { Resource, ResourceFunction, ResourceFunctionParameter } from "requestscript";
 import { Database } from "sqlite";
 import { Peer } from "@/peer/repository.js";
 
-export interface ResourceWithBaseUrl extends Resource {
+export interface StellariumResource extends Resource {
+    id: number;
     baseUrl: string;
+    functions: StellariumResourceFunction[];
+}
+
+export interface StellariumResourceFunction extends ResourceFunction {
+    id: number;
+    paymentManifest?: StellariumResourceFunctionPaymentManifest;
+}
+
+export interface StellariumResourceFunctionPaymentManifest {
+    id: number;
+    costLamports: number;
+    recipientAddress: string;
 }
 
 export class ResourceRepository {
-    constructor(private readonly db: Database, private resources: Resource[] = []) {}
+    constructor(private readonly db: Database, private resources: StellariumResource[] = []) {}
 
-    async create(resource: Resource, baseUrl: string): Promise<void> {
+    async create(resource: StellariumResource): Promise<void> {
         const createdAt = new Date().toISOString();
-        await this.db.run(
+        const result = await this.db.run(
             'INSERT INTO resources (path, name, base_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-            [resource.path, resource.name, baseUrl, createdAt, createdAt]
+            [resource.path, resource.name, resource.baseUrl, createdAt, createdAt]
         );
+
+        if (!result.changes) {
+            throw new Error('Failed to create resource');
+        }
+
+        const resourceId = result.lastID;
+
+        for (const fn of resource.functions) {
+            const functionResult = await this.db.run(
+                'INSERT INTO resource_functions (resource_id, name, return_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+                [resourceId, fn.name, fn.returnType, createdAt, createdAt]
+            );
+
+            const functionId = functionResult.lastID;
+
+            for (const parameter of fn.parameters) {
+                await this.db.run(
+                    'INSERT INTO resource_function_parameters (resource_function_id, name, parameter_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+                    [functionId, parameter.name, parameter.type, createdAt, createdAt]
+                );
+            }
+
+            if (fn.paymentManifest) {
+                await this.db.run(
+                    'INSERT INTO resource_function_payment_manifest (resource_function_id, cost_lamports, recipient_address, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+                    [functionId, fn.paymentManifest.costLamports, fn.paymentManifest.recipientAddress, createdAt, createdAt]
+                );
+            }
+        }
     }
 
-    async saveAll(resources: ResourceWithBaseUrl[], existingPeer: Peer, signature: string, expiry: string): Promise<boolean> {
+    async saveAll(resources: StellariumResource[], existingPeer: Peer, signature: string, expiry: string): Promise<boolean> {
         if (!verifyData({ resources, expiry }, existingPeer.publicKey, signature) || new Date(expiry) < new Date()) {
             return false;
         }
@@ -36,15 +78,36 @@ export class ResourceRepository {
                     'UPDATE resources SET base_url = ?, updated_at = ? WHERE path = ? AND name = ?',
                     [resource.baseUrl, new Date().toISOString(), resource.path, resource.name]
                 );
+
+                for (const fn of resource.functions) {
+                    await this.db.run(
+                        'UPDATE resource_functions SET return_type = ?, updated_at = ? WHERE resource_id = ? AND name = ?',
+                        [fn.returnType, existingResource.id, fn.name, new Date().toISOString()]
+                    );
+
+                    for (const parameter of fn.parameters) {
+                        await this.db.run(
+                            'UPDATE resource_function_parameters SET parameter_type = ? WHERE resource_function_id = ? AND name = ?',
+                            [parameter.type, fn.id, parameter.name]
+                        );
+                    }
+
+                    if (fn.paymentManifest) {
+                        await this.db.run(
+                            'UPDATE resource_function_payment_manifest SET cost_lamports = ?, recipient_address = ?, updated_at = ? WHERE resource_function_id = ?',
+                            [fn.paymentManifest.costLamports, fn.paymentManifest.recipientAddress, new Date().toISOString(), fn.id]
+                        );
+                    }
+                }
             } else {
-                await this.create(resource, resource.baseUrl);
+                await this.create(resource);
             }
         }
 
         return true;
     }
 
-    async getResourceByName(name: string): Promise<Resource | undefined> {
+    async getResourceByName(name: string): Promise<StellariumResource | undefined> {
         return this.resources.find(r => r.name === name);
     }
 
@@ -91,15 +154,16 @@ export class ResourceRepository {
             }))),
             metadata: {
                 baseUrl: result.base_url,
+                paymentManifest: await this.getResourceFunctionPaymentManifest(result.id),
             }
         }
     }
 
-    async getInternalResources(): Promise<ResourceWithBaseUrl[]> {
+    async getInternalResources(): Promise<StellariumResource[]> {
         return this.resources.map(r => ({ ...r, baseUrl: process.env.BASE_URL! }));
     }
 
-    async getExternalResources(): Promise<Resource[]> {
+    async getExternalResources(): Promise<StellariumResource[]> {
         const results = await this.db.get(
             'SELECT * FROM resources',
         );
@@ -108,18 +172,25 @@ export class ResourceRepository {
             return [];
         }
 
-        return Promise.all(results.map(async (r: any) => ({
+        return Promise.all(results.map(async (r: StellariumResource) => ({
             path: r.path,
             name: r.name,
-            functions: await Promise.all(r.resource_functions.map(async (f: any) => ({
+            functions: await Promise.all((await this.getResourceFunctions(r.id)).map(async (f: StellariumResourceFunction) => ({
+                id: f.id,
                 name: f.name,
-                returnType: f.return_type,
+                returnType: f.returnType,
                 parameters: await this.getResourceParameters(f.id),
+                // The ExternalResourceInvoker will handle the execution of the function
+                exec: async (): Promise<void> => {
+                    return void 0;
+                },
+                paymentManifest: await this.getResourceFunctionPaymentManifest(f.id),
             }))),
-            metadata: {
-                baseUrl: r.base_url,
-            }
         })));
+    }
+
+    async getResourceFunctions(resourceId: number): Promise<StellariumResourceFunction[]> {
+        return (await this.db.all('SELECT * FROM resource_functions WHERE resource_id = ?', [resourceId])) as StellariumResourceFunction[];
     }
 
     async getResourceParameters(resourceFunctionId: number): Promise<ResourceFunctionParameter[]> {
@@ -129,16 +200,26 @@ export class ResourceRepository {
         }));
     }
 
-    async getAllResources(): Promise<ResourceWithBaseUrl[]> {
+    async getResourceFunctionPaymentManifest(resourceFunctionId: number): Promise<StellariumResourceFunctionPaymentManifest | undefined> {
+        const result = await this.db.get('SELECT * FROM resource_function_payment_manifest WHERE resource_function_id = ?', [resourceFunctionId]);
+        if (!result) {
+            return undefined;
+        }
+        return {
+            id: result.id,
+            costLamports: result.cost_lamports as number,
+            recipientAddress: result.recipient_address as string,
+        } as StellariumResourceFunctionPaymentManifest;
+    }
+
+    async getAllResources(): Promise<StellariumResource[]> {
         const externalResources = await this.getExternalResources();
 
-        let resources: ResourceWithBaseUrl[] = [];
+        let resources: StellariumResource[] = [];
         for (const resource of Object.values(this.resources)) {
             resources.push({ ...resource, baseUrl: process.env.BASE_URL! });
         }
-        for (const resource of externalResources) {
-            resources.push({ ...resource, baseUrl: resource.metadata.baseUrl as string });
-        }
+        resources.push(...externalResources);
         return resources;
     }
 }

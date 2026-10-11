@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify'
 import type { Service } from './service.js';
-import { interpretParsed, parseScript, ResourceFunctionCallParameter, type Resource, type ResourceFunction } from 'requestscript';
-import { ResourceWithBaseUrl } from './resource/repository.js';
+import { interpretParsed, parseScript, type Resource, type ResourceFunction } from 'requestscript';
+import { StellariumResource } from './resource/repository.js';
 import { Peer } from './peer/repository.js';
 import { verifyData } from './crypto/utils.js';
 
@@ -17,7 +17,7 @@ interface PeerRequest extends Peer {
 interface ResourceRequest {
     publicKey: string;
     signature: string;
-    resources: ResourceWithBaseUrl[];
+    resources: StellariumResource[];
     expiry: string;
 }
 
@@ -68,7 +68,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     fastify.get('/resources', async (request, reply) => {
         const resources = await options.service.resourceRepository.getAllResources();
         return {
-            resources: resources.map((resource: ResourceWithBaseUrl) => ({
+            resources: resources.map((resource: StellariumResource) => ({
                 path: resource.path,
                 name: resource.name,
                 functions: resource.functions.map((fn: ResourceFunction) => ({

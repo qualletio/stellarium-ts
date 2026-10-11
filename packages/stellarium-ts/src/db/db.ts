@@ -59,6 +59,17 @@ export async function createTables() {
 
             FOREIGN KEY (resource_function_id) REFERENCES resource_function(id),
         );
+
+        CREATE TABLE IF NOT EXISTS resource_function_payment_manifest (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            resource_function_id INTEGER NOT NULL,
+            cost_lamports INTEGER NOT NULL,
+            recipient_address TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+
+            FOREIGN KEY (resource_function_id) REFERENCES resource_function(id),
+        );
     `);
 }
 

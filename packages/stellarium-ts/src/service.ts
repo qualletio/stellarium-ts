@@ -2,7 +2,7 @@ import { Resource, ResourceInvoker, ResourceResolver } from "requestscript";
 import db from "./db/db.js";
 import { PeerRepository } from "./peer/repository.js";
 import { CombinationResourceResolver } from "./resource/resolver.js";
-import { ResourceRepository } from "./resource/repository.js";
+import { ResourceRepository, type StellariumResource } from "./resource/repository.js";
 import { CombinationResourceInvoker } from "./resource/invoker.js";
 
 export interface Service {
@@ -12,7 +12,7 @@ export interface Service {
     resourceInvoker: ResourceInvoker;
 }
 
-export function createService(resources: Resource[]): Service {
+export function createService(resources: StellariumResource[]): Service {
     const resourceRepository = new ResourceRepository(db, resources);
     const resourceResolver = new CombinationResourceResolver(resourceRepository);
     const resourceInvoker = new CombinationResourceInvoker();

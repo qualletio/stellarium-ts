@@ -1,9 +1,8 @@
-import { Resource } from "requestscript";
-import { Peer, PeerRepository } from "./peer/repository.js";
-import { Service } from "./service.js";
-import { ResourceWithBaseUrl } from "./resource/repository.js";
 import { FastifyBaseLogger } from "fastify";
 import { signData } from "./crypto/utils.js";
+import { Peer } from "./peer/repository.js";
+import { StellariumResource } from "./resource/repository.js";
+import { Service } from "./service.js";
 
 export class StartupService {
     constructor(
@@ -55,14 +54,14 @@ export class StartupService {
         this.log.info(`Populating resources from ${this.startingPeer}`);
         
         const response = await fetch(`${this.startingPeer}/v1/resources`);
-        const data = await response.json() as { resources: ResourceWithBaseUrl[] };
+        const data = await response.json() as { resources: StellariumResource[] };
         if (!data.resources) {
             throw new Error('Invalid response from peer');
         }
 
         if (data.resources) {
-            for (const resource of data.resources as ResourceWithBaseUrl[]) {
-                await this.service.resourceRepository.create(resource, resource.baseUrl);
+            for (const resource of data.resources as StellariumResource[]) {
+                await this.service.resourceRepository.create(resource);
             }
         }
 
