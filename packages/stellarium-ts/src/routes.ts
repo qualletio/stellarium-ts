@@ -1,8 +1,9 @@
-import type { FastifyPluginAsync } from 'fastify'
-import type { Service } from './service.js';
-import { interpretParsed, parseScript, ResourceFunctionCallParameter, type Resource, type ResourceFunction } from 'requestscript';
-import { ResourceWithBaseUrl } from './resource/repository.js';
+import type { FastifyPluginAsync } from 'fastify';
+import { interpretParsed, parseScript } from 'requestscript';
 import { Peer } from './peer/repository.js';
+import { PaymentVoucher } from './resource/invoker.js';
+import { StellariumResource, StellariumResourceFunction } from './resource/repository.js';
+import type { Service } from './service.js';
 import { verifyData } from './crypto/utils.js';
 
 interface RouteOptions {
@@ -17,7 +18,7 @@ interface PeerRequest extends Peer {
 interface ResourceRequest {
     publicKey: string;
     signature: string;
-    resources: ResourceWithBaseUrl[];
+    resources: StellariumResource[];
     expiry: string;
 }
 
@@ -31,6 +32,7 @@ interface ResourceRunRequest {
     resourceName: string;
     functionName: string;
     parameters: ResourceRequestFunctionCallParameter[];
+    paymentVoucher?: PaymentVoucher;
 }
 
 interface RunRequest {
@@ -68,15 +70,20 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     fastify.get('/resources', async (request, reply) => {
         const resources = await options.service.resourceRepository.getAllResources();
         return {
-            resources: resources.map((resource: ResourceWithBaseUrl) => ({
+            resources: resources.map((resource: StellariumResource) => ({
                 path: resource.path,
                 name: resource.name,
-                functions: resource.functions.map((fn: ResourceFunction) => ({
+                functions: resource.functions.map((fn: StellariumResourceFunction) => ({
                     name: fn.name,
                     returnType: fn.returnType,
                     parameters: fn.parameters,
+                    paymentManifest: fn.paymentManifest ? ({
+                        costLamports: fn.paymentManifest.costLamports,
+                        recipientAddress: fn.paymentManifest.recipientAddress,
+                    }) : undefined,
                 })),
                 baseUrl: resource.baseUrl,
+
             })),
         }
     });
@@ -128,6 +135,13 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     fastify.post('/run/resource', async (request, reply) => {
         const resourceRequest = request.body as ResourceRunRequest;
         
+        if (resourceRequest.paymentVoucher) {
+            const paymentVoucher = resourceRequest.paymentVoucher;
+            const isValid = verifyData(paymentVoucher, paymentVoucher.publicKey, paymentVoucher.signature);
+            if (!isValid) {
+                return reply.status(400).send({ error: 'Invalid payment voucher' });
+            }
+        }
         const resource = await options.service.resourceRepository.getInternalResource(resourceRequest.resourcePath, resourceRequest.resourceName);
         if (!resource) {
             return reply.status(400).send({ error: 'Resource not found' });
