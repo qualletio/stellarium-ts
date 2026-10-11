@@ -189,6 +189,26 @@ export class ResourceRepository {
         })));
     }
 
+    async getResourceFunction(resourcePath: string, resourceName: string, functionName: string): Promise<StellariumResourceFunction | undefined> {
+        const resource = await this.db.get('SELECT * FROM resource_functions WHERE resource_id = ? AND name = ?', [resourcePath, resourceName, functionName]);
+        if (!resource) {
+            return undefined;
+        }
+
+        const fn = await this.db.get('SELECT * FROM resource_functions WHERE resource_id = ? AND name = ?', [resource.id, functionName]);
+        if (!fn) {
+            return undefined;
+        }
+
+        return {
+            id: fn.id,
+            name: fn.name,
+            returnType: fn.return_type,
+            parameters: await this.getResourceParameters(fn.id),
+            paymentManifest: await this.getResourceFunctionPaymentManifest(resource.id),
+        } as StellariumResourceFunction;
+    }
+
     async getResourceFunctions(resourceId: number): Promise<StellariumResourceFunction[]> {
         return (await this.db.all('SELECT * FROM resource_functions WHERE resource_id = ?', [resourceId])) as StellariumResourceFunction[];
     }

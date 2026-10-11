@@ -1,10 +1,10 @@
 import 'dotenv/config';
-import Fastify, { FastifyInstance } from 'fastify';
+import { FastifyInstance } from 'fastify';
+import { createTables } from './db/db.js';
+import { StellariumResource } from './resource/repository.js';
 import routes from './routes.js';
 import { createService } from './service.js';
 import { StartupService } from './startup.js';
-import { Resource } from 'requestscript';
-import { createTables } from './db/db.js';
 
 export interface StellariumNodeOptions {
     port?: number;
@@ -12,9 +12,9 @@ export interface StellariumNodeOptions {
 }
 
 export class StellariumNode {
-    private resources: Resource[] = [];
+    private resources: StellariumResource[] = [];
 
-    async register(resource: Resource): Promise<void> {
+    async register(resource: StellariumResource): Promise<void> {
         this.resources.push(resource);
     }
 
