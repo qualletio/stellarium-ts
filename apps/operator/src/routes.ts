@@ -11,11 +11,6 @@ interface RouteOptions {
 // Wire formats match PaymentVoucher in stellarium-ts/resource/invoker.ts and
 // StellariumResourceFunctionPaymentManifest in resource/repository.ts.
 export interface PaymentSubmission {
-    manifest: { 
-        id: number; 
-        costLamports: bigint; 
-        recipientAddress: string
-    };
     voucher: {
         requestId: string; 
         invocationId: string; 
