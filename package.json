@@ -2,6 +2,7 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
+    "test": "turbo run test",
     "lint": "turbo run lint"
   },
   "packageManager": "pnpm@12.11.2",

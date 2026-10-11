@@ -61,3 +61,6 @@ proof-artifacts/
 
 # RequestScript
 requestscript.db
+
+# AI tools
+.cursor

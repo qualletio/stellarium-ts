@@ -2,12 +2,12 @@ import { generateKeyPairSync } from "node:crypto";
 import { signData, verifyData } from "../../crypto/utils.js";
 import { describe, expect, test } from "vitest";
 
-export interface Base64KeyPair {
+interface Base64KeyPair {
   publicKey: string;  // SPKI DER, Base64URL
   privateKey: string; // PKCS#8 DER, Base64URL — keep secret
 }
 
-export function generateBase64KeyPair(): Base64KeyPair {
+function generateBase64KeyPair(): Base64KeyPair {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519", {
     publicKeyEncoding: {
       type: "spki",
