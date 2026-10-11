@@ -15,7 +15,8 @@ export interface Service {
 export function createService(resources: StellariumResource[]): Service {
     const resourceRepository = new ResourceRepository(db, resources);
     const resourceResolver = new CombinationResourceResolver(resourceRepository);
-    const resourceInvoker = new CombinationResourceInvoker();
+    // TODO: Replace with actual values.
+    const resourceInvoker = new CombinationResourceInvoker(resourceRepository, 10000, "TODO", "TODO");
 
     return {
         peerRepository: new PeerRepository(db),

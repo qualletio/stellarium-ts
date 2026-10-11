@@ -1,12 +1,34 @@
 import { PublicKey } from '@solana/web3.js';
 import type { FastifyPluginAsync } from 'fastify';
-import type { PaymentSubmission } from './payment.js';
-import type { Service } from './service.js';
 import { OperationError } from './errors.js';
+import type { Service } from './service.js';
 
 interface RouteOptions {
     service: Service;
     apiToken: string;
+}
+
+// Wire formats match PaymentVoucher in stellarium-ts/resource/invoker.ts and
+// StellariumResourceFunctionPaymentManifest in resource/repository.ts.
+export interface PaymentSubmission {
+    manifest: { 
+        id: number; 
+        costLamports: bigint; 
+        recipientAddress: string
+    };
+    voucher: {
+        requestId: string; 
+        invocationId: string; 
+        amount: number;
+        recipientAddress: string; 
+        signature: string; 
+        expiresAt: string; 
+        publicKey: string;
+    };
+    // These fields are signed by createPaymentVoucher but absent from its result.
+    resourcePath: string;
+    resourceName: string;
+    parameters: unknown[];
 }
 
 function publicKey(value: string): PublicKey {

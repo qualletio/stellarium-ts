@@ -1,10 +1,9 @@
 import type { Signer } from "@solana/web3.js";
 import { Connection, PublicKey, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
-import { and, eq } from "drizzle-orm";
 import { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { receiptsTable } from "../db/schema.js";
-import { PaymentSubmission } from "../payment.js";
 import { OperationError } from "../errors.js";
+import type { PaymentSubmission } from "../routes.js";
 import { getEscrowBudget } from "../solana/escrow-budget.js";
 import { createEscrowInstruction, createWithdrawEscrowInstruction, decodeEscrowAccount } from "../solana/escrow.js";
 

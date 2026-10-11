@@ -3,7 +3,7 @@ import { and, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { receiptsTable } from "./db/schema.js";
 import { OperationError } from "./errors.js";
-import type { PaymentSubmission } from "./payment.js";
+import type { PaymentSubmission } from "./routes.js";
 
 export class PaymentService {
     constructor(private readonly db: NodePgDatabase) {}
