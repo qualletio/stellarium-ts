@@ -60,12 +60,12 @@ services:
       context: .
       target: local-caller-node
     environment:
-      PORT: "3000"
-      BASE_URL: http://local-caller-node:3000
+      PORT: "3003"
+      BASE_URL: http://local-caller-node:3003
       STARTING_PEER: http://local-resource-node:3002
       OPERATOR_URL: http://operator:3001/v1
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3003:3003"
     depends_on:
       local-resource-node:
         condition: service_healthy
