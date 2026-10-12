@@ -161,3 +161,11 @@ pnpm dev     # reload src/server.ts when it changes
 ### Contributing
 
 Stellarium has a backlog [here](https://github.com/orgs/qualletio/projects/7/views/1)
+
+### Publishing
+
+The `stellarium-ts` package can be published to npm with the command:
+
+```sh
+pnpm --filter stellarium-ts publish
+```
