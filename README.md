@@ -307,12 +307,43 @@ solana transfer "$ESCROW_ADDRESS" 0.1 \
   --allow-unfunded-recipient
 ```
 
-Run a request!
+Double-check your `.env` files for each service.
+
+The `local-caller-node` should have the following `.env` properties:
+
+```
+SIGNING_PUBLIC_KEY=
+SIGNING_PRIVATE_KEY=
+USER_ADDRESS=
+PORT=
+```
+
+The `local-resource-node` should have the following `.env` properties:
+
+```
+SIGNING_PUBLIC_KEY=
+SIGNING_PRIVATE_KEY=
+USER_ADDRESS=
+RECEIPIENT_ADDRESS=
+PORT=
+```
+
+The `operator` should have the following `.env` properties:
+
+```
+ESCROW_PROGRAM_ID=
+PRIVATE_KEY=
+PORT=
+```
+
+If that looks right, run a request! if it does not, fix and rerun `docker compose up -d --build`.
 
 POST `localhost:3003/v1/run`
 
 ```json
-{}
+{
+  "source": "request MyRequest { \n\n const weather: com.example.Weather \n\n return weather.temperature(city: \"Oslo\") }"
+}
 ```
 
 ### Contributing
