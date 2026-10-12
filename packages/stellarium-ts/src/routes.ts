@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { interpretParsed, parseScript } from 'requestscript';
 import { Peer } from './peer/repository.js';
-import { PaymentVoucher } from './resource/invoker.js';
+import { PaymentVoucher, paymentVoucherPayload } from './resource/invoker.js';
 import { StellariumResource, StellariumResourceFunction } from './resource/repository.js';
 import type { Service } from './service.js';
 import { verifyData } from './crypto/utils.js';
@@ -148,7 +148,11 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         const paymentVoucher = resourceRequest.paymentVoucher;
 
         if (paymentVoucher) {
-            const isValid = verifyData(paymentVoucher, paymentVoucher.publicKey, paymentVoucher.signature);
+            const isValid = verifyData(
+                paymentVoucherPayload(paymentVoucher, resourceRequest.resourcePath, resourceRequest.resourceName, resourceRequest.parameters),
+                paymentVoucher.publicKey,
+                paymentVoucher.signature,
+            );
             if (!isValid) {
                 return reply.status(400).send({ error: 'Invalid payment voucher' });
             }

@@ -12,6 +12,21 @@ export interface PaymentVoucher {
     publicKey: string;
 }
 
+/**
+ * The object `createPaymentVoucher` signs. `signature` is excluded, and
+ * `resourcePath`, `resourceName`, and `parameters` come from the invocation,
+ * not from the voucher itself. Key order is part of the signed bytes.
+ */
+export function paymentVoucherPayload(
+    voucher: Omit<PaymentVoucher, "signature">,
+    resourcePath: string,
+    resourceName: string,
+    parameters: ResourceFunctionCallParameter[],
+) {
+    const { requestId, invocationId, amount, recipientAddress, expiresAt, publicKey } = voucher;
+    return { requestId, invocationId, amount, recipientAddress, expiresAt, resourcePath, resourceName, parameters, publicKey };
+}
+
 export class CombinationResourceInvoker implements ResourceInvoker {
 
     constructor(private readonly resourceRepository: ResourceRepository, private readonly costLimitLamports: number, private readonly publicKey: string, private readonly privateKey: string) {}
@@ -46,6 +61,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
 
             let paymentVoucher: PaymentVoucher | undefined;
             if (resourceFunction.paymentManifest) {
+                console.log(`Resource function ${resource.name}.${functionName} has a payment manifest, creating payment voucher...`);
                 if (resourceFunction.paymentManifest.costLamports > this.costLimitLamports) {
                     throw new Error(`Function ${functionName} cost ${resourceFunction.paymentManifest.costLamports} lamports, which exceeds the cost limit of ${this.costLimitLamports} lamports`);
                 }
@@ -82,7 +98,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
         const invocationId = crypto.randomUUID();
         // Expire in 2 minutes
         const expiresAt = new Date(Date.now() + 1000 * 60 * 2).toISOString();
-        const signature = signData({ requestId, invocationId, amount, recipientAddress, expiresAt, resourcePath, resourceName, parameters, publicKey: this.publicKey }, this.privateKey);
+        const signature = signData(paymentVoucherPayload({ requestId, invocationId, amount, recipientAddress, expiresAt, publicKey: this.publicKey }, resourcePath, resourceName, parameters), this.privateKey);
         return { requestId, invocationId, amount, recipientAddress, signature, expiresAt, publicKey: this.publicKey };
     }
 }
