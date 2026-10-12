@@ -1,6 +1,6 @@
 {
   "name": "stellarium-ts",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A Stellarium Node in TypeScript.",
   "homepage": "https://github.com/qualletio/stellarium-ts#readme",
   "bugs": {
