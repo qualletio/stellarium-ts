@@ -1,6 +1,6 @@
 import { Resource, ResourceFunctionCallParameter, ResourceFunctionParameter, ResourceInvoker } from "requestscript";
 import { ResourceRepository } from "./repository.js";
-import { signData } from "@/crypto/utils.js";
+import { signData } from "../crypto/utils.js";
 
 export interface PaymentVoucher {
     requestId: string;

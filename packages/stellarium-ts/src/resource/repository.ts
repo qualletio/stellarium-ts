@@ -1,7 +1,7 @@
-import { verifyData } from "@/crypto/utils.js";
+import { verifyData } from "../crypto/utils.js";
 import { Resource, ResourceFunction, ResourceFunctionParameter } from "requestscript";
 import { Database } from "sqlite";
-import { Peer } from "@/peer/repository.js";
+import type { Peer } from "../peer/repository.js";
 
 export interface StellariumResourceFunctionPaymentManifest {
     id?: number;

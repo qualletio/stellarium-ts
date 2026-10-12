@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: stellarium
+      POSTGRES_PASSWORD: local-only-password
+      POSTGRES_DB: stellarium
+    # volumes:
+    #   - postgres-data:/var/lib/postgresql/data
+    #   - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-receipts.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stellarium -d stellarium"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  operator:
+    build:
+      context: .
+      target: operator
+    environment:
+      DATABASE_URL: postgresql://stellarium:local-only-password@postgres:5432/stellarium
+      SOLANA_RPC_URL: http://host.docker.internal:8899
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    init: true
+    healthcheck:
+      test: ["CMD", "node", "/app/docker/healthcheck.mjs", "3001"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  local-resource-node:
+    build:
+      context: .
+      target: local-resource-node
+    environment:
+      PORT: "3002"
+      BASE_URL: http://local-resource-node:3002
+      OPERATOR_URL: http://operator:3001/v1
+    ports:
+      - "127.0.0.1:3002:3002"
+    init: true
+    healthcheck:
+      test: ["CMD", "node", "/app/docker/healthcheck.mjs", "3002"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  local-caller-node:
+    build:
+      context: .
+      target: local-caller-node
+    environment:
+      PORT: "3000"
+      BASE_URL: http://local-caller-node:3000
+      STARTING_PEER: http://local-resource-node:3002
+      OPERATOR_URL: http://operator:3001/v1
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      local-resource-node:
+        condition: service_healthy
+    init: true
+
+# volumes:
+#   postgres-data:

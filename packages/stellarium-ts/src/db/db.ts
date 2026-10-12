@@ -25,7 +25,7 @@ export async function createTables() {
 
         CREATE TABLE IF NOT EXISTS resource (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            peer_id INTEGER NOT NULL,
+            peer_id INTEGER,
             path TEXT NOT NULL,
             name TEXT NOT NULL,
             base_url TEXT NOT NULL,

@@ -5,7 +5,6 @@ import type { Service } from './service.js';
 
 interface RouteOptions {
     service: Service;
-    apiToken: string;
 }
 
 // Wire formats match PaymentVoucher in stellarium-ts/resource/invoker.ts and

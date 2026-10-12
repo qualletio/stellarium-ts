@@ -179,8 +179,24 @@ importers:
         specifier: ^1.0.5
         version: 1.0.5(@types/pg@8.23.1)(sqlite3@6.0.1)
       stellarium-ts:
-        specifier: 0.2.0
-        version: 0.2.0(@types/pg@8.23.1)
+        specifier: workspace:*
+        version: link:../../packages/stellarium-ts
+    devDependencies:
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
+  apps/local-resource-node:
+    dependencies:
+      fastify:
+        specifier: ^5.12.5
+        version: 5.12.5
+      requestscript:
+        specifier: ^1.0.5
+        version: 1.0.5(@types/pg@8.23.1)(sqlite3@6.0.1)
+      stellarium-ts:
+        specifier: workspace:*
+        version: link:../../packages/stellarium-ts
     devDependencies:
       typescript:
         specifier: ^7.0.2
@@ -1855,10 +1871,6 @@ packages:
   std-env@4.3.0:
     resolution: {integrity: sha512-OtU/EgQ1kIm5KwqQpBC6ZEMXrZRui11w8zgfTWp8cdO9B8OaPsbA8bTHO2P+HNo1VlUTGMVBwPhydu6poeXiag==}
 
-  stellarium-ts@0.2.0:
-    resolution: {integrity: sha512-iiW2V0wfETbSsabGwJ+2qNg6KafynqWDLc2BP/JEGgmWKlCHmMExqNviffxU4WdnxruodHYKGmACxJUU46ApSA==}
-    engines: {node: '>=20'}
-
   stream-chain@2.2.5:
     resolution: {integrity: sha512-1TJmBx6aSWqZ4tx7aTpBDXK0/e2hhcNSTV8+CbFJtDjbb+I1mZ8lHit0Grw9GRT+6JbIrrDd8esncgBi8aBXGA==}
 
@@ -3473,62 +3485,6 @@ snapshots:
   statuses@2.0.2: {}
 
   std-env@4.3.0: {}
-
-  stellarium-ts@0.2.0(@types/pg@8.23.1):
-    dependencies:
-      dotenv: 18.0.7
-      fastify: 5.12.5
-      requestscript: 1.0.5(@types/pg@8.23.1)(sqlite3@6.0.1)
-      sqlite: 5.1.1
-      sqlite3: 6.0.1
-    transitivePeerDependencies:
-      - '@aws-sdk/client-rds-data'
-      - '@cloudflare/workers-types'
-      - '@effect/sql-d1'
-      - '@effect/sql-libsql'
-      - '@effect/sql-mysql2'
-      - '@effect/sql-pg'
-      - '@effect/sql-pglite'
-      - '@effect/sql-sqlite-bun'
-      - '@effect/sql-sqlite-do'
-      - '@effect/sql-sqlite-node'
-      - '@effect/sql-sqlite-wasm'
-      - '@electric-sql/pglite'
-      - '@libsql/client'
-      - '@libsql/client-wasm'
-      - '@neondatabase/serverless'
-      - '@op-engineering/op-sqlite'
-      - '@opentelemetry/api'
-      - '@planetscale/database'
-      - '@sinclair/typebox'
-      - '@sqlitecloud/drivers'
-      - '@tidbcloud/serverless'
-      - '@tursodatabase/database'
-      - '@tursodatabase/database-common'
-      - '@tursodatabase/database-wasm'
-      - '@tursodatabase/serverless'
-      - '@tursodatabase/sync'
-      - '@types/better-sqlite3'
-      - '@types/mssql'
-      - '@types/pg'
-      - '@types/sql.js'
-      - '@upstash/redis'
-      - '@vercel/postgres'
-      - '@xata.io/client'
-      - arktype
-      - better-sqlite3
-      - bun-types
-      - effect
-      - expo-sqlite
-      - mssql
-      - mysql2
-      - pg-native
-      - postgres
-      - sql.js
-      - supports-color
-      - typebox
-      - valibot
-      - zod
 
   stream-chain@2.2.5: {}
 

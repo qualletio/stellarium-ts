@@ -1,0 +1,21 @@
+{
+  "name": "local-resource-node",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "fastify": "^5.12.5",
+    "requestscript": "^1.0.5",
+    "stellarium-ts": "workspace:*"
+  }
+}
