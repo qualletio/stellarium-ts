@@ -1,4 +1,7 @@
 {
+  "name": "stellarium",
+  "version": "0.0.0",
+  "private": true,
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
