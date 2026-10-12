@@ -3,21 +3,21 @@ import { Resource, ResourceFunction, ResourceFunctionParameter } from "requestsc
 import { Database } from "sqlite";
 import { Peer } from "@/peer/repository.js";
 
+export interface StellariumResourceFunctionPaymentManifest {
+    id?: number;
+    costLamports: number;
+    recipientAddress: string;
+}
+
+export interface StellariumResourceFunction extends ResourceFunction {
+    id?: number;
+    paymentManifest?: StellariumResourceFunctionPaymentManifest;
+}
+
 export interface StellariumResource extends Resource {
     id: number;
     baseUrl: string;
     functions: StellariumResourceFunction[];
-}
-
-export interface StellariumResourceFunction extends ResourceFunction {
-    id: number;
-    paymentManifest?: StellariumResourceFunctionPaymentManifest;
-}
-
-export interface StellariumResourceFunctionPaymentManifest {
-    id: number;
-    costLamports: number;
-    recipientAddress: string;
 }
 
 export class ResourceRepository {
@@ -26,7 +26,7 @@ export class ResourceRepository {
     async create(resource: StellariumResource): Promise<void> {
         const createdAt = new Date().toISOString();
         const result = await this.db.run(
-            'INSERT INTO resources (path, name, base_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+            'INSERT INTO resource (path, name, base_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
             [resource.path, resource.name, resource.baseUrl, createdAt, createdAt]
         );
 
@@ -38,7 +38,7 @@ export class ResourceRepository {
 
         for (const fn of resource.functions) {
             const functionResult = await this.db.run(
-                'INSERT INTO resource_functions (resource_id, name, return_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+                'INSERT INTO resource_function (resource_id, name, return_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
                 [resourceId, fn.name, fn.returnType, createdAt, createdAt]
             );
 
@@ -46,7 +46,7 @@ export class ResourceRepository {
 
             for (const parameter of fn.parameters) {
                 await this.db.run(
-                    'INSERT INTO resource_function_parameters (resource_function_id, name, parameter_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+                    'INSERT INTO resource_function_parameter (resource_function_id, name, parameter_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
                     [functionId, parameter.name, parameter.type, createdAt, createdAt]
                 );
             }
@@ -67,7 +67,7 @@ export class ResourceRepository {
 
         for (const resource of resources) {
             const existingResource = await this.db.get(
-                'SELECT * FROM resources WHERE path = ? AND name = ?',
+                'SELECT * FROM resource WHERE path = ? AND name = ?',
                 [resource.path, resource.name]
             );
 
@@ -75,27 +75,36 @@ export class ResourceRepository {
             // This will avoid MITM attacks.
             if (existingResource) {
                 await this.db.run(
-                    'UPDATE resources SET base_url = ?, updated_at = ? WHERE path = ? AND name = ?',
+                    'UPDATE resource SET base_url = ?, updated_at = ? WHERE path = ? AND name = ?',
                     [resource.baseUrl, new Date().toISOString(), resource.path, resource.name]
                 );
 
                 for (const fn of resource.functions) {
+                    const updatedAt = new Date().toISOString();
                     await this.db.run(
-                        'UPDATE resource_functions SET return_type = ?, updated_at = ? WHERE resource_id = ? AND name = ?',
-                        [fn.returnType, existingResource.id, fn.name, new Date().toISOString()]
+                        'UPDATE resource_function SET return_type = ?, updated_at = ? WHERE resource_id = ? AND name = ?',
+                        [fn.returnType, updatedAt, existingResource.id, fn.name]
                     );
+
+                    const existingFn = await this.db.get(
+                        'SELECT id FROM resource_function WHERE resource_id = ? AND name = ?',
+                        [existingResource.id, fn.name]
+                    );
+                    if (!existingFn) {
+                        continue;
+                    }
 
                     for (const parameter of fn.parameters) {
                         await this.db.run(
-                            'UPDATE resource_function_parameters SET parameter_type = ? WHERE resource_function_id = ? AND name = ?',
-                            [parameter.type, fn.id, parameter.name]
+                            'UPDATE resource_function_parameter SET parameter_type = ? WHERE resource_function_id = ? AND name = ?',
+                            [parameter.type, existingFn.id, parameter.name]
                         );
                     }
 
                     if (fn.paymentManifest) {
                         await this.db.run(
                             'UPDATE resource_function_payment_manifest SET cost_lamports = ?, recipient_address = ?, updated_at = ? WHERE resource_function_id = ?',
-                            [fn.paymentManifest.costLamports, fn.paymentManifest.recipientAddress, new Date().toISOString(), fn.id]
+                            [fn.paymentManifest.costLamports, fn.paymentManifest.recipientAddress, updatedAt, existingFn.id]
                         );
                     }
                 }
@@ -127,7 +136,7 @@ export class ResourceRepository {
         const path = pathName.join('.');
 
         const result = await this.db.get(
-            'SELECT * FROM resources WHERE path = ? AND name = ?',
+            'SELECT * FROM resource WHERE path = ? AND name = ?',
             [path, name]
         );
 
@@ -136,7 +145,7 @@ export class ResourceRepository {
         }
 
         const resourceFunctions = await this.db.all(
-            'SELECT * FROM resource_functions WHERE resource_id = ?',
+            'SELECT * FROM resource_function WHERE resource_id = ?',
             [result.id]
         );
 
@@ -164,38 +173,31 @@ export class ResourceRepository {
     }
 
     async getExternalResources(): Promise<StellariumResource[]> {
-        const results = await this.db.get(
-            'SELECT * FROM resources',
+        const results = await this.db.all(
+            'SELECT * FROM resource',
         );
 
         if (!results) {
             return [];
         }
 
-        return Promise.all(results.map(async (r: StellariumResource) => ({
+        return Promise.all(results.map(async (r: { id: number; path: string; name: string; base_url: string }) => ({
+            id: r.id,
             path: r.path,
             name: r.name,
-            functions: await Promise.all((await this.getResourceFunctions(r.id)).map(async (f: StellariumResourceFunction) => ({
-                id: f.id,
-                name: f.name,
-                returnType: f.returnType,
-                parameters: await this.getResourceParameters(f.id),
-                // The ExternalResourceInvoker will handle the execution of the function
-                exec: async (): Promise<void> => {
-                    return void 0;
-                },
-                paymentManifest: await this.getResourceFunctionPaymentManifest(f.id),
-            }))),
+            baseUrl: r.base_url,
+            metadata: { baseUrl: r.base_url },
+            functions: await this.getResourceFunctions(r.id),
         })));
     }
 
     async getResourceFunction(resourcePath: string, resourceName: string, functionName: string): Promise<StellariumResourceFunction | undefined> {
-        const resource = await this.db.get('SELECT * FROM resource_functions WHERE resource_id = ? AND name = ?', [resourcePath, resourceName, functionName]);
+        const resource = await this.db.get('SELECT * FROM resource WHERE path = ? AND name = ?', [resourcePath, resourceName]);
         if (!resource) {
             return undefined;
         }
 
-        const fn = await this.db.get('SELECT * FROM resource_functions WHERE resource_id = ? AND name = ?', [resource.id, functionName]);
+        const fn = await this.db.get('SELECT * FROM resource_function WHERE resource_id = ? AND name = ?', [resource.id, functionName]);
         if (!fn) {
             return undefined;
         }
@@ -205,16 +207,25 @@ export class ResourceRepository {
             name: fn.name,
             returnType: fn.return_type,
             parameters: await this.getResourceParameters(fn.id),
-            paymentManifest: await this.getResourceFunctionPaymentManifest(resource.id),
-        } as StellariumResourceFunction;
+            exec: async () => undefined,
+            paymentManifest: await this.getResourceFunctionPaymentManifest(fn.id),
+        };
     }
 
     async getResourceFunctions(resourceId: number): Promise<StellariumResourceFunction[]> {
-        return (await this.db.all('SELECT * FROM resource_functions WHERE resource_id = ?', [resourceId])) as StellariumResourceFunction[];
+        const rows = await this.db.all('SELECT * FROM resource_function WHERE resource_id = ?', [resourceId]);
+        return Promise.all(rows.map(async (f) => ({
+            id: f.id as number,
+            name: f.name as string,
+            returnType: f.return_type as string,
+            parameters: await this.getResourceParameters(f.id),
+            exec: async () => undefined,
+            paymentManifest: await this.getResourceFunctionPaymentManifest(f.id),
+        })));
     }
 
     async getResourceParameters(resourceFunctionId: number): Promise<ResourceFunctionParameter[]> {
-        return (await this.db.all('SELECT * FROM resource_function_parameters WHERE resource_function_id = ?', [resourceFunctionId])).map(p => ({
+        return (await this.db.all('SELECT * FROM resource_function_parameter WHERE resource_function_id = ?', [resourceFunctionId])).map(p => ({
             name: p.name,
             type: p.parameter_type,
         }));
@@ -229,7 +240,7 @@ export class ResourceRepository {
             id: result.id,
             costLamports: result.cost_lamports as number,
             recipientAddress: result.recipient_address as string,
-        } as StellariumResourceFunctionPaymentManifest;
+        };
     }
 
     async getAllResources(): Promise<StellariumResource[]> {

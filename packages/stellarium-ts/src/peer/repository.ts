@@ -25,7 +25,7 @@ export class PeerRepository {
         const createdAt = new Date().toISOString();
         await this.db.run(
             'INSERT INTO peer (base_url, name, public_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-            [peer.baseUrl, peer.name, createdAt, createdAt]
+            [peer.baseUrl, peer.name, peer.publicKey, createdAt, createdAt]
         );
     }
 
@@ -33,7 +33,7 @@ export class PeerRepository {
 
         const existingPeer = await this.db.get(
             'SELECT * FROM peer WHERE base_url = ?',
-            [peer.baseUrl, peer.name]
+            [peer.baseUrl]
         );
 
         // If the peer already exists, verify the signature before updating.
