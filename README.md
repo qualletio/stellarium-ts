@@ -158,6 +158,145 @@ pnpm dev     # reload src/server.ts when it changes
 
 `pnpm build` emits `dist/`, which is what the package exports. Start a node from your own process with `StellariumNode`, as shown above.
 
+### Running Locally
+
+Install Solana using their guide: https://solana.com/docs/intro/installation
+
+Start the local validator in its own terminal.
+
+```sh
+solana-test-validator
+```
+
+Point the Solana CLI at your localnet:
+
+```sh
+solana config set -ul
+```
+
+Generate Keys for Solana:
+
+```sh
+umask 077
+mkdir -p .keys/local-e2e
+solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/operator.json
+solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/program.json
+solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/recipient.json
+
+node --input-type=module <<'JS'
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+const require = createRequire(new URL('./apps/operator/package.json', `file://${process.cwd()}/`));
+const { PublicKey, Keypair } = require('@solana/web3.js');
+const address = name => Keypair.fromSecretKey(Uint8Array.from(JSON.parse(
+  readFileSync(`.keys/local-e2e/${name}.json`, 'utf8')))).publicKey.toBase58();
+const common = {
+  SOLANA_RPC_URL: 'http://127.0.0.1:8899',
+  ESCROW_PROGRAM_ID: address('program'),
+  AUTHORITY_ADDRESS: address('operator'),
+  RECIPIENT_ADDRESS: address('recipient'),
+};
+for (const [role, port] of [['caller', 3000], ['provider', 3002]]) {
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const spki = publicKey.export({ format: 'der', type: 'spki' });
+  const raw = Buffer.from(publicKey.export({ format: 'jwk' }).x, 'base64url');
+  const values = { ...common, BASE_URL: `http://127.0.0.1:${port}`,
+    OPERATOR_URL: 'http://127.0.0.1:3001/v1',
+    SIGNING_PUBLIC_KEY: spki.toString('base64url'),
+    SIGNING_PRIVATE_KEY: privateKey.export({format: 'der', type: 'pkcs8'}).toString('base64url'),
+    USER_ADDRESS: new PublicKey(raw).toBase58() };
+  writeFileSync(`.keys/local-e2e/${role}.env`, Object.entries(values)
+    .map(([key, value]) => `${key}=${value}`).join('\n') + '\n', { mode: 0o600, flag: 'wx' });
+}
+const values = { ...common,
+  DATABASE_URL: 'postgresql://stellarium:local-only-password@127.0.0.1:5433/stellarium',
+  OPERATOR_API_TOKEN: randomBytes(32).toString('hex'),
+  PRIVATE_KEY: readFileSync('.keys/local-e2e/operator.json', 'utf8').trim() };
+writeFileSync('.keys/local-e2e/operator.env', Object.entries(values)
+  .map(([key, value]) => `${key}=${value}`).join('\n') + '\n', { mode: 0o600, flag: 'wx' });
+console.log('Local fixture configuration written; no secrets printed.');
+JS
+```
+
+Build the Escrow program:
+
+```sh
+cargo build-sbf
+```
+
+Start Solana locally:
+
+```sh
+solana config set -ul
+solana-test-validator
+```
+
+Setup a wallet to pay for the Escrow program deploy. Use `test` as the BIP39 Passphrase:
+
+```sh
+solana-keygen new -o /Users/christopher/dev/github/stellarium-ts/.keys/payer.json
+```
+
+Fund the wallet:
+
+```sh
+solana airdrop 5 <YOUR_PAYER_WALLET_ADDRESS>
+```
+
+Deploy the Escrow program:
+
+```sh
+solana program deploy ./target/deploy/escrow_program.so
+```
+
+Copy the program id and save it in the root of the operator `.env`.
+Create the `.env` file if it does not exist.
+
+Fund the `caller` wallet so it can pay for Stellarium requests to the paid node:
+
+```sh
+solana airdrop 5 <YOUR_CALLER_ADDRESS>
+```
+
+Fund the operator wallet so it can create escrow accounts:
+
+```sh
+solana airdrop 5 <YOUR_OPERATOR_PAYER_ADDRESS>
+```
+
+Initialize an escrow account:
+
+POST to `http://localhost:3001/v1/escrow`
+
+request body:
+
+```json
+{
+  "user": "YOUR_USER_ADDRESS"
+}
+```
+
+Copy the escrow address value:
+
+```json
+{
+  "escrowAddress": "FScTV2MkuxTfkSVceKCMwo5gSgVE5DWSmtbpZYV6KpaV",
+  "signature": "59eu53TF1m8KRPAhu47Z1Dbkv8AD4NrYfNZ3Ue1QD6poXzBZdA9Wcj5u8UaTDXSUd4AwySk5LFGrSWtwDKYG9dDu",
+  "blockhash": "HEyeyCJSycM1XKbiN98Kv74LSoBwPiN4aSpYoaQu8T8P",
+  "lastValidBlockHeight": 4570,
+  "status": "confirmed"
+}
+```
+
+Run a request!
+
+POST `localhost:3003/v1/run`
+
+```json
+{}
+```
+
 ### Contributing
 
 Stellarium has a backlog [here](https://github.com/orgs/qualletio/projects/7/views/1)

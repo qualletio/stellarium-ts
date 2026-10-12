@@ -55,6 +55,7 @@ export class EscrowService {
         });
 
         if (simulation.value.err !== null) {
+            console.error(simulation.value.err);
             throw new OperationError(422, 'Transaction simulation failed');
         }
 

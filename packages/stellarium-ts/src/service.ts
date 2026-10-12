@@ -20,7 +20,7 @@ export function createService(resources: StellariumResource[]): Service {
     const resourceResolver = new CombinationResourceResolver(resourceRepository);
     
     // TODO: Replace with actual values.
-    const resourceInvoker = new CombinationResourceInvoker(resourceRepository, 10000, "TODO", "TODO");
+    const resourceInvoker = new CombinationResourceInvoker(resourceRepository, 10000, process.env.SIGNING_PUBLIC_KEY!, process.env.SIGNING_PRIVATE_KEY!);
 
     const operatorClient = new OperatorClient(process.env.OPERATOR_URL!);
 

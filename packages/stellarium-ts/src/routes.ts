@@ -49,7 +49,17 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     // Start Meta Routes
 
     fastify.get('/', async (request, reply) => {
-        return { hello: 'world' }
+        return {
+            hello: 'world',
+        }
+    });
+
+    fastify.get('/self', async (request, reply) => {
+        return { 
+            baseUrl: process.env.BASE_URL,
+            publicKey: process.env.SIGNING_PUBLIC_KEY,
+            name: process.env.BASE_URL,
+         }
     });
 
     fastify.get('/peers', async (request, reply) => {

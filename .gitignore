@@ -55,6 +55,7 @@ target/
 .learning/
 proof-artifacts/
 .local-ledger/
+test-ledger/
 
 # Turbo
 .turbo

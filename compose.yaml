@@ -15,26 +15,13 @@ services:
       retries: 20
       start_period: 5s
 
-  solana-validator:
-    container_name: solana-localnet
-    image: solanalabs/solana:v1.18.26
-    ports:
-      - "8899:8899" # RPC Port
-      - "8900:8900" # RPC-WS (WebSockets)
-    volumes:
-      - solana-data:/root/.config/solana
-    command: solana-test-validator
-    restart: unless-stopped
-
   operator:
     build:
       context: .
       target: operator
     environment:
       DATABASE_URL: postgresql://stellarium:local-only-password@postgres:5432/stellarium
-      ESCROW_PROGRAM_ID: ${ESCROW_PROGRAM_ID:-11111111111111111111111111111111}
-      OPERATOR_API_TOKEN: ${OPERATOR_API_TOKEN:-local-dev-token}
-      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-http://host.docker.internal:8899}
+      SOLANA_RPC_URL: http://host.docker.internal:8899
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -58,7 +45,6 @@ services:
       PORT: "3002"
       BASE_URL: http://local-resource-node:3002
       OPERATOR_URL: http://operator:3001/v1
-      RECIPIENT_ADDRESS: ${RECIPIENT_ADDRESS:-11111111111111111111111111111111}
     ports:
       - "127.0.0.1:3002:3002"
     init: true
@@ -87,6 +73,3 @@ services:
 
 # volumes:
 #   postgres-data:
-
-volumes:
-  solana-data:

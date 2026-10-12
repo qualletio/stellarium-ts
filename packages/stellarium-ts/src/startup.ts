@@ -47,7 +47,16 @@ export class StartupService {
             }
         }
 
-        this.log.info(`Populated ${data.peers.length} peers`);
+        // Save the starting peer to the database.
+        const startingPeerResponse = await fetch(`${this.startingPeer}/v1/self`);
+        const startingPeerData = await startingPeerResponse.json() as { baseUrl: string, publicKey: string, name: string };
+        await this.service.peerRepository.create({
+            baseUrl: startingPeerData.baseUrl,
+            publicKey: startingPeerData.publicKey,
+            name: startingPeerData.name,
+        });
+
+        this.log.info(`Populated ${data.peers.length + 1} peers`);
     }
 
     async populateResources(): Promise<void> {
