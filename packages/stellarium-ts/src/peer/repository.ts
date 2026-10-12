@@ -15,7 +15,7 @@ export class PeerRepository {
         // Check if the peer already exists
         const existingPeer = await this.db.get(
             'SELECT * FROM peer WHERE base_url = ?',
-            [peer.baseUrl, peer.name]
+            [peer.baseUrl]
         );
 
         if (existingPeer) {
