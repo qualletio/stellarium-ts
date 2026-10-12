@@ -16,6 +16,6 @@
   "dependencies": {
     "fastify": "^5.12.5",
     "requestscript": "^1.0.5",
-    "stellarium-ts": "0.7.0"
+    "stellarium-ts": "0.8.0"
   }
 }

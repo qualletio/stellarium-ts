@@ -43,8 +43,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, { serv
         // First verify the payment submission.
         try {
             await service.paymentService.verifyPayment(body);
-            // Then settle the payment.
-            await service.escrowService.settlePayment(body);
+            return await service.escrowService.settlePayment(body);
         } catch (error) {
             fastify.log.error(error);
             return reply.status(500).send({ error: 'Failed to verify and settle payment', details: error instanceof Error ? error.message : undefined });

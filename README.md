@@ -219,6 +219,14 @@ console.log('Local fixture configuration written; no secrets printed.');
 JS
 ```
 
+Generate Caller user that pays for the escrow wallet and fund the wallet:
+
+```sh
+solana-keygen new --no-bip39-passphrase --outfile .keys/local-e2e/caller.json
+CALLER=$(solana-keygen pubkey .keys/local-e2e/caller.json)
+solana airdrop 5 "$CALLER"
+```
+
 Build the Escrow program:
 
 ```sh
@@ -244,6 +252,13 @@ Fund the wallet:
 solana airdrop 5 <YOUR_PAYER_WALLET_ADDRESS>
 ```
 
+Create the recipient wallet with an airdrop:
+
+```sh
+solana airdrop 1 YOUR_RECEIPIENT_ADDRESS
+solana balance YOUR_RECEIPIENT_ADDRESS
+```
+
 Deploy the Escrow program:
 
 ```sh
@@ -252,12 +267,6 @@ solana program deploy ./target/deploy/escrow_program.so
 
 Copy the program id and save it in the root of the operator `.env`.
 Create the `.env` file if it does not exist.
-
-Fund the `caller` wallet so it can pay for Stellarium requests to the paid node:
-
-```sh
-solana airdrop 5 <YOUR_CALLER_ADDRESS>
-```
 
 Fund the operator wallet so it can create escrow accounts:
 
@@ -281,12 +290,21 @@ Copy the escrow address value:
 
 ```json
 {
-  "escrowAddress": "FScTV2MkuxTfkSVceKCMwo5gSgVE5DWSmtbpZYV6KpaV",
-  "signature": "59eu53TF1m8KRPAhu47Z1Dbkv8AD4NrYfNZ3Ue1QD6poXzBZdA9Wcj5u8UaTDXSUd4AwySk5LFGrSWtwDKYG9dDu",
-  "blockhash": "HEyeyCJSycM1XKbiN98Kv74LSoBwPiN4aSpYoaQu8T8P",
-  "lastValidBlockHeight": 4570,
+  "escrowAddress": "ESCROW_ADDRESS",
+  "signature": "SIGNATURE",
+  "blockhash": "BLOCKHASH",
+  "lastValidBlockHeight": 1111,
   "status": "confirmed"
 }
+```
+
+Fund the escrow address:
+
+```sh
+solana transfer "$ESCROW_ADDRESS" 0.1 \
+  --from .keys/local-e2e/caller.json \
+  --fee-payer .keys/local-e2e/caller.json \
+  --allow-unfunded-recipient
 ```
 
 Run a request!
@@ -300,6 +318,13 @@ POST `localhost:3003/v1/run`
 ### Contributing
 
 Stellarium has a backlog [here](https://github.com/orgs/qualletio/projects/7/views/1)
+
+If you change the Operator db schema, you need to generate the migrations before making a PR:
+
+```sh
+cd apps/operator
+DATABASE_URL='postgresql://stellarium:local-only-password@127.0.0.1:5432/stellarium' pnpm exec drizzle-kit generate
+```
 
 ### Publishing
 

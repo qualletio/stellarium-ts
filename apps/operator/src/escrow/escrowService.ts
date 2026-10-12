@@ -6,6 +6,7 @@ import { OperationError } from "../errors.js";
 import type { PaymentSubmission } from "../routes.js";
 import { getEscrowBudget } from "../solana/escrow-budget.js";
 import { createEscrowInstruction, createWithdrawEscrowInstruction, decodeEscrowAccount } from "../solana/escrow.js";
+import { solanaUserFromSpki } from "../solana/userAddress.js";
 
 export interface OperationResult {
     escrowAddress: string;
@@ -91,7 +92,7 @@ export class EscrowService {
     async settlePayment(submission: PaymentSubmission): Promise<OperationResult> {
         const { voucher, resourcePath, resourceName, parameters } = submission;
         const { requestId, invocationId, amount, recipientAddress, signature: voucherSignature, expiresAt, publicKey } = voucher;
-        const user = new PublicKey(voucher.publicKey);
+        const user = solanaUserFromSpki(voucher.publicKey);
         const recipient = new PublicKey(recipientAddress);
         const amountLamports = BigInt(amount);
 
@@ -115,10 +116,8 @@ export class EscrowService {
             } catch {
                 throw new OperationError(409, 'Existing escrow account has invalid state');
             }
-            return { escrowAddress: instruction.escrowAddress.toBase58(), status: 'existing' };
         }
 
-        // Empty System-owned prefunded PDAs are accepted by initialization.
         const lifetime = await this.connection.getLatestBlockhash('confirmed');
 
         const transaction = new VersionedTransaction(new TransactionMessage({
