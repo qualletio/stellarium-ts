@@ -44,9 +44,9 @@ export async function createTables() {
             name TEXT NOT NULL,
             return_type TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
 
-            FOREIGN KEY (resource_id) REFERENCES resource(id),
+            FOREIGN KEY (resource_id) REFERENCES resource(id)
         );
 
         CREATE TABLE IF NOT EXISTS resource_function_parameter (
@@ -55,9 +55,9 @@ export async function createTables() {
             name TEXT NOT NULL,
             parameter_type TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
 
-            FOREIGN KEY (resource_function_id) REFERENCES resource_function(id),
+            FOREIGN KEY (resource_function_id) REFERENCES resource_function(id)
         );
 
         CREATE TABLE IF NOT EXISTS resource_function_payment_manifest (
@@ -66,9 +66,9 @@ export async function createTables() {
             cost_lamports INTEGER NOT NULL,
             recipient_address TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
 
-            FOREIGN KEY (resource_function_id) REFERENCES resource_function(id),
+            FOREIGN KEY (resource_function_id) REFERENCES resource_function(id)
         );
     `);
 }
