@@ -35,7 +35,7 @@ import Fastify from "fastify";
 import { StellariumNode } from "stellarium-ts";
 import type { Resource } from "requestscript";
 
-const weather: Resource = {
+const weather: StellariumResource = {
   metadata: {},
   path: "com.example",
   name: "Weather",
