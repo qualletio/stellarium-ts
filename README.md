@@ -149,6 +149,8 @@ blockers, local identity and secret setup, and transaction/balance verification.
 
 - packages/stellarium-ts: the main package for stellarium-ts, helps run a Stellarium node using Typescript.
 - apps/operator: the centralized operator that interacts with the Solana blockchain and stores receipt records.
+- apps/local-caller-node: a node for running locally that has no resources. Syncs to the local-resource-node.
+- apps/local-resource-node: a node for running locally with a monetized resource.
 
 ```sh
 pnpm install
