@@ -5,15 +5,26 @@ services:
       POSTGRES_USER: stellarium
       POSTGRES_PASSWORD: local-only-password
       POSTGRES_DB: stellarium
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-receipts.sql:ro
+    # volumes:
+    #   - postgres-data:/var/lib/postgresql/data
+    #   - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-receipts.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U stellarium -d stellarium"]
       interval: 2s
       timeout: 5s
       retries: 20
       start_period: 5s
+
+  solana-validator:
+    container_name: solana-localnet
+    image: solanalabs/solana:v1.18.26
+    ports:
+      - "8899:8899" # RPC Port
+      - "8900:8900" # RPC-WS (WebSockets)
+    volumes:
+      - solana-data:/root/.config/solana
+    command: solana-test-validator
+    restart: unless-stopped
 
   operator:
     build:
@@ -74,5 +85,8 @@ services:
         condition: service_healthy
     init: true
 
+# volumes:
+#   postgres-data:
+
 volumes:
-  postgres-data:
+  solana-data:
