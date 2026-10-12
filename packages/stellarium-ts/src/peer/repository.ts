@@ -1,4 +1,4 @@
-import { verifyData } from "@/crypto/utils.js";
+import { verifyData } from "../crypto/utils.js";
 import { Database } from "sqlite";
 
 export interface Peer {

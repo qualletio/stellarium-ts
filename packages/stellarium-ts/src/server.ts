@@ -8,6 +8,7 @@ import { StartupService } from './startup.js';
 
 export interface StellariumNodeOptions {
     port?: number;
+    host?: string;
     startingPeer?: string;
 }
 
@@ -26,7 +27,7 @@ export class StellariumNode {
         fastify.register(routes, { prefix: '/v1', service });
 
         // Run the server!
-        fastify.listen({ port: options.port ?? 3000 }, function (err, address) {
+        fastify.listen({ port: options.port ?? 3000, host: options.host ?? '0.0.0.0' }, function (err, address) {
             if (err) {
                 fastify.log.error(err)
                 process.exit(1)
