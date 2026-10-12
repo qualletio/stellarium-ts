@@ -167,6 +167,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         // A voucher is optional. Settlement runs only after a successful invoke. Run this on a separate thread to avoid blocking the main thread.
         if (paymentVoucher) {
             setTimeout(async () => {
+                
                 await options.service.operatorClient.settlePayment({
                     voucher: paymentVoucher,
                     resourcePath: resourceRequest.resourcePath,

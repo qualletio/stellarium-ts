@@ -26,7 +26,7 @@ export class OperatorClient {
             },
         });
         if (!response.ok) {
-            throw new Error(`Failed to settle payment: ${response.statusText}`);
+            console.error(`Failed to settle payment: ${response.statusText} body: ${await response.text()}`);
         }
     }
 }
