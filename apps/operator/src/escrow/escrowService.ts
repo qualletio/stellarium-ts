@@ -20,7 +20,7 @@ export interface OperationResult {
  * The EscrowService is responsible for communicating with Solana to initiate and withdraw from an escrow account.
  */
 export class EscrowService {
-    constructor(private readonly db: NodePgDatabase, private readonly escrowProgramId: PublicKey, private readonly authority: Signer, private readonly connection: Connection) {}
+    constructor(private readonly db: NodePgDatabase, private readonly escrowProgramId: PublicKey, private readonly authority: Signer, private readonly feeRecipient: PublicKey, private readonly connection: Connection) {}
 
     async initiateEscrow(user: PublicKey): Promise<OperationResult> {
         const instruction = createEscrowInstruction({
@@ -101,6 +101,7 @@ export class EscrowService {
             authority: this.authority.publicKey,
             user,
             recipient,
+            feeRecipient: this.feeRecipient,
             amountLamports,
         });
 

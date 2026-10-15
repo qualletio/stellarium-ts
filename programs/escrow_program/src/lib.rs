@@ -23,6 +23,19 @@ pub const DISCRIMINATOR: &[u8; 8] = b"ESCROW01";
 pub const ESCROW_LEN: usize = 8 + 32 + 32 + 1;
 pub const AUTHORITY_NOT_CONFIGURED: u32 = 0;
 pub const WRONG_AUTHORITY: u32 = 1;
+pub const FEE_RECIPIENT_NOT_CONFIGURED: u32 = 2;
+pub const WRONG_FEE_RECIPIENT: u32 = 3;
+
+// TODO: Replace None with Some(solana_program::pubkey!("PROTOCOL_FEE_WALLET"))
+// before deployment. Withdrawals fail closed until this is configured.
+pub const PROTOCOL_FEE_RECIPIENT: Option<Pubkey> = None;
+/// Protocol fee taken from each withdrawal, in basis points (2000 = 20%).
+pub const PROTOCOL_FEE_BPS: u64 = 2_000;
+
+/// Fee owed on a withdrawal of `amount`, rounded down. Never exceeds `amount`.
+pub fn protocol_fee(amount: u64) -> u64 {
+    (amount as u128 * PROTOCOL_FEE_BPS as u128 / 10_000) as u64
+}
 
 /// State: discriminator[8], user[32], authority[32], canonical bump[1].
 pub fn escrow_address(program_id: &Pubkey, authority: &Pubkey, user: &Pubkey) -> (Pubkey, u8) {
@@ -57,16 +70,24 @@ pub fn process_instruction(
     let authority = ESCROW_AUTHORITY.ok_or(ProgramError::Custom(AUTHORITY_NOT_CONFIGURED))?;
     match amount {
         None => initialize(program_id, accounts, &authority),
-        Some(amount) => withdraw(program_id, accounts, &authority, amount, &Rent::get()?),
+        Some(amount) => {
+            let fee_recipient = PROTOCOL_FEE_RECIPIENT
+                .ok_or(ProgramError::Custom(FEE_RECIPIENT_NOT_CONFIGURED))?;
+            withdraw(program_id, accounts, &authority, &fee_recipient, amount, &Rent::get()?)
+        }
     }
 }
 
 /// Withdraw SOL. Accounts: configured authority (signer), escrow (writable),
-/// chosen recipient (writable). The escrow retains its rent reserve and state.
+/// chosen recipient (writable), protocol fee recipient (writable). The escrow is
+/// debited `amount`; the fee recipient gets `protocol_fee(amount)` and the
+/// recipient the rest. No fee is taken when the recipient is the fee recipient.
+/// The escrow retains its rent reserve and state.
 fn withdraw(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     expected_authority: &Pubkey,
+    expected_fee_recipient: &Pubkey,
     amount: u64,
     rent: &Rent,
 ) -> ProgramResult {
@@ -74,19 +95,25 @@ fn withdraw(
     let authority = next_account_info(&mut iter)?;
     let escrow = next_account_info(&mut iter)?;
     let recipient = next_account_info(&mut iter)?;
+    let fee_recipient = next_account_info(&mut iter)?;
     if authority.key != expected_authority {
         return Err(ProgramError::Custom(WRONG_AUTHORITY));
     }
     if !authority.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    if !escrow.is_writable || !recipient.is_writable || escrow.key == recipient.key || amount == 0 {
+    if fee_recipient.key != expected_fee_recipient {
+        return Err(ProgramError::Custom(WRONG_FEE_RECIPIENT));
+    }
+    if !escrow.is_writable || !recipient.is_writable || !fee_recipient.is_writable
+        || escrow.key == recipient.key || escrow.key == fee_recipient.key || amount == 0
+    {
         return Err(ProgramError::InvalidArgument);
     }
     if escrow.owner != program_id || escrow.executable {
         return Err(ProgramError::InvalidAccountOwner);
     }
-    if recipient.executable {
+    if recipient.executable || fee_recipient.executable {
         return Err(ProgramError::InvalidArgument);
     }
     let data = escrow.try_borrow_data()?;
@@ -111,15 +138,33 @@ fn withdraw(
         .checked_sub(amount)
         .filter(|balance| *balance >= rent.minimum_balance(ESCROW_LEN))
         .ok_or(ProgramError::InsufficientFunds)?;
+    // The fee wallet pays itself no fee; this also avoids a second mutable
+    // borrow of the same account below.
+    let fee = if recipient.key == fee_recipient.key {
+        0
+    } else {
+        protocol_fee(amount)
+    };
     let credited = recipient
         .lamports()
-        .checked_add(amount)
+        .checked_add(amount - fee)
         .ok_or(ProgramError::ArithmeticOverflow)?;
-    // Acquire both borrows before mutating either balance.
+    let fee_credited = fee_recipient
+        .lamports()
+        .checked_add(fee)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    // Acquire all borrows before mutating any balance.
     let mut escrow_lamports = escrow.try_borrow_mut_lamports()?;
     let mut recipient_lamports = recipient.try_borrow_mut_lamports()?;
+    let fee_lamports = match fee {
+        0 => None,
+        _ => Some(fee_recipient.try_borrow_mut_lamports()?),
+    };
     **escrow_lamports = remaining;
     **recipient_lamports = credited;
+    if let Some(mut fee_lamports) = fee_lamports {
+        **fee_lamports = fee_credited;
+    }
     Ok(())
 }
 

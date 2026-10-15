@@ -8,9 +8,9 @@ export interface Service {
     paymentService: PaymentService;
 }
 
-export function createService(db: NodePgDatabase, escrowProgramId: PublicKey, authority: Signer, connection: Connection): Service {
+export function createService(db: NodePgDatabase, escrowProgramId: PublicKey, authority: Signer, feeRecipient: PublicKey, connection: Connection): Service {
     return {
-        escrowService: new EscrowService(db, escrowProgramId, authority, connection),
+        escrowService: new EscrowService(db, escrowProgramId, authority, feeRecipient, connection),
         paymentService: new PaymentService(db),
     };
 }
