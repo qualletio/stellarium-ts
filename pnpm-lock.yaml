@@ -168,7 +168,7 @@ importers:
     devDependencies:
       turbo:
         specifier: latest
-        version: 2.11.7
+        version: 2.11.8
 
   apps/local-caller-node:
     dependencies:
@@ -179,8 +179,8 @@ importers:
         specifier: ^1.0.5
         version: 1.0.5(@types/pg@8.23.1)(sqlite3@6.0.1)
       stellarium-ts:
-        specifier: 0.8.0
-        version: 0.8.0(@types/pg@8.23.1)
+        specifier: 0.9.0
+        version: 0.9.0(@types/pg@8.23.1)
     devDependencies:
       typescript:
         specifier: ^7.0.2
@@ -195,8 +195,8 @@ importers:
         specifier: ^1.0.5
         version: 1.0.5(@types/pg@8.23.1)(sqlite3@6.0.1)
       stellarium-ts:
-        specifier: 0.8.0
-        version: 0.8.0(@types/pg@8.23.1)
+        specifier: 0.9.0
+        version: 0.9.0(@types/pg@8.23.1)
     devDependencies:
       typescript:
         specifier: ^7.0.2
@@ -689,8 +689,18 @@ packages:
     cpu: [x64]
     os: [darwin]
 
+  '@turbo/darwin-64@2.11.8':
+    resolution: {integrity: sha512-u+6s4C2hskRYx6MkW2uT7BCW6sESCL/+5bjHDDWUfQfQliCSJ7lAHAL6RQaw0an9WU6nJvwYgT786mEWul2kDw==}
+    cpu: [x64]
+    os: [darwin]
+
   '@turbo/darwin-arm64@2.11.7':
     resolution: {integrity: sha512-Vhv8ybgIflosNDSSRD9fNXHlCFA60dsGyTqQmc7l28SEX5jOaweCCD4BBYNd8/p0WGkw3e7tZbfA9w6FsujGvw==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@turbo/darwin-arm64@2.11.8':
+    resolution: {integrity: sha512-y3qpPbclA4MuzAf/pSp6ivifp2mBCiLMHyf/bVq2eAJLjTnzev9JG5eqFhM0UvDGi0b3QKRNZi2HiavPnLbEbw==}
     cpu: [arm64]
     os: [darwin]
 
@@ -699,8 +709,18 @@ packages:
     cpu: [x64]
     os: [android, linux]
 
+  '@turbo/linux-64@2.11.8':
+    resolution: {integrity: sha512-5Pm0icIkXPjk/HxhZD2AFMCyfH8RlITgtOksoSAdeLtXHAagzAqaAkdqG+6Ebd3eGPT1k3nJZWQD4wCLlIte5g==}
+    cpu: [x64]
+    os: [android, linux]
+
   '@turbo/linux-arm64@2.11.7':
     resolution: {integrity: sha512-thVYGov7S+llXAxrl3kBb/efalav0xhrjl5NHCR6AfKx14JkbqaetvbVwyss4FvZ9rt+Pv3xsTb+8SIYix8DTg==}
+    cpu: [arm64]
+    os: [android, linux]
+
+  '@turbo/linux-arm64@2.11.8':
+    resolution: {integrity: sha512-gh/Pcg7WVLS22SpoFqNxs/4y6feU/+Qa9nkCLTOHMTLjE3ADeqMjLFulq1LVCsWD2vjQccCnaZSUOLJ/lHzBRQ==}
     cpu: [arm64]
     os: [android, linux]
 
@@ -709,8 +729,18 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@turbo/windows-64@2.11.8':
+    resolution: {integrity: sha512-NnHtcWPE6PymlYsCKEuYditlY/nMeCEB3xyD4yc3cpqpxW7/4Xqdlqd5TpqvEpjS8CDazPHelGCQS/ghUIoZ6g==}
+    cpu: [x64]
+    os: [win32]
+
   '@turbo/windows-arm64@2.11.7':
     resolution: {integrity: sha512-88Xv2f7SLGVJ68lRRx8o375dKmnZYNdDtvlKcPA0kZpcF93eAQd8l96BKQ0/AMHG0bMJA0Z5QqoqtetxzNsC+g==}
+    cpu: [arm64]
+    os: [win32]
+
+  '@turbo/windows-arm64@2.11.8':
+    resolution: {integrity: sha512-o8UyM/VlYCvW5Enfo2O37Pe11p3wmnEYtJrohXA2SyOlehmo5KyXpptPRKrXOMNfdmoYEulo6Nhj0tIv2UB0hA==}
     cpu: [arm64]
     os: [win32]
 
@@ -1871,8 +1901,8 @@ packages:
   std-env@4.3.0:
     resolution: {integrity: sha512-OtU/EgQ1kIm5KwqQpBC6ZEMXrZRui11w8zgfTWp8cdO9B8OaPsbA8bTHO2P+HNo1VlUTGMVBwPhydu6poeXiag==}
 
-  stellarium-ts@0.8.0:
-    resolution: {integrity: sha512-exsdDGT++icThILuZCr3J58shKyHRigR2nrQ0xQG91Fv58sseEcfqD9zC+Nn5i++qQEFi7s8gQpwAqH0pSFNbQ==}
+  stellarium-ts@0.9.0:
+    resolution: {integrity: sha512-94x+DoWKC6jvBTQ7FrZi+9wtuyVJxkYwbV3b05BBwrNqyRBbcvSsw84eZ0X5sbdGm5d8sPbdIuRz0IZpch7qnQ==}
     engines: {node: '>=20'}
 
   stream-chain@2.2.5:
@@ -1944,6 +1974,10 @@ packages:
 
   turbo@2.11.7:
     resolution: {integrity: sha512-RhXHbqfvY6o3xt/zSHCwSNwLrZlXiqHzewi4eAj9PtZ1T1CqgMJ2yIDb7SKPTG9IikTm925mfzL6hldQVdyNWw==}
+    hasBin: true
+
+  turbo@2.11.8:
+    resolution: {integrity: sha512-OwiFs6xNO5c2XtPgYCgCXuSlkur4b5T/OeAbOKzgsHh5mmJ9Sh7m041fz2JchrvyQv8hmae+1n07HfBmvDLZRA==}
     hasBin: true
 
   type-is@2.1.0:
@@ -2388,19 +2422,37 @@ snapshots:
   '@turbo/darwin-64@2.11.7':
     optional: true
 
+  '@turbo/darwin-64@2.11.8':
+    optional: true
+
   '@turbo/darwin-arm64@2.11.7':
+    optional: true
+
+  '@turbo/darwin-arm64@2.11.8':
     optional: true
 
   '@turbo/linux-64@2.11.7':
     optional: true
 
+  '@turbo/linux-64@2.11.8':
+    optional: true
+
   '@turbo/linux-arm64@2.11.7':
+    optional: true
+
+  '@turbo/linux-arm64@2.11.8':
     optional: true
 
   '@turbo/windows-64@2.11.7':
     optional: true
 
+  '@turbo/windows-64@2.11.8':
+    optional: true
+
   '@turbo/windows-arm64@2.11.7':
+    optional: true
+
+  '@turbo/windows-arm64@2.11.8':
     optional: true
 
   '@types/chai@5.2.3':
@@ -3490,7 +3542,7 @@ snapshots:
 
   std-env@4.3.0: {}
 
-  stellarium-ts@0.8.0(@types/pg@8.23.1):
+  stellarium-ts@0.9.0(@types/pg@8.23.1):
     dependencies:
       dotenv: 18.0.7
       fastify: 5.12.5
@@ -3620,6 +3672,15 @@ snapshots:
       '@turbo/linux-arm64': 2.11.7
       '@turbo/windows-64': 2.11.7
       '@turbo/windows-arm64': 2.11.7
+
+  turbo@2.11.8:
+    optionalDependencies:
+      '@turbo/darwin-64': 2.11.8
+      '@turbo/darwin-arm64': 2.11.8
+      '@turbo/linux-64': 2.11.8
+      '@turbo/linux-arm64': 2.11.8
+      '@turbo/windows-64': 2.11.8
+      '@turbo/windows-arm64': 2.11.8
 
   type-is@2.1.0:
     dependencies:
