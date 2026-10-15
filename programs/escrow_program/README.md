@@ -5,7 +5,8 @@ returns its 32-byte public key through Solana return data. The controlling walle
 must sign setup; the payer funds rent, and the user can be a readonly public key.
 The authority can be the payer. Setup does not debit the user. That same
 controlling wallet can withdraw SOL to a chosen nonexecutable account while
-preserving the escrow's rent reserve.
+preserving the escrow's rent reserve. Each withdrawal pays a 20% protocol fee
+to the compiled `PROTOCOL_FEE_RECIPIENT` wallet.
 
 ## TODO: configure your wallet
 
@@ -24,6 +25,18 @@ pub const ESCROW_AUTHORITY: Option<Pubkey> =
 
 Until configured, setup and withdrawal fail with custom error `0`. An incorrect authority
 fails with custom error `1`. Only a public key belongs here.
+
+Also replace the protocol fee wallet:
+
+```rust
+pub const PROTOCOL_FEE_RECIPIENT: Option<Pubkey> =
+    Some(solana_program::pubkey!("PROTOCOL_FEE_WALLET_PUBLIC_KEY"));
+```
+
+Until configured, withdrawals fail with custom error `2` (setup still works). Passing
+a different fee account fails with custom error `3`. The fee rate is
+`PROTOCOL_FEE_BPS` (2000 basis points = 20%); changing either value requires a
+program upgrade.
 
 Use that same wallet as the deployed program's **upgrade authority**. These are
 separate concepts: the escrow account's runtime owner is this program; its data
@@ -45,7 +58,7 @@ node --test apps/operator/tests/*.test.mjs
 
 Rust unit tests cover authorization, instruction parsing, account validation,
 reinitialization prevention, canonical PDA derivation, withdrawal balance changes,
-rent preservation, and failure atomicity. Client tests cover instruction
+protocol fee splitting and rounding, rent preservation, and failure atomicity. Client tests cover instruction
 construction, decoding, and budget queries. These are not validator integration
 tests; exercise setup and withdrawal on localnet after configuring the authority.
 
@@ -152,20 +165,27 @@ const { instruction } = createWithdrawEscrowInstruction({
   authority, // must match ESCROW_AUTHORITY and sign the transaction
   user,      // identifies which user's escrow to withdraw from
   recipient: new PublicKey('RECIPIENT_PUBLIC_KEY'),
-  amountLamports: 10_000_000n, // 0.01 SOL
+  feeRecipient: new PublicKey('PROTOCOL_FEE_WALLET_PUBLIC_KEY'), // must match the program
+  amountLamports: 10_000_000n, // 0.01 SOL: 0.008 to recipient, 0.002 protocol fee
 });
 ```
 
+The escrow is debited `amountLamports`. The protocol fee wallet receives
+`protocolFeeLamports(amountLamports)` (20%, rounded down, so withdrawals under 5
+lamports pay no fee) and the recipient receives the rest. When the recipient is
+the protocol fee wallet itself, no fee is split off and it receives the full amount.
+
 Simulate the transaction, then have the controlling wallet sign and submit it
 with your chosen fee payer, cluster and recent blockhash. A separate fee payer
-also signs. The recipient needs no signature and can be the controlling wallet.
-For a newly created recipient account, fund it sufficiently to satisfy the
+also signs. Neither the recipient nor the protocol fee wallet signs, and the
+recipient can be the controlling wallet.
+For a newly created recipient or fee account, fund it sufficiently to satisfy the
 cluster's rent rules; simulation will report any runtime rejection.
 
-The program checks the configured signer, escrow owner, discriminator, stored
-authority, canonical PDA and bump, and writable accounts. It rejects zero amounts,
-self-transfers to the escrow, executable recipients, overflow, and withdrawals
-that would consume the rent reserve. Balance changes conserve lamports and leave
+The program checks the configured signer, configured fee wallet, escrow owner,
+discriminator, stored authority, canonical PDA and bump, and writable accounts.
+It rejects zero amounts, transfers to the escrow itself, executable recipient or
+fee accounts, overflow, and withdrawals that would consume the rent reserve. Balance changes conserve lamports and leave
 the escrow's state intact. SOL is debited directly from the program-owned account.
 
 Withdraw instruction data is `[1]` followed by a positive **u64 amount in
@@ -176,6 +196,7 @@ little-endian order**, for a total of 9 bytes. Account order:
 | 0 | Configured authority | Yes | No |
 | 1 | Escrow PDA | No | Yes |
 | 2 | Chosen recipient | No | Yes |
+| 3 | Protocol fee recipient (`PROTOCOL_FEE_RECIPIENT`) | No | Yes |
 
 The authority becomes writable as well when it is the recipient or fee payer.
 Neither the System Program nor a user signature is needed for withdrawal.
@@ -211,7 +232,8 @@ ID before trusting it.
 
 ## Funds and scope
 
-This program supports escrow setup and authority-controlled SOL withdrawals.
+This program supports escrow setup and authority-controlled SOL withdrawals,
+each paying a 20% protocol fee.
 An initialized escrow can receive SOL through an ordinary System Program transfer;
 only the configured controlling wallet can release it. Withdrawals preserve rent,
 so reclaiming the rent reserve would require a future close instruction. There is

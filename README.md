@@ -184,6 +184,7 @@ mkdir -p .keys/local-e2e
 solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/operator.json
 solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/program.json
 solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/recipient.json
+solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/protocol-fee.json
 
 node --input-type=module <<'JS'
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
@@ -198,6 +199,7 @@ const common = {
   ESCROW_PROGRAM_ID: address('program'),
   AUTHORITY_ADDRESS: address('operator'),
   RECIPIENT_ADDRESS: address('recipient'),
+  PROTOCOL_FEE_RECIPIENT: address('protocol-fee'),
 };
 for (const [role, port] of [['caller', 3000], ['provider', 3002]]) {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -221,59 +223,108 @@ console.log('Local fixture configuration written; no secrets printed.');
 JS
 ```
 
-Generate Caller user that pays for the escrow wallet and fund the wallet:
+Generate a caller wallet that funds the user's escrow:
 
 ```sh
-solana-keygen new --no-bip39-passphrase --outfile .keys/local-e2e/caller.json
-CALLER=$(solana-keygen pubkey .keys/local-e2e/caller.json)
-solana airdrop 5 "$CALLER"
+solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/caller.json
 ```
+
+Configure the escrow program. The operator key is the escrow authority: it signs
+escrow setup and withdrawals and is the program's upgrade authority. Each escrow
+withdrawal pays 20% of the amount to the protocol fee wallet and the remaining
+80% to the resource provider. Print both addresses:
+
+```sh
+solana-keygen pubkey .keys/local-e2e/operator.json
+solana-keygen pubkey .keys/local-e2e/protocol-fee.json
+```
+
+In `programs/escrow_program/src/lib.rs`, set both constants to those addresses:
+
+```rust
+pub const ESCROW_AUTHORITY: Option<Pubkey> =
+    Some(solana_program::pubkey!("YOUR_OPERATOR_ADDRESS"));
+pub const PROTOCOL_FEE_RECIPIENT: Option<Pubkey> =
+    Some(solana_program::pubkey!("YOUR_PROTOCOL_FEE_ADDRESS"));
+```
+
+If `ESCROW_AUTHORITY` is unset, setup and withdrawals fail with custom program
+error `0`; if it is a different wallet than the operator, they fail with error `1`.
+If `PROTOCOL_FEE_RECIPIENT` is unset, withdrawals fail with error `2`.
 
 Build the Escrow program:
 
 ```sh
-cargo build-sbf
+cargo build-sbf --manifest-path programs/escrow_program/Cargo.toml \
+  --sbf-out-dir programs/escrow_program/target/deploy
 ```
 
-Start Solana locally:
+Fund the wallets. The operator pays for the program deploy and escrow setup. The
+recipient and protocol fee wallets are prefunded so small payments don't fail the
+rent check on a new account:
 
 ```sh
-solana config set -ul
-solana-test-validator
+solana airdrop 100 "$(solana-keygen pubkey .keys/local-e2e/operator.json)"
+solana airdrop 5 "$(solana-keygen pubkey .keys/local-e2e/caller.json)"
+solana airdrop 1 "$(solana-keygen pubkey .keys/local-e2e/recipient.json)"
+solana airdrop 1 "$(solana-keygen pubkey .keys/local-e2e/protocol-fee.json)"
 ```
 
-Setup a wallet to pay for the Escrow program deploy. Use `test` as the BIP39 Passphrase:
+Deploy the Escrow program with the operator as fee payer and upgrade authority:
 
 ```sh
-solana-keygen new -o /Users/christopher/dev/github/stellarium-ts/.keys/payer.json
+solana program deploy \
+  --keypair .keys/local-e2e/operator.json \
+  --upgrade-authority .keys/local-e2e/operator.json \
+  --program-id .keys/local-e2e/program.json \
+  programs/escrow_program/target/deploy/escrow_program.so
+solana program show "$(solana-keygen pubkey .keys/local-e2e/program.json)"
 ```
 
-Fund the wallet:
+The program ID is the address of `.keys/local-e2e/program.json`. Its upgrade
+authority should be the operator address.
 
-```sh
-solana airdrop 5 <YOUR_PAYER_WALLET_ADDRESS>
+Create a `.env` file in each app directory. The generated files in
+`.keys/local-e2e/` (`operator.env`, `caller.env`, `provider.env`) hold the
+values to copy.
+
+`apps/local-caller-node/.env`:
+
+```
+SIGNING_PUBLIC_KEY=
+SIGNING_PRIVATE_KEY=
+USER_ADDRESS=
+PORT=
+API_KEY=SET_THIS_TO_ANYTHING
 ```
 
-Create the recipient wallet with an airdrop:
+`apps/local-resource-node/.env`:
 
-```sh
-solana airdrop 1 YOUR_RECEIPIENT_ADDRESS
-solana balance YOUR_RECEIPIENT_ADDRESS
+```
+SIGNING_PUBLIC_KEY=
+SIGNING_PRIVATE_KEY=
+USER_ADDRESS=
+RECIPIENT_ADDRESS=
+PORT=
+API_KEY=SET_THIS_TO_ANYTHING
 ```
 
-Deploy the Escrow program:
+`apps/operator/.env`:
 
-```sh
-solana program deploy ./target/deploy/escrow_program.so
+```
+ESCROW_PROGRAM_ID=
+PROTOCOL_FEE_RECIPIENT=
+PRIVATE_KEY=
+PORT=
 ```
 
-Copy the program id and save it in the root of the operator `.env`.
-Create the `.env` file if it does not exist.
+`PROTOCOL_FEE_RECIPIENT` must be the same address compiled into the escrow program.
+If it doesn't match, withdrawals fail with custom program error `3`.
 
-Fund the operator wallet so it can create escrow accounts:
+Start the services:
 
 ```sh
-solana airdrop 5 <YOUR_OPERATOR_PAYER_ADDRESS>
+docker compose up -d --build
 ```
 
 Initialize an escrow account:
@@ -303,44 +354,14 @@ Copy the escrow address value:
 Fund the escrow address:
 
 ```sh
+ESCROW_ADDRESS=YOUR_ESCROW_ADDRESS
 solana transfer "$ESCROW_ADDRESS" 0.1 \
   --from .keys/local-e2e/caller.json \
   --fee-payer .keys/local-e2e/caller.json \
   --allow-unfunded-recipient
 ```
 
-Double-check your `.env` files for each service.
-
-The `local-caller-node` should have the following `.env` properties:
-
-```
-SIGNING_PUBLIC_KEY=
-SIGNING_PRIVATE_KEY=
-USER_ADDRESS=
-PORT=
-API_KEY=SET_THIS_TO_ANYTHING
-```
-
-The `local-resource-node` should have the following `.env` properties:
-
-```
-SIGNING_PUBLIC_KEY=
-SIGNING_PRIVATE_KEY=
-USER_ADDRESS=
-RECEIPIENT_ADDRESS=
-PORT=
-API_KEY=SET_THIS_TO_ANYTHING
-```
-
-The `operator` should have the following `.env` properties:
-
-```
-ESCROW_PROGRAM_ID=
-PRIVATE_KEY=
-PORT=
-```
-
-If that looks right, run a request! if it does not, fix and rerun `docker compose up -d --build`.
+Run a request. If it fails, check each `.env` file, then rerun `docker compose up -d --build`.
 
 POST `localhost:3003/v1/run`
 

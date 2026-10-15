@@ -38,25 +38,39 @@ export function createEscrowInstruction(input: {
     };
 }
 
+/** Must match the program's PROTOCOL_FEE_BPS (2000 = 20%). */
+export const PROTOCOL_FEE_BPS = 2_000n;
+
+/** Protocol fee the program takes from a withdrawal, rounded down. */
+export function protocolFeeLamports(amountLamports: bigint): bigint {
+    return amountLamports * PROTOCOL_FEE_BPS / 10_000n;
+}
+
 // TODO: Make this a reasonable max value for the platform to protect against abuse.
 const AMOUNT_WITHDRAW_MAX = 18_446_744_073_709_551_615n;
 
-/** Build a SOL withdrawal authorized by the configured controlling wallet. */
+/**
+ * Build a SOL withdrawal authorized by the configured controlling wallet.
+ * The escrow is debited `amountLamports`; `feeRecipient` (the program's
+ * PROTOCOL_FEE_RECIPIENT) receives protocolFeeLamports(amountLamports) and
+ * `recipient` the rest, unless the recipient is the fee recipient.
+ */
 export function createWithdrawEscrowInstruction(input: {
     programId: PublicKey;
     authority: PublicKey;
     user: PublicKey;
     recipient: PublicKey;
+    feeRecipient: PublicKey;
     amountLamports: bigint;
 }): { escrowAddress: PublicKey; instruction: TransactionInstruction } {
-    const { programId, authority, user, recipient, amountLamports } = input;
+    const { programId, authority, user, recipient, feeRecipient, amountLamports } = input;
     if (typeof amountLamports !== 'bigint' || amountLamports <= 0n ||
         amountLamports > AMOUNT_WITHDRAW_MAX) {
         throw new RangeError('amountLamports must be a positive bigint in the u64 range');
     }
     const escrowAddress = getEscrowAddress(programId, authority, user);
-    if (recipient.equals(escrowAddress)) {
-        throw new Error('Withdrawal recipient must differ from the escrow');
+    if (recipient.equals(escrowAddress) || feeRecipient.equals(escrowAddress)) {
+        throw new Error('Withdrawal recipient and fee recipient must differ from the escrow');
     }
     const data = Buffer.alloc(9);
     data[0] = 1;
@@ -69,6 +83,7 @@ export function createWithdrawEscrowInstruction(input: {
                 { pubkey: authority, isSigner: true, isWritable: false },
                 { pubkey: escrowAddress, isSigner: false, isWritable: true },
                 { pubkey: recipient, isSigner: false, isWritable: true },
+                { pubkey: feeRecipient, isSigner: false, isWritable: true },
             ],
             data,
         }),

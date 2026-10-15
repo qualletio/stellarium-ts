@@ -64,7 +64,8 @@ Caller node :3000  -- signed paid invocation --> Provider node :3002
 | Program ID | Separate Solana program keypair's public address; becomes `ESCROW_PROGRAM_ID`. Not the authority. |
 | Caller/user | Node Ed25519 signing key; **raw public key underlying SPKI**, converted to Solana base58. Used in escrow PDA seeds. No separate caller wallet is automatically linked to it. |
 | Provider signing key | Separate node Ed25519 key for peer discovery. |
-| Provider recipient | Separate Solana public address in the function payment manifest. Receives SOL; does not sign the withdrawal. |
+| Provider recipient | Separate Solana public address in the function payment manifest. Receives 80% of each withdrawal; does not sign it. |
+| Protocol fee wallet | Separate Solana public address compiled as `PROTOCOL_FEE_RECIPIENT` and set as the operator's `PROTOCOL_FEE_RECIPIENT`. Receives 20% of each withdrawal; does not sign it. |
 | Escrow PDA | Derived from `["escrow", authority bytes, user bytes]` under the deployed program ID. Has no private key. Holds 73 bytes of state and SOL. |
 
 Use three terminals for validator/operator/provider and another for the caller;
@@ -110,7 +111,7 @@ NO_DNA=1 cargo test --manifest-path programs/escrow_program/Cargo.toml --locked
 ```
 
 Type checking does not detect the SQL or payment integration failures above.
-The 18 Rust tests exercise helpers and program logic without a validator. The
+The 23 Rust tests exercise helpers and program logic without a validator. The
 operator README's `apps/operator/tests/*.test.mjs` files do not exist in this
 checkout; do not treat that command as validator coverage.
 
@@ -127,6 +128,7 @@ mkdir -p .keys/local-e2e
 solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/operator.json
 solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/program.json
 solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/recipient.json
+solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/protocol-fee.json
 
 node --input-type=module <<'JS'
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
@@ -141,6 +143,7 @@ const common = {
   ESCROW_PROGRAM_ID: address('program'),
   AUTHORITY_ADDRESS: address('operator'),
   RECIPIENT_ADDRESS: address('recipient'),
+  PROTOCOL_FEE_RECIPIENT: address('protocol-fee'),
 };
 for (const [role, port] of [['caller', 3000], ['provider', 3002]]) {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -173,15 +176,18 @@ Read only public addresses into the command terminal:
 export AUTHORITY_ADDRESS="$(solana-keygen pubkey .keys/local-e2e/operator.json)"
 export ESCROW_PROGRAM_ID="$(solana-keygen pubkey .keys/local-e2e/program.json)"
 export RECIPIENT_ADDRESS="$(solana-keygen pubkey .keys/local-e2e/recipient.json)"
+export PROTOCOL_FEE_RECIPIENT="$(solana-keygen pubkey .keys/local-e2e/protocol-fee.json)"
 export USER_ADDRESS="$(python3 -c 'from pathlib import Path; print(dict(line.split("=",1) for line in Path(".keys/local-e2e/caller.env").read_text().splitlines())["USER_ADDRESS"])')"
 ```
 
-Edit `programs/escrow_program/src/lib.rs`, replacing `None` with your public
-`AUTHORITY_ADDRESS` (only the public address belongs in source):
+Edit `programs/escrow_program/src/lib.rs`, replacing each `None` with your public
+`AUTHORITY_ADDRESS` and `PROTOCOL_FEE_RECIPIENT` (only public addresses belong in source):
 
 ```rust
 pub const ESCROW_AUTHORITY: Option<Pubkey> =
     Some(solana_program::pubkey!("YOUR_LOCAL_OPERATOR_PUBLIC_ADDRESS"));
+pub const PROTOCOL_FEE_RECIPIENT: Option<Pubkey> =
+    Some(solana_program::pubkey!("YOUR_LOCAL_PROTOCOL_FEE_ADDRESS"));
 ```
 
 Build the configured binary:
@@ -210,6 +216,7 @@ curl -sS "$RPC" -H 'Content-Type: application/json' \
 
 solana --url "$RPC" airdrop 100 "$AUTHORITY_ADDRESS"
 solana --url "$RPC" airdrop 1 "$RECIPIENT_ADDRESS"
+solana --url "$RPC" airdrop 1 "$PROTOCOL_FEE_RECIPIENT"
 solana --url "$RPC" program deploy \
   --keypair .keys/local-e2e/operator.json \
   --fee-payer .keys/local-e2e/operator.json \
@@ -220,8 +227,8 @@ solana --url "$RPC" program show "$ESCROW_PROGRAM_ID"
 ```
 
 Expect the program ID to equal `ESCROW_PROGRAM_ID` and its upgrade authority to
-equal `AUTHORITY_ADDRESS`. The recipient is prefunded so a tiny withdrawal does
-not create an underfunded new account. Setup pays escrow rent; it does **not**
+equal `AUTHORITY_ADDRESS`. The recipient and protocol fee wallet are prefunded so
+a tiny withdrawal does not create an underfunded new account. Setup pays escrow rent; it does **not**
 fund the user's spendable budget. CLI deployment and local validation follow the
 [Solana Rust program guide](https://solana.com/docs/programs/rust).
 
@@ -490,8 +497,9 @@ assert meta['err'] is None, meta['err']
 keys = message['accountKeys']
 loaded = meta.get('loadedAddresses') or {}
 keys += loaded.get('writable', []) + loaded.get('readonly', [])
-escrow, recipient, authority, program = [os.environ[name] for name in
-    ['ESCROW_ADDRESS', 'RECIPIENT_ADDRESS', 'AUTHORITY_ADDRESS', 'ESCROW_PROGRAM_ID']]
+escrow, recipient, authority, program, fee_wallet = [os.environ[name] for name in
+    ['ESCROW_ADDRESS', 'RECIPIENT_ADDRESS', 'AUTHORITY_ADDRESS', 'ESCROW_PROGRAM_ID',
+     'PROTOCOL_FEE_RECIPIENT']]
 def delta(address):
     i = keys.index(address)
     return meta['postBalances'][i] - meta['preBalances'][i]
@@ -505,14 +513,15 @@ withdrawals = [ix for ix in message['instructions']
     if keys[ix['programIdIndex']] == program and unbase58(ix['data'])[:1] == b'\x01']
 assert len(withdrawals) == 1, 'Expected one escrow withdrawal instruction'
 ix = withdrawals[0]
-assert [keys[i] for i in ix['accounts']] == [authority, escrow, recipient]
+assert [keys[i] for i in ix['accounts']] == [authority, escrow, recipient, fee_wallet]
 data = unbase58(ix['data'])
 assert len(data) == 9 and int.from_bytes(data[1:], 'little') == 500
 assert delta(escrow) == -500, delta(escrow)
-assert delta(recipient) == 500, delta(recipient)
+assert delta(recipient) == 400, delta(recipient)
+assert delta(fee_wallet) == 100, delta(fee_wallet)
 assert keys[0] == authority, 'Expected operator fee payer'
 assert delta(authority) == -meta['fee'], (delta(authority), meta['fee'])
-print('PASS: successful 500-lamport withdrawal; operator paid the fee; slot', tx['slot'])
+print('PASS: 500-lamport withdrawal split 400/100 with protocol fee; operator paid the tx fee; slot', tx['slot'])
 PY
 ```
 
@@ -600,6 +609,8 @@ replay tests. Inspect chain balances and signatures, not only HTTP status codes.
 | Invalid DER / invalid public key | Caller env loaded into the invoker; SPKI/raw conversion in the operator. |
 | Simulation error, custom program error 0 | Program was built with `ESCROW_AUTHORITY = None`; configure, rebuild, redeploy. |
 | Custom program error 1 | Compiled authority differs from operator `PRIVATE_KEY` public address. |
+| Withdrawal fails with custom program error 2 | Program was built with `PROTOCOL_FEE_RECIPIENT = None`; configure, rebuild, redeploy. |
+| Withdrawal fails with custom program error 3 | Operator `PROTOCOL_FEE_RECIPIENT` differs from the compiled fee wallet. |
 | Payment returns `existing` | Withdrawal still has the erroneous initialization short circuit. |
 | `relation receipts does not exist` | Run section 5 against the operator's actual `DATABASE_URL`. |
 | `ECONNREFUSED` on 8899/8900 | Validator process, RPC/WS ports, and local URL. |

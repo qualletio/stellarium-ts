@@ -13,6 +13,7 @@ const fastify = Fastify({
 })
 
 const escrowProgramId = new PublicKey(process.env.ESCROW_PROGRAM_ID!);
+const protocolFeeRecipient = new PublicKey(process.env.PROTOCOL_FEE_RECIPIENT!);
 const privateKey = Keypair.fromSecretKey(new Uint8Array(JSON.parse(process.env.PRIVATE_KEY!)));
 fastify.log.info(`Loaded authority account: ${privateKey.publicKey.toBase58()}`);
 const connection = new Connection(process.env.SOLANA_RPC_URL ?? 'http://localhost:8899', 'confirmed');
@@ -26,7 +27,7 @@ try {
   process.exit(1);
 }
 fastify.log.info('Applied database migrations');
-const service = createService(db, escrowProgramId, privateKey, connection);
+const service = createService(db, escrowProgramId, privateKey, protocolFeeRecipient, connection);
 
 fastify.register(routes, { prefix: '/v1', service });
 

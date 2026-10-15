@@ -15,6 +15,8 @@ payer. The deployed escrow program must have the same public key configured in
 
 - `DATABASE_URL`: existing PostgreSQL connection configuration.
 - `ESCROW_PROGRAM_ID`: deployed escrow program address (also used for withdrawals).
+- `PROTOCOL_FEE_RECIPIENT`: wallet receiving the 20% protocol fee on each
+  withdrawal. Must equal the program's compiled `PROTOCOL_FEE_RECIPIENT`.
 - `PRIVATE_KEY`: existing server signer configuration, JSON-encoded Solana secret
   key byte array. Configure it privately; never include it in requests or logs.
 - `OPERATOR_API_TOKEN`: required bearer token for authenticated operator callers.
@@ -98,7 +100,9 @@ SPKI public key**, converted to a Solana base58 address. Create the escrow with
 that address; a different Solana wallet is not automatically linked to the node
 signing key. The API accepts no caller-supplied escrow user or transfer overrides.
 A valid voucher allows the operator's configured controlling wallet to submit
-only the signed amount to the signed recipient. The service validates escrow
+only the signed amount from the escrow. The program pays 20% of it (rounded
+down) to `PROTOCOL_FEE_RECIPIENT` as a protocol fee and the remaining 80% to the
+signed recipient. The service validates escrow
 state and budget above rent, simulates, checks expiry again, signs, submits, and
 confirms. A confirmed payment returns HTTP 200 with the same result fields as
 escrow creation.
