@@ -147,6 +147,16 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         const resourceRequest = request.body as ResourceRunRequest;
         const paymentVoucher = resourceRequest.paymentVoucher;
 
+        // Check that the API Key matches the env variable
+        const authorizationHeader = request.headers['authorization'];
+        if (!authorizationHeader) {
+            return reply.status(401).send({ error: 'Authorization header is required' });
+        }
+        const apiKey = authorizationHeader.split(' ')[1];
+        if (apiKey !== process.env.API_KEY) {
+            return reply.status(401).send({ error: 'Invalid API Key' });
+        }
+
         if (paymentVoucher) {
             const isValid = verifyData(
                 paymentVoucherPayload(paymentVoucher, resourceRequest.resourcePath, resourceRequest.resourceName, resourceRequest.parameters),
