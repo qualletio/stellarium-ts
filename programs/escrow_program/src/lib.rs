@@ -28,7 +28,9 @@ pub const WRONG_FEE_RECIPIENT: u32 = 3;
 
 // TODO: Replace None with Some(solana_program::pubkey!("PROTOCOL_FEE_WALLET"))
 // before deployment. Withdrawals fail closed until this is configured.
-pub const PROTOCOL_FEE_RECIPIENT: Option<Pubkey> = None;
+pub const PROTOCOL_FEE_RECIPIENT: Option<Pubkey> = Some(solana_program::pubkey!(
+    "6xwrneeAHpUEaMp99YV4WVyRgCNai1XjwC1VxcCz5QPP"
+));
 /// Protocol fee taken from each withdrawal, in basis points (2000 = 20%).
 pub const PROTOCOL_FEE_BPS: u64 = 2_000;
 
@@ -71,9 +73,16 @@ pub fn process_instruction(
     match amount {
         None => initialize(program_id, accounts, &authority),
         Some(amount) => {
-            let fee_recipient = PROTOCOL_FEE_RECIPIENT
-                .ok_or(ProgramError::Custom(FEE_RECIPIENT_NOT_CONFIGURED))?;
-            withdraw(program_id, accounts, &authority, &fee_recipient, amount, &Rent::get()?)
+            let fee_recipient =
+                PROTOCOL_FEE_RECIPIENT.ok_or(ProgramError::Custom(FEE_RECIPIENT_NOT_CONFIGURED))?;
+            withdraw(
+                program_id,
+                accounts,
+                &authority,
+                &fee_recipient,
+                amount,
+                &Rent::get()?,
+            )
         }
     }
 }
@@ -105,8 +114,12 @@ fn withdraw(
     if fee_recipient.key != expected_fee_recipient {
         return Err(ProgramError::Custom(WRONG_FEE_RECIPIENT));
     }
-    if !escrow.is_writable || !recipient.is_writable || !fee_recipient.is_writable
-        || escrow.key == recipient.key || escrow.key == fee_recipient.key || amount == 0
+    if !escrow.is_writable
+        || !recipient.is_writable
+        || !fee_recipient.is_writable
+        || escrow.key == recipient.key
+        || escrow.key == fee_recipient.key
+        || amount == 0
     {
         return Err(ProgramError::InvalidArgument);
     }

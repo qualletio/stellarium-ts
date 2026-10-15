@@ -179,8 +179,8 @@ importers:
         specifier: ^1.1.0
         version: 1.1.0(@types/pg@8.23.1)(sqlite3@6.0.1)
       stellarium-ts:
-        specifier: 0.10.0
-        version: 0.10.0(@types/pg@8.23.1)
+        specifier: 0.11.0
+        version: 0.11.0(@types/pg@8.23.1)
     devDependencies:
       typescript:
         specifier: ^7.0.2
@@ -195,8 +195,8 @@ importers:
         specifier: ^1.0.5
         version: 1.1.0(@types/pg@8.23.1)(sqlite3@6.0.1)
       stellarium-ts:
-        specifier: 0.10.0
-        version: 0.10.0(@types/pg@8.23.1)
+        specifier: 0.11.0
+        version: 0.11.0(@types/pg@8.23.1)
     devDependencies:
       typescript:
         specifier: ^7.0.2
@@ -1871,8 +1871,8 @@ packages:
   std-env@4.3.0:
     resolution: {integrity: sha512-OtU/EgQ1kIm5KwqQpBC6ZEMXrZRui11w8zgfTWp8cdO9B8OaPsbA8bTHO2P+HNo1VlUTGMVBwPhydu6poeXiag==}
 
-  stellarium-ts@0.10.0:
-    resolution: {integrity: sha512-CJhS2v19b42xogzEx2y2adUv8+zOs9aPydMQTYFcK+JngxghtEhMXZkvQPcfpqSjN5qHs0R5wmI0s/GYZS1Lhg==}
+  stellarium-ts@0.11.0:
+    resolution: {integrity: sha512-cah8PMJs2KMpGHXDpdQ4Rs/cUxhjx1wxI0Q45B5mjHbjdAyn2iJNWRnGNs5ePNAvrjycd5sobJSnDRFj+d6CHQ==}
     engines: {node: '>=20'}
 
   stream-chain@2.2.5:
@@ -3490,7 +3490,7 @@ snapshots:
 
   std-env@4.3.0: {}
 
-  stellarium-ts@0.10.0(@types/pg@8.23.1):
+  stellarium-ts@0.11.0(@types/pg@8.23.1):
     dependencies:
       dotenv: 18.0.8
       fastify: 5.12.7

@@ -187,7 +187,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             }, 0);
         }
 
-        return { returnValue: result };
+        return result;
     });
 
     // End Run Routes
