@@ -318,6 +318,7 @@ SIGNING_PUBLIC_KEY=
 SIGNING_PRIVATE_KEY=
 USER_ADDRESS=
 PORT=
+API_KEY=SET_THIS_TO_ANYTHING
 ```
 
 The `local-resource-node` should have the following `.env` properties:
@@ -328,6 +329,7 @@ SIGNING_PRIVATE_KEY=
 USER_ADDRESS=
 RECEIPIENT_ADDRESS=
 PORT=
+API_KEY=SET_THIS_TO_ANYTHING
 ```
 
 The `operator` should have the following `.env` properties:
@@ -341,6 +343,8 @@ PORT=
 If that looks right, run a request! if it does not, fix and rerun `docker compose up -d --build`.
 
 POST `localhost:3003/v1/run`
+
+Authorization header: `Bearer YOUR_CALLER_API_KEY`
 
 ```json
 {
