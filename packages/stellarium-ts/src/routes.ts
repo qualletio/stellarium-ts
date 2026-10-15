@@ -124,6 +124,16 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     fastify.post('/run', async (request, reply) => {
         const runRequest = request.body as RunRequest;
         
+        // Check that the API Key matches the env variable
+        const authorizationHeader = request.headers['authorization'];
+        if (!authorizationHeader) {
+            return reply.status(401).send({ error: 'Authorization header is required' });
+        }
+        const apiKey = authorizationHeader.split(' ')[1];
+        if (apiKey !== process.env.API_KEY) {
+            return reply.status(401).send({ error: 'Invalid API Key' });
+        }
+        
         try {
             const script = parseScript(runRequest.source);
 
@@ -146,16 +156,6 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     fastify.post('/run/resource', async (request, reply) => {
         const resourceRequest = request.body as ResourceRunRequest;
         const paymentVoucher = resourceRequest.paymentVoucher;
-
-        // Check that the API Key matches the env variable
-        const authorizationHeader = request.headers['authorization'];
-        if (!authorizationHeader) {
-            return reply.status(401).send({ error: 'Authorization header is required' });
-        }
-        const apiKey = authorizationHeader.split(' ')[1];
-        if (apiKey !== process.env.API_KEY) {
-            return reply.status(401).send({ error: 'Invalid API Key' });
-        }
 
         if (paymentVoucher) {
             const isValid = verifyData(
