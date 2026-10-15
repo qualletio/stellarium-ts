@@ -248,8 +248,8 @@ importers:
         specifier: ^5.12.5
         version: 5.12.5
       requestscript:
-        specifier: ^1.0.5
-        version: 1.0.5(@types/pg@8.23.1)(sqlite3@6.0.1)
+        specifier: 1.1.0
+        version: 1.1.0(@types/pg@8.23.1)(sqlite3@6.0.1)
       sqlite:
         specifier: ^5.1.1
         version: 5.1.1
@@ -1779,6 +1779,11 @@ packages:
 
   requestscript@1.0.5:
     resolution: {integrity: sha512-/7mSd2DPfUzjeVf4rc3n/lZxUGRo93gaX8IdPFLZ2laCyXvrcon59Ua9lrliV2B0kSekMiruFL1X6ml2Otw3kg==}
+    engines: {node: '>=20'}
+    hasBin: true
+
+  requestscript@1.1.0:
+    resolution: {integrity: sha512-cJkHORq+4n4aQ7Gl1Muykrv+HOZgGNLcV86hAjQp6T8JSxxX1cJyt+aMIjl81F517ISOhLlUGas68j93iCh7XQ==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -3328,6 +3333,61 @@ snapshots:
   real-require@1.0.0: {}
 
   requestscript@1.0.5(@types/pg@8.23.1)(sqlite3@6.0.1):
+    dependencies:
+      drizzle-orm: 1.0.0-rc.4(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1)
+      express: 5.3.0
+      pg: 8.23.1
+    transitivePeerDependencies:
+      - '@aws-sdk/client-rds-data'
+      - '@cloudflare/workers-types'
+      - '@effect/sql-d1'
+      - '@effect/sql-libsql'
+      - '@effect/sql-mysql2'
+      - '@effect/sql-pg'
+      - '@effect/sql-pglite'
+      - '@effect/sql-sqlite-bun'
+      - '@effect/sql-sqlite-do'
+      - '@effect/sql-sqlite-node'
+      - '@effect/sql-sqlite-wasm'
+      - '@electric-sql/pglite'
+      - '@libsql/client'
+      - '@libsql/client-wasm'
+      - '@neondatabase/serverless'
+      - '@op-engineering/op-sqlite'
+      - '@opentelemetry/api'
+      - '@planetscale/database'
+      - '@sinclair/typebox'
+      - '@sqlitecloud/drivers'
+      - '@tidbcloud/serverless'
+      - '@tursodatabase/database'
+      - '@tursodatabase/database-common'
+      - '@tursodatabase/database-wasm'
+      - '@tursodatabase/serverless'
+      - '@tursodatabase/sync'
+      - '@types/better-sqlite3'
+      - '@types/mssql'
+      - '@types/pg'
+      - '@types/sql.js'
+      - '@upstash/redis'
+      - '@vercel/postgres'
+      - '@xata.io/client'
+      - arktype
+      - better-sqlite3
+      - bun-types
+      - effect
+      - expo-sqlite
+      - mssql
+      - mysql2
+      - pg-native
+      - postgres
+      - sql.js
+      - sqlite3
+      - supports-color
+      - typebox
+      - valibot
+      - zod
+
+  requestscript@1.1.0(@types/pg@8.23.1)(sqlite3@6.0.1):
     dependencies:
       drizzle-orm: 1.0.0-rc.4(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1)
       express: 5.3.0

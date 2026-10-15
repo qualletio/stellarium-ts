@@ -1,6 +1,6 @@
-import { Resource, ResourceFunctionCallParameter, ResourceFunctionParameter, ResourceInvoker } from "requestscript";
-import { ResourceRepository } from "./repository.js";
+import { Resource, ResourceFunctionCallParameter, ResourceInvoker } from "requestscript";
 import { signData } from "../crypto/utils.js";
+import { ResourceRepository } from "./repository.js";
 
 export interface PaymentVoucher {
     requestId: string;
@@ -41,7 +41,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
      * @param parameters - The parameters to pass to the function
      * @returns The return value of the function
      */
-    async invoke(resource: Resource, functionName: string, parameters: ResourceFunctionCallParameter[]): Promise<any> {
+    async invoke(resource: Resource, functionName: string, parameters: ResourceFunctionCallParameter[]): Promise<{ value: any, error: { message: string } | null}> {
         if (resource.metadata.baseUrl) {
             let requestBody: Record<string, any> = {
                 resourcePath: resource.path,
@@ -78,18 +78,19 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             });
 
             if (!result.ok) {
-                throw new Error(`Failed to invoke ${resource.name}.${functionName}: ${result.statusText}`);
+                return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: ${result.statusText}` } };
             }
 
-            const data = await result.json() as { returnValue: any };
-            return data.returnValue;
+            const data = await result.json() as { value: any, error: { message: string } | null };
+            return { value: data.value, error: data.error };
         } else {
             const fn = resource.functions.find(f => f.name === functionName);
             if (!fn) {
-                throw new Error(`Function ${functionName} not found in resource ${resource.name}`);
+                return { value: null, error: { message: `Function ${functionName} not found in resource ${resource.name}` } };
             }
 
-            return await fn.exec(parameters);
+            const result = await fn.exec(parameters);
+            return { value: result, error: null };
         }
     }
 
