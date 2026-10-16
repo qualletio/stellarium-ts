@@ -66,18 +66,32 @@ await node.start(fastify, {
 
 `StellariumNodeOptions`:
 
-| Option         | Default | Purpose                                                  |
-| -------------- | ------- | -------------------------------------------------------- |
-| `port`         | `3000`  | Port Fastify listens on                                  |
-| `startingPeer` | none    | Origin of a peer to bootstrap from, with no `/v1` suffix |
+| Option              | Default                               | Purpose                                                                 |
+| ------------------- | ------------------------------------- | ----------------------------------------------------------------------- |
+| `port`              | `3000`                                | Port Fastify listens on                                                 |
+| `host`              | `0.0.0.0`                             | Interface Fastify listens on                                            |
+| `startingPeer`      | none                                  | Origin of a peer to bootstrap from, with no `/v1` suffix                |
+| `rateLimit`         | 100 per minute                        | Per-IP limit on `POST /v1/run/resource`                                 |
+| `baseUrl`           | `BASE_URL`                            | URL peers use to reach this node                                        |
+| `publicKey`         | `SIGNING_PUBLIC_KEY`                  | This node's signing public key                                          |
+| `privateKey`        | `SIGNING_PRIVATE_KEY`                 | This node's signing private key                                         |
+| `apiKey`            | `API_KEY`                             | Bearer token for `POST /v1/run`                                         |
+| `operatorUrl`       | `OPERATOR_URL`                        | Operator to settle payments with                                        |
+| `costLimitLamports` | `COST_LIMIT_LAMPORTS`, then `10000`   | Most this node pays for one remote call                                 |
+| `databasePath`      | `./requestscript.db`                  | SQLite file. `:memory:` keeps everything in memory                      |
 
-Importing `StellariumNode` loads [dotenv](https://github.com/motdotla/dotenv), so a `.env` file in the working directory is applied automatically.
+`start` resolves once the node is listening and, with `startingPeer`, once it has joined the network. It rejects if it can't listen, if a required setting is missing, or if bootstrapping fails.
+
+Importing `StellariumNode` loads [dotenv](https://github.com/motdotla/dotenv), so a `.env` file in the working directory is applied automatically. Options take precedence over these variables.
 
 | Variable              | Purpose                                                                                                                                                                         |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `BASE_URL`            | Public URL prefix stored on resources this node hosts. Peers call `{BASE_URL}/run`. Set it to this node's API prefix, for example `http://127.0.0.1:3000`. Do not include `/v1` |
-| `SIGNING_PRIVATE_KEY` | The base64url encoded ED25519 private key used to sign data for publishing to peers.                                                                                            |
-| `SIGNING_PUBLIC_KEY`  | The base64url ED25519 public key used to verify data for publishing to peers. Must be paired with the private key.                                                              |
+| `BASE_URL`            | Required. Public URL prefix stored on resources this node hosts. Peers call `{BASE_URL}/v1/run/resource`. Set it to this node's origin, for example `http://127.0.0.1:3000`. Do not include `/v1` |
+| `SIGNING_PRIVATE_KEY` | Required. The base64url encoded ED25519 private key used to sign data for publishing to peers and payment vouchers.                                                            |
+| `SIGNING_PUBLIC_KEY`  | Required. The base64url ED25519 public key used to verify data for publishing to peers. Must be paired with the private key.                                                   |
+| `API_KEY`             | Bearer token for `POST /v1/run`. When unset, `/v1/run` rejects every request.                                                                                                   |
+| `OPERATOR_URL`        | Operator base URL including `/v1`. Required when the node hosts paid functions.                                                                                                 |
+| `COST_LIMIT_LAMPORTS` | Most this node pays for one remote call.                                                                                                                                        |
 
 Signing keys can be generated with the following script:
 
@@ -97,43 +111,63 @@ console.log(JSON.stringify({
 '
 ```
 
-The node stores peers and resources it learns from other nodes in `requestscript.db` in the current working directory. That file is created on startup.
+The node stores peers and resources it learns from other nodes in `requestscript.db` in the current working directory (or `databasePath`). That file is created on startup and reused on restart. Learned resources are a cache: after an upgrade that changes their tables, they are dropped and relearned from peers.
 
 ### Joining a network
 
 When `startingPeer` is set, the node waits until it is listening, then:
 
-1. `GET {startingPeer}/v1/peers`. If this node has no peers yet, it stores the returned list. An existing list is left as-is.
-2. `GET {startingPeer}/v1/resources`. Each resource is stored with the `baseUrl` that peer advertised.
-3. Broadcasts self to all peers in the network.
-4. Broadcasts its internal Resources to the network.
+1. `GET {startingPeer}/v1/peers` and `GET {startingPeer}/v1/self`. If this node has no peers yet, it stores the returned peers and the starting peer. An existing list is left as-is.
+2. `GET {startingPeer}/v1/resources`. Resources this node doesn't know yet are stored with the `baseUrl` that peer advertised. Known resources are left alone, so this is safe on every restart.
+3. Announces itself to every peer with `PUT /v1/peers`, signed over `{ baseUrl, name, publicKey, expiry }`.
+4. Broadcasts its own resources to every peer with `PUT /v1/all-resources`, signed over `{ resources, expiry }`.
 
-A script that names a resource registered on this process runs `exec` locally. A script that names a resource learned from a peer is forwarded: this node posts a RequestScript request to `{baseUrl}/run` and returns that peer's `returnValue`.
+A peer that fails to respond to a broadcast is logged and skipped. Signed broadcasts must expire within an hour.
+
+A peer announcement must be signed by the key it announces. A known peer can change its base URL and name. A new key can't take a base URL or name that another peer holds (`409`). A resource broadcast is accepted only from a known peer, and only for resources served from that peer's own base URL that no other peer owns. Other resources are listed in the response's `rejected` field. An accepted resource replaces what was stored for it, including its functions and prices.
+
+A script that names a resource registered on this process runs `exec` locally. A script that names a resource learned from a peer is forwarded: this node posts the call to `{baseUrl}/v1/run/resource` and returns that peer's `{ value, error }` result. Paid functions are covered in [Payments](#payments).
 
 ## HTTP API
 
 Routes are mounted at `/v1`.
 
-| Method and path     | Body        | Purpose                                                           |
-| ------------------- | ----------- | ----------------------------------------------------------------- |
-| `GET /v1/`          | —           | Liveness check. Responds `{ "hello": "world" }`                   |
-| `GET /v1/peers`     | —           | Peers stored on this node: `{ "peers": [{ "baseUrl", "name" }] }` |
-| `GET /v1/resources` | —           | Resources registered here and resources learned from peers        |
-| `POST /v1/run`      | JSON string | Run one `request` script                                          |
+| Method and path          | Body                       | Purpose                                                                       |
+| ------------------------ | -------------------------- | ----------------------------------------------------------------------------- |
+| `GET /v1/`               | —                          | Liveness check. Responds `{ "hello": "world" }`                               |
+| `GET /v1/self`           | —                          | This node: `{ "baseUrl", "publicKey", "name" }`                               |
+| `GET /v1/peers`          | —                          | Peers stored on this node: `{ "peers": [{ "baseUrl", "name", "publicKey" }] }` |
+| `PUT /v1/peers`          | Signed peer announcement   | Add or update a peer                                                          |
+| `GET /v1/resources`      | —                          | Resources registered here and resources learned from peers                    |
+| `PUT /v1/all-resources`  | Signed resource broadcast  | Store a peer's resources                                                      |
+| `POST /v1/run`           | `{ "source": "..." }`      | Run one `request` script. Requires `Authorization: Bearer <API_KEY>`          |
+| `POST /v1/run/resource`  | One function call          | Called by peers to run a function hosted here                                 |
 
-`GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, and functions (`name`, `returnType`, `parameters`). Function implementations stay on the node that hosts them.
+`GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, and functions (`name`, `returnType`, `parameters`, and `paymentManifest` for paid functions). Function implementations stay on the node that hosts them.
 
-`POST /v1/run` accepts the script source as raw text (`Content-Type: text/plain`). The declaration must be a `request`. A successful run responds `200` with the response body in `application/json` format `{ "returnValue": ... }`. A script that is not a request responds `400` with `{ "error": "Invalid script" }`. Any other failure responds `500` with `{ "error": "Internal server error" }`.
+`POST /v1/run` takes a JSON body whose `source` is the script. The declaration must be a `request`. A successful run responds `200` with `{ "returnValue": ... }`. Each resource call in the script evaluates to `{ "value", "error" }`, so a script can handle a failed call. A missing or wrong API key responds `401`. A script that doesn't parse, or is not a request, responds `400` with `{ "error": "Invalid script" }`. Any other failure responds `500` with `{ "error": "Internal server error" }`.
 
 ```sh
 curl -X POST http://127.0.0.1:3000/v1/run \
-  -H 'Content-Type: text/plain' \
-  -d '"request GetTemperature {\n  const weather: com.example.Weather\n\n  return weather.temperature(city: \"Oslo\")\n}"'
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $API_KEY" \
+  -d '{"source": "request GetTemperature {\n  const weather: com.example.Weather\n\n  return weather.temperature(city: \"Oslo\")\n}"}'
 ```
 
 ```json
-{ "returnValue": 12 }
+{ "returnValue": { "value": 12, "error": null } }
 ```
+
+### Payments
+
+A function with a `paymentManifest` (`costLamports`, `recipientAddress`) is paid. A caller attaches a `paymentVoucher` signed with its key, as long as the cost is within its `costLimitLamports`. The hosting node runs the function only if the voucher:
+
+- is bound to this exact call (resource, function and parameters),
+- pays at least `costLamports` to `recipientAddress`,
+- has not expired, and
+- has a valid signature.
+
+A paid call without a voucher responds `402`; an invalid voucher responds `400`. After the function runs without an error, the node sends the voucher to the operator to settle. Vouchers sent to free functions are ignored.
 
 Resources are bound with `const <name>: <path>.<ResourceName>` and called with named arguments. See the [RequestScript readme](https://www.npmjs.com/package/requestscript) for the language.
 
@@ -154,11 +188,15 @@ blockers, local identity and secret setup, and transaction/balance verification.
 
 ```sh
 pnpm install
-pnpm build   # tsc to dist/; also runs before pack
-pnpm dev     # reload src/server.ts when it changes
+pnpm build         # tsc to dist/; also runs before pack
+pnpm check-types   # after build: the operator checks against stellarium-ts's dist/ types
+pnpm test          # vitest; the operator's database tests use in-memory PGlite, so no Postgres is needed
+cargo test --manifest-path programs/escrow_program/Cargo.toml
 ```
 
 `pnpm build` emits `dist/`, which is what the package exports. Start a node from your own process with `StellariumNode`, as shown above.
+
+`apps/local-caller-node` and `apps/local-resource-node` depend on the workspace package (`workspace:*`), so they also run the compiled code in `dist/`, not `src/`. After editing `packages/stellarium-ts`, rebuild it with `pnpm --filter stellarium-ts build`, or keep `pnpm --filter stellarium-ts exec tsc --watch` running while you work.
 
 ### Running Locally
 
@@ -316,6 +354,7 @@ ESCROW_PROGRAM_ID=
 PROTOCOL_FEE_RECIPIENT=
 PRIVATE_KEY=
 PORT=
+OPERATOR_API_TOKEN=SET_THIS_TO_ANYTHING
 ```
 
 `PROTOCOL_FEE_RECIPIENT` must be the same address compiled into the escrow program.
@@ -330,6 +369,8 @@ docker compose up -d --build
 Initialize an escrow account:
 
 POST to `http://localhost:3001/v1/escrow`
+
+Authorization header: `Bearer YOUR_OPERATOR_API_TOKEN`
 
 request body:
 

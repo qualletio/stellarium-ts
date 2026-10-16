@@ -1,12 +1,30 @@
 import type { Signer } from "@solana/web3.js";
 import { Connection, PublicKey, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
-import { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { receiptsTable } from "../db/schema.js";
 import { OperationError } from "../errors.js";
+import type { ReceiptRepository } from "../repository.js";
 import type { PaymentSubmission } from "../routes.js";
+import { encodeBase58 } from "../solana/base58.js";
 import { getEscrowBudget } from "../solana/escrow-budget.js";
 import { createEscrowInstruction, createWithdrawEscrowInstruction, decodeEscrowAccount } from "../solana/escrow.js";
 import { solanaUserFromSpki } from "../solana/userAddress.js";
+
+/** The Connection methods the service uses, so tests can supply a fake. */
+export type EscrowConnection = Pick<Connection,
+    'getAccountInfoAndContext' | 'getMinimumBalanceForRentExemption' | 'getLatestBlockhash' | 'simulateTransaction' |
+    'sendTransaction' | 'confirmTransaction' | 'getSignatureStatuses' | 'getBlockHeight'>;
+
+/**
+ * Receipts are left to the in-flight settlement for this long before reconciliation checks them.
+ * Longer than a blockhash lifetime (~60-90s), so a pending transaction has either landed or expired.
+ */
+export const RECONCILE_MIN_AGE_MS = 1000 * 60 * 2;
+
+export interface ReconcileSummary {
+    checked: number;
+    confirmed: number;
+    failed: number;
+    expired: number;
+}
 
 export interface OperationResult {
     escrowAddress: string;
@@ -20,7 +38,7 @@ export interface OperationResult {
  * The EscrowService is responsible for communicating with Solana to initiate and withdraw from an escrow account.
  */
 export class EscrowService {
-    constructor(private readonly db: NodePgDatabase, private readonly escrowProgramId: PublicKey, private readonly authority: Signer, private readonly feeRecipient: PublicKey, private readonly connection: Connection) {}
+    constructor(private readonly receipts: ReceiptRepository, private readonly escrowProgramId: PublicKey, private readonly authority: Signer, private readonly feeRecipient: PublicKey, private readonly connection: EscrowConnection) {}
 
     async initiateEscrow(user: PublicKey): Promise<OperationResult> {
         const instruction = createEscrowInstruction({
@@ -61,7 +79,7 @@ export class EscrowService {
         }
 
         transaction.sign([this.authority]);
-        const signature = this.signatureAddress(transaction.signatures[0]!);
+        const signature = encodeBase58(transaction.signatures[0]!);
         const result = { escrowAddress: instruction.escrowAddress.toBase58(), signature, ...lifetime };
 
         try {
@@ -90,10 +108,15 @@ export class EscrowService {
     }
 
     async settlePayment(submission: PaymentSubmission): Promise<OperationResult> {
-        const { voucher, resourcePath, resourceName, parameters } = submission;
-        const { requestId, invocationId, amount, recipientAddress, signature: voucherSignature, expiresAt, publicKey } = voucher;
-        const user = solanaUserFromSpki(voucher.publicKey);
-        const recipient = new PublicKey(recipientAddress);
+        const { voucher } = submission;
+        const { requestId, invocationId, amount, recipientAddress, signature: voucherSignature, expiresAt, invocationHash, publicKey } = voucher;
+        let user: PublicKey, recipient: PublicKey;
+        try {
+            user = solanaUserFromSpki(voucher.publicKey);
+            recipient = new PublicKey(recipientAddress);
+        } catch {
+            throw new OperationError(400, 'Invalid voucher public key or recipient address');
+        }
         const amountLamports = BigInt(amount);
 
         const instruction = createWithdrawEscrowInstruction({
@@ -138,10 +161,11 @@ export class EscrowService {
         }
 
         transaction.sign([this.authority]);
-        const signature = this.signatureAddress(transaction.signatures[0]!);
+        const signature = encodeBase58(transaction.signatures[0]!);
         const result = { escrowAddress: instruction.escrowAddress.toBase58(), signature, ...lifetime };
 
-        await this.db.insert(receiptsTable).values({
+        // The receipt is claimed before sending, so a duplicate submission fails here instead of paying twice.
+        const claimed = await this.receipts.claim({
             requestId,
             invocationId,
             amount,
@@ -150,10 +174,10 @@ export class EscrowService {
             transactionSignature: signature,
             expiresAt: new Date(expiresAt),
             publicKey,
-            resourcePath,
-            resourceName,
-            parameters,
+            invocationHash,
+            lastValidBlockHeight: lifetime.lastValidBlockHeight,
         });
+        if (!claimed) throw new OperationError(409, 'Receipt has already been settled');
 
         try {
             await this.connection.sendTransaction(transaction, {
@@ -162,7 +186,8 @@ export class EscrowService {
             });
         } catch {
             // The RPC may have accepted the transaction before a transport error.
-            // Preserve its signature instead of inviting a duplicate payment.
+            // Preserve its signature instead of inviting a duplicate payment; reconcile() settles the receipt later.
+            await this.receipts.setStatus(signature, 'unconfirmed');
             return { ...result, status: 'unconfirmed' };
         }
 
@@ -170,29 +195,56 @@ export class EscrowService {
         try {
             confirmation = await this.connection.confirmTransaction({ signature, ...lifetime }, 'confirmed');
         } catch {
+            await this.receipts.setStatus(signature, 'unconfirmed');
             return { ...result, status: 'unconfirmed' };
         }
 
         if (confirmation.value.err !== null) {
+            // Nothing was paid, so the voucher may be settled again.
+            await this.receipts.setStatus(signature, 'failed');
             throw new OperationError(422, `Transaction failed: ${signature}`);
         }
 
+        await this.receipts.setStatus(signature, 'confirmed');
         return { ...result, status: 'confirmed' };
     }
 
-    // Encode the public transaction signature without adding another SDK dependency.
-    private signatureAddress(signature: Uint8Array): string {
-        const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-        let value = BigInt(`0x${Buffer.from(signature).toString('hex')}`);
-        let encoded = '';
-        while (value > 0n) {
-            encoded = alphabet[Number(value % 58n)] + encoded;
-            value /= 58n;
+    /**
+     * Resolves receipts left `pending` or `unconfirmed` (by a crash, an RPC error or a confirmation
+     * timeout) from the chain: a landed transaction becomes `confirmed` or `failed`, and one whose
+     * blockhash expired without landing becomes `expired`, which frees the voucher to be settled again.
+     * Receipts with no recorded block height stay unconfirmed for manual review.
+     */
+    async reconcile(now: Date = new Date()): Promise<ReconcileSummary> {
+        const receipts = await this.receipts.findUnsettled(new Date(now.getTime() - RECONCILE_MIN_AGE_MS));
+        const summary: ReconcileSummary = { checked: receipts.length, confirmed: 0, failed: 0, expired: 0 };
+        if (receipts.length === 0) {
+            return summary;
         }
-        for (const byte of signature) {
-            if (byte !== 0) break;
-            encoded = '1' + encoded;
+
+        // Read the block height first: a transaction not found after it can't land once the height passes its limit.
+        const blockHeight = await this.connection.getBlockHeight('confirmed');
+        // getSignatureStatuses accepts at most 256 signatures per call.
+        for (let start = 0; start < receipts.length; start += 256) {
+            const batch = receipts.slice(start, start + 256);
+            const { value: statuses } = await this.connection.getSignatureStatuses(
+                batch.map(receipt => receipt.transactionSignature),
+                { searchTransactionHistory: true },
+            );
+
+            for (const [index, receipt] of batch.entries()) {
+                const status = statuses[index];
+                if (status && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) {
+                    const outcome = status.err === null ? 'confirmed' : 'failed';
+                    await this.receipts.setStatus(receipt.transactionSignature, outcome);
+                    summary[outcome]++;
+                } else if (!status && receipt.lastValidBlockHeight !== null && blockHeight > receipt.lastValidBlockHeight) {
+                    await this.receipts.setStatus(receipt.transactionSignature, 'expired');
+                    summary.expired++;
+                }
+            }
         }
-        return encoded;
+        return summary;
     }
+
 }

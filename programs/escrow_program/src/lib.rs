@@ -13,8 +13,8 @@ use solana_system_interface::instruction as system_instruction;
 
 entrypoint!(process_instruction);
 
-// TODO: Replace None with Some(solana_program::pubkey!("YOUR_PUBLIC_KEY"))
-// before deployment. Use the same wallet as the program's upgrade authority.
+// The operator wallet that signs escrow setup and withdrawals. Use the same wallet as the
+// program's upgrade authority. These are local end-to-end keys: set your own before deploying.
 pub const ESCROW_AUTHORITY: Option<Pubkey> = Some(solana_program::pubkey!(
     "EjmMczWqevGUXrxmoJqWKj51sjLpWpFXczWqu5Pzerxk"
 ));
@@ -26,8 +26,8 @@ pub const WRONG_AUTHORITY: u32 = 1;
 pub const FEE_RECIPIENT_NOT_CONFIGURED: u32 = 2;
 pub const WRONG_FEE_RECIPIENT: u32 = 3;
 
-// TODO: Replace None with Some(solana_program::pubkey!("PROTOCOL_FEE_WALLET"))
-// before deployment. Withdrawals fail closed until this is configured.
+// The wallet that receives the protocol fee. Withdrawals fail closed when this is None.
+// These are local end-to-end keys: set your own before deploying.
 pub const PROTOCOL_FEE_RECIPIENT: Option<Pubkey> = Some(solana_program::pubkey!(
     "6xwrneeAHpUEaMp99YV4WVyRgCNai1XjwC1VxcCz5QPP"
 ));
@@ -75,6 +75,11 @@ pub fn process_instruction(
         Some(amount) => {
             let fee_recipient =
                 PROTOCOL_FEE_RECIPIENT.ok_or(ProgramError::Custom(FEE_RECIPIENT_NOT_CONFIGURED))?;
+            // Check the account count before reading the Rent sysvar, so a malformed
+            // instruction fails with NotEnoughAccountKeys rather than a sysvar error.
+            if accounts.len() < 4 {
+                return Err(ProgramError::NotEnoughAccountKeys);
+            }
             withdraw(
                 program_id,
                 accounts,

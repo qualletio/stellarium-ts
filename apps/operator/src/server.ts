@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
+import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
 import routes from './routes.js';
 import { createService } from './service.js';
@@ -29,7 +30,33 @@ try {
 fastify.log.info('Applied database migrations');
 const service = createService(db, escrowProgramId, privateKey, protocolFeeRecipient, connection);
 
-fastify.register(routes, { prefix: '/v1', service });
+// Applies to every operator route. Limits are per client IP.
+await fastify.register(rateLimit, {
+  max: Number(process.env.RATE_LIMIT_MAX ?? 100),
+  timeWindow: process.env.RATE_LIMIT_TIME_WINDOW ?? '1 minute',
+});
+if (!process.env.OPERATOR_API_TOKEN) {
+  fastify.log.warn('OPERATOR_API_TOKEN is not set: POST /v1/escrow will reject every request');
+}
+fastify.register(routes, { prefix: '/v1', service, apiToken: process.env.OPERATOR_API_TOKEN });
+
+// Resolve receipts left pending or unconfirmed. Runs one pass at a time.
+const reconcileIntervalMs = Number(process.env.RECONCILE_INTERVAL_MS ?? 30_000);
+let reconciling = false;
+const reconcileTimer = setInterval(async () => {
+  if (reconciling) return;
+  reconciling = true;
+  try {
+    const summary = await service.escrowService.reconcile();
+    if (summary.checked > 0) fastify.log.info(summary, 'Reconciled receipts');
+  } catch (error) {
+    fastify.log.error(error, 'Failed to reconcile receipts');
+  } finally {
+    reconciling = false;
+  }
+}, reconcileIntervalMs);
+reconcileTimer.unref();
+fastify.addHook('onClose', async () => clearInterval(reconcileTimer));
 
 fastify.listen({ port: 3001, host: '0.0.0.0' }, function (err, address) {
   if (err) {

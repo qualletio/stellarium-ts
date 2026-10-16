@@ -1,7 +1,7 @@
-import { verifyData } from "../crypto/utils.js";
+import { isFreshExpiry, safeVerifyData } from "../crypto/utils.js";
 import { Resource, ResourceFunction, ResourceFunctionParameter } from "requestscript";
 import { Database } from "sqlite";
-import type { Peer } from "../peer/repository.js";
+import type { StoredPeer } from "../peer/repository.js";
 
 export interface StellariumResourceFunctionPaymentManifest {
     id?: number;
@@ -20,23 +20,134 @@ export interface StellariumResource extends Resource {
     functions: StellariumResourceFunction[];
 }
 
-export class ResourceRepository {
-    constructor(private readonly db: Database, private resources: StellariumResource[] = []) {}
+/**
+ * The object a node signs to broadcast its resources. Key order is part of the signed bytes.
+ * Functions' `exec` implementations are dropped by JSON serialization on both ends.
+ */
+export function resourceAnnouncementPayload(resources: StellariumResource[], expiry: string) {
+    return { resources, expiry };
+}
 
-    async create(resource: StellariumResource): Promise<void> {
+export type SaveAllResult = { ok: true, rejected: string[] } | { ok: false };
+
+interface ResourceRow {
+    id: number;
+    peer_id: number | null;
+    path: string;
+    name: string;
+    base_url: string;
+}
+
+const resourceKey = (resource: { path: string, name: string }) => `${resource.path}.${resource.name}`;
+
+export class ResourceRepository {
+    // The connection is shared, so transactions are serialized to keep them from nesting.
+    private writes: Promise<unknown> = Promise.resolve();
+
+    constructor(private readonly db: Database, private resources: StellariumResource[] = [], private readonly baseUrl: string = '') {}
+
+    private serialize<T>(work: () => Promise<T>): Promise<T> {
+        const run = this.writes.then(work, work);
+        this.writes = run.catch(() => undefined);
+        return run;
+    }
+
+    private transaction<T>(work: () => Promise<T>): Promise<T> {
+        return this.serialize(async () => {
+            await this.db.exec('BEGIN IMMEDIATE');
+            try {
+                const result = await work();
+                await this.db.exec('COMMIT');
+                return result;
+            } catch (error) {
+                await this.db.exec('ROLLBACK');
+                throw error;
+            }
+        });
+    }
+
+    private isInternal(resource: { path: string, name: string }): boolean {
+        return this.resources.some(r => r.path === resource.path && r.name === resource.name);
+    }
+
+    /**
+     * Saves a resource learned from the starting peer, if it isn't known yet. Resources hosted
+     * by this node and resources already known are left alone, so startup can run on every boot.
+     */
+    async learn(resource: StellariumResource): Promise<void> {
+        if (this.isInternal(resource) || resource.baseUrl === this.baseUrl) {
+            return;
+        }
+        await this.transaction(async () => {
+            const existing = await this.db.get('SELECT id FROM resource WHERE path = ? AND name = ?', [resource.path, resource.name]);
+            if (!existing) {
+                await this.insert(resource, null);
+            }
+        });
+    }
+
+    /**
+     * Saves the resources a peer broadcast, after checking the peer signed them.
+     * A peer may only publish resources served from its own base URL, and may not replace a
+     * resource owned by another peer or hosted by this node. Those are returned in `rejected`.
+     * Accepted resources are replaced as a whole, so added or removed functions,
+     * parameters and payment manifests all take effect.
+     */
+    async saveAll(resources: StellariumResource[], peer: StoredPeer, signature: string, expiry: string): Promise<SaveAllResult> {
+        if (!Array.isArray(resources) || !isFreshExpiry(expiry) || !safeVerifyData(resourceAnnouncementPayload(resources, expiry), peer.publicKey, signature)) {
+            return { ok: false };
+        }
+
+        const rejected: string[] = [];
+        await this.transaction(async () => {
+            for (const resource of resources) {
+                if (resource.baseUrl !== peer.baseUrl || this.isInternal(resource)) {
+                    rejected.push(resourceKey(resource));
+                    continue;
+                }
+
+                const existing = await this.db.get<ResourceRow>('SELECT * FROM resource WHERE path = ? AND name = ?', [resource.path, resource.name]);
+                if (!existing) {
+                    await this.insert(resource, peer.id);
+                    continue;
+                }
+
+                // Unowned rows came from the starting peer; the peer they point at may claim them.
+                const ownedByPeer = existing.peer_id === null ? existing.base_url === peer.baseUrl : existing.peer_id === peer.id;
+                if (!ownedByPeer) {
+                    rejected.push(resourceKey(resource));
+                    continue;
+                }
+
+                await this.deleteFunctions(existing.id);
+                await this.db.run(
+                    'UPDATE resource SET base_url = ?, peer_id = ?, updated_at = ? WHERE id = ?',
+                    [resource.baseUrl, peer.id, new Date().toISOString(), existing.id]
+                );
+                await this.insertFunctions(existing.id, resource.functions);
+            }
+        });
+
+        return { ok: true, rejected };
+    }
+
+    private async insert(resource: StellariumResource, peerId: number | null): Promise<void> {
         const createdAt = new Date().toISOString();
         const result = await this.db.run(
-            'INSERT INTO resource (path, name, base_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-            [resource.path, resource.name, resource.baseUrl, createdAt, createdAt]
+            'INSERT INTO resource (path, name, base_url, peer_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+            [resource.path, resource.name, resource.baseUrl, peerId, createdAt, createdAt]
         );
 
-        if (!result.changes) {
+        if (!result.changes || result.lastID === undefined) {
             throw new Error('Failed to create resource');
         }
 
-        const resourceId = result.lastID;
+        await this.insertFunctions(result.lastID, resource.functions);
+    }
 
-        for (const fn of resource.functions) {
+    private async insertFunctions(resourceId: number, functions: StellariumResourceFunction[]): Promise<void> {
+        const createdAt = new Date().toISOString();
+        for (const fn of functions) {
             const functionResult = await this.db.run(
                 'INSERT INTO resource_function (resource_id, name, return_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
                 [resourceId, fn.name, fn.returnType, createdAt, createdAt]
@@ -60,72 +171,19 @@ export class ResourceRepository {
         }
     }
 
-    async saveAll(resources: StellariumResource[], existingPeer: Peer, signature: string, expiry: string): Promise<boolean> {
-        if (!verifyData({ resources, expiry }, existingPeer.publicKey, signature) || new Date(expiry) < new Date()) {
-            return false;
-        }
-
-        for (const resource of resources) {
-            const existingResource = await this.db.get(
-                'SELECT * FROM resource WHERE path = ? AND name = ?',
-                [resource.path, resource.name]
-            );
-
-            // TODO: A signature must accompany the resource to ensure the base url change is only made by the owner of the resource.
-            // This will avoid MITM attacks.
-            if (existingResource) {
-                await this.db.run(
-                    'UPDATE resource SET base_url = ?, updated_at = ? WHERE path = ? AND name = ?',
-                    [resource.baseUrl, new Date().toISOString(), resource.path, resource.name]
-                );
-
-                for (const fn of resource.functions) {
-                    const updatedAt = new Date().toISOString();
-                    await this.db.run(
-                        'UPDATE resource_function SET return_type = ?, updated_at = ? WHERE resource_id = ? AND name = ?',
-                        [fn.returnType, updatedAt, existingResource.id, fn.name]
-                    );
-
-                    const existingFn = await this.db.get(
-                        'SELECT id FROM resource_function WHERE resource_id = ? AND name = ?',
-                        [existingResource.id, fn.name]
-                    );
-                    if (!existingFn) {
-                        continue;
-                    }
-
-                    for (const parameter of fn.parameters) {
-                        await this.db.run(
-                            'UPDATE resource_function_parameter SET parameter_type = ? WHERE resource_function_id = ? AND name = ?',
-                            [parameter.type, existingFn.id, parameter.name]
-                        );
-                    }
-
-                    if (fn.paymentManifest) {
-                        await this.db.run(
-                            'UPDATE resource_function_payment_manifest SET cost_lamports = ?, recipient_address = ?, updated_at = ? WHERE resource_function_id = ?',
-                            [fn.paymentManifest.costLamports, fn.paymentManifest.recipientAddress, updatedAt, existingFn.id]
-                        );
-                    }
-                }
-            } else {
-                await this.create(resource);
-            }
-        }
-
-        return true;
+    private async deleteFunctions(resourceId: number): Promise<void> {
+        const functionIds = 'SELECT id FROM resource_function WHERE resource_id = ?';
+        await this.db.run(`DELETE FROM resource_function_payment_manifest WHERE resource_function_id IN (${functionIds})`, [resourceId]);
+        await this.db.run(`DELETE FROM resource_function_parameter WHERE resource_function_id IN (${functionIds})`, [resourceId]);
+        await this.db.run('DELETE FROM resource_function WHERE resource_id = ?', [resourceId]);
     }
 
-    async getResourceByName(name: string): Promise<StellariumResource | undefined> {
-        return this.resources.find(r => r.name === name);
-    }
-
-    async getInternalResource(path: string, name: string): Promise<Resource | undefined> {
+    async getInternalResource(path: string, name: string): Promise<StellariumResource | undefined> {
         return this.resources.find(r => r.path === path && r.name === name);
     }
 
     async getResource(key: string): Promise<Resource | undefined> {
-        const resource = this.resources.find(r => `${r.path}.${r.name}` === key);
+        const resource = this.resources.find(r => resourceKey(r) === key);
         if (resource) {
             return resource;
         }
@@ -135,7 +193,7 @@ export class ResourceRepository {
         const name = pathName.pop();
         const path = pathName.join('.');
 
-        const result = await this.db.get(
+        const result = await this.db.get<ResourceRow>(
             'SELECT * FROM resource WHERE path = ? AND name = ?',
             [path, name]
         );
@@ -144,44 +202,27 @@ export class ResourceRepository {
             return undefined;
         }
 
-        const resourceFunctions = await this.db.all(
-            'SELECT * FROM resource_function WHERE resource_id = ?',
-            [result.id]
-        );
-
         return {
             path: result.path,
             name: result.name,
-            functions: await Promise.all(resourceFunctions.map(async f => ({
-                name: f.name,
-                returnType: f.return_type,
-                parameters: await this.getResourceParameters(f.id),
-                // The ExternalResourceInvoker will handle the execution of the function
-                exec: async (): Promise<void> => {
-                    return void 0;
-                }
-            }))),
+            // The CombinationResourceInvoker forwards calls on these functions to `metadata.baseUrl`.
+            functions: await this.getResourceFunctions(result.id),
             metadata: {
                 baseUrl: result.base_url,
-                paymentManifest: await this.getResourceFunctionPaymentManifest(result.id),
             }
         }
     }
 
     async getInternalResources(): Promise<StellariumResource[]> {
-        return this.resources.map(r => ({ ...r, baseUrl: process.env.BASE_URL! }));
+        return this.resources.map(r => ({ ...r, baseUrl: this.baseUrl }));
     }
 
     async getExternalResources(): Promise<StellariumResource[]> {
-        const results = await this.db.all(
+        const results = await this.db.all<ResourceRow[]>(
             'SELECT * FROM resource',
         );
 
-        if (!results) {
-            return [];
-        }
-
-        return Promise.all(results.map(async (r: { id: number; path: string; name: string; base_url: string }) => ({
+        return Promise.all(results.map(async (r) => ({
             id: r.id,
             path: r.path,
             name: r.name,
@@ -225,7 +266,7 @@ export class ResourceRepository {
     }
 
     async getResourceParameters(resourceFunctionId: number): Promise<ResourceFunctionParameter[]> {
-        return (await this.db.all('SELECT * FROM resource_function_parameter WHERE resource_function_id = ?', [resourceFunctionId])).map(p => ({
+        return (await this.db.all('SELECT * FROM resource_function_parameter WHERE resource_function_id = ? ORDER BY id', [resourceFunctionId])).map(p => ({
             name: p.name,
             type: p.parameter_type,
         }));
@@ -244,13 +285,6 @@ export class ResourceRepository {
     }
 
     async getAllResources(): Promise<StellariumResource[]> {
-        const externalResources = await this.getExternalResources();
-
-        let resources: StellariumResource[] = [];
-        for (const resource of Object.values(this.resources)) {
-            resources.push({ ...resource, baseUrl: process.env.BASE_URL! });
-        }
-        resources.push(...externalResources);
-        return resources;
+        return [...await this.getInternalResources(), ...await this.getExternalResources()];
     }
 }

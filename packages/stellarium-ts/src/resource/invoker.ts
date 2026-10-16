@@ -1,5 +1,5 @@
 import { Resource, ResourceFunctionCallParameter, ResourceInvoker } from "requestscript";
-import { signData } from "../crypto/utils.js";
+import { hashData, signData } from "../crypto/utils.js";
 import { ResourceRepository } from "./repository.js";
 
 export interface PaymentVoucher {
@@ -9,22 +9,61 @@ export interface PaymentVoucher {
     recipientAddress: string;
     signature: string;
     expiresAt: string;
+    invocationHash: string;
     publicKey: string;
 }
 
 /**
- * The object `createPaymentVoucher` signs. `signature` is excluded, and
- * `resourcePath`, `resourceName`, and `parameters` come from the invocation,
- * not from the voucher itself. Key order is part of the signed bytes.
+ * Hash binding a voucher to one function call. Providers recompute it from the
+ * request they receive and compare it to `voucher.invocationHash`.
+ * Key order is part of the hashed bytes.
  */
-export function paymentVoucherPayload(
-    voucher: Omit<PaymentVoucher, "signature">,
+export function invocationHash(
     resourcePath: string,
     resourceName: string,
+    functionName: string,
     parameters: ResourceFunctionCallParameter[],
-) {
-    const { requestId, invocationId, amount, recipientAddress, expiresAt, publicKey } = voucher;
-    return { requestId, invocationId, amount, recipientAddress, expiresAt, resourcePath, resourceName, parameters, publicKey };
+): string {
+    return hashData({ resourcePath, resourceName, functionName, parameters });
+}
+
+/**
+ * The object `createPaymentVoucher` signs: every voucher field except `signature`.
+ * Key order is part of the signed bytes.
+ */
+export function paymentVoucherPayload(voucher: Omit<PaymentVoucher, "signature">) {
+    const { requestId, invocationId, amount, recipientAddress, expiresAt, invocationHash, publicKey } = voucher;
+    return { requestId, invocationId, amount, recipientAddress, expiresAt, invocationHash, publicKey };
+}
+
+export const EXTERNAL_INVOKE_MAX_RETRIES = 3;
+export const EXTERNAL_INVOKE_BASE_DELAY_MS = 500;
+/** Per attempt. A timed-out attempt is retried like a network error. */
+export const EXTERNAL_INVOKE_TIMEOUT_MS = 30_000;
+
+/**
+ * POST to a remote resource, retrying network errors, 429s, and 5xx responses up to
+ * `EXTERNAL_INVOKE_MAX_RETRIES` times with exponential backoff (500ms, 1s, 2s).
+ * Other 4xx responses are returned immediately since retrying won't change them.
+ * Throws the last network error if every attempt fails to connect.
+ */
+async function fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            const response = await fetch(url, { ...init, signal: AbortSignal.timeout(EXTERNAL_INVOKE_TIMEOUT_MS) });
+            if (response.status !== 429 && response.status < 500) {
+                return response;
+            }
+            if (attempt >= EXTERNAL_INVOKE_MAX_RETRIES) {
+                return response;
+            }
+        } catch (error) {
+            if (attempt >= EXTERNAL_INVOKE_MAX_RETRIES) {
+                throw error;
+            }
+        }
+        await new Promise(resolve => setTimeout(resolve, EXTERNAL_INVOKE_BASE_DELAY_MS * 2 ** attempt));
+    }
 }
 
 export class CombinationResourceInvoker implements ResourceInvoker {
@@ -65,11 +104,13 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 if (resourceFunction.paymentManifest.costLamports > this.costLimitLamports) {
                     throw new Error(`Function ${functionName} cost ${resourceFunction.paymentManifest.costLamports} lamports, which exceeds the cost limit of ${this.costLimitLamports} lamports`);
                 }
-                paymentVoucher = this.createPaymentVoucher(resourceFunction.paymentManifest.recipientAddress, resourceFunction.paymentManifest.costLamports, resource.path, resource.name, parameters);
+                paymentVoucher = this.createPaymentVoucher(resourceFunction.paymentManifest.recipientAddress, resourceFunction.paymentManifest.costLamports, resource.path, resource.name, functionName, parameters);
                 requestBody.paymentVoucher = paymentVoucher;
             }
 
-            const result = await fetch(`${url}/v1/run/resource`, {
+            // The voucher is created once and reused on every attempt, so the operator's
+            // requestId/invocationId check prevents a retried call from being settled twice.
+            const result = await fetchWithRetry(`${url}/v1/run/resource`, {
                 method: 'POST',
                 body: JSON.stringify(requestBody),
                 headers: {
@@ -78,7 +119,10 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             });
 
             if (!result.ok) {
-                return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: ${result.statusText}` } };
+                // The provider's JSON error is more useful than the status text, which can be empty.
+                const detail = await result.json().then((body) => (body as { error?: unknown } | null)?.error, () => undefined);
+                const reason = typeof detail === 'string' ? detail : `${result.status} ${result.statusText}`.trim();
+                return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: ${reason}` } };
             }
 
             const data = await result.json() as { value: any, error: { message: string } | null };
@@ -94,12 +138,13 @@ export class CombinationResourceInvoker implements ResourceInvoker {
         }
     }
 
-    createPaymentVoucher(recipientAddress: string, amount: number, resourcePath: string, resourceName: string, parameters: ResourceFunctionCallParameter[]): PaymentVoucher {
+    createPaymentVoucher(recipientAddress: string, amount: number, resourcePath: string, resourceName: string, functionName: string, parameters: ResourceFunctionCallParameter[]): PaymentVoucher {
         const requestId = crypto.randomUUID();
         const invocationId = crypto.randomUUID();
         // Expire in 2 minutes
         const expiresAt = new Date(Date.now() + 1000 * 60 * 2).toISOString();
-        const signature = signData(paymentVoucherPayload({ requestId, invocationId, amount, recipientAddress, expiresAt, publicKey: this.publicKey }, resourcePath, resourceName, parameters), this.privateKey);
-        return { requestId, invocationId, amount, recipientAddress, signature, expiresAt, publicKey: this.publicKey };
+        const hash = invocationHash(resourcePath, resourceName, functionName, parameters);
+        const signature = signData(paymentVoucherPayload({ requestId, invocationId, amount, recipientAddress, expiresAt, invocationHash: hash, publicKey: this.publicKey }), this.privateKey);
+        return { requestId, invocationId, amount, recipientAddress, signature, expiresAt, invocationHash: hash, publicKey: this.publicKey };
     }
 }

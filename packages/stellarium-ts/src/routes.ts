@@ -1,13 +1,22 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
+import rateLimit from '@fastify/rate-limit';
 import type { FastifyPluginAsync } from 'fastify';
 import { interpretParsed, parseScript } from 'requestscript';
 import { Peer } from './peer/repository.js';
-import { PaymentVoucher, paymentVoucherPayload } from './resource/invoker.js';
-import { StellariumResource, StellariumResourceFunction } from './resource/repository.js';
+import { invocationHash, PaymentVoucher, paymentVoucherPayload } from './resource/invoker.js';
+import { StellariumResource, StellariumResourceFunction, StellariumResourceFunctionPaymentManifest } from './resource/repository.js';
 import type { Service } from './service.js';
-import { verifyData } from './crypto/utils.js';
+import { safeVerifyData } from './crypto/utils.js';
+
+export interface RateLimitConfig {
+    max: number;
+    /** Milliseconds, or a string such as '1 minute'. */
+    timeWindow: number | string;
+}
 
 interface RouteOptions {
     service: Service;
+    rateLimit?: RateLimitConfig;
 }
 
 interface PeerRequest extends Peer {
@@ -39,12 +48,93 @@ interface RunRequest {
     source: string;
 }
 
+// Body schemas check only the shape the handlers rely on. Signed payloads (resources) are
+// left unvalidated inside, since coercing or stripping them would change the signed bytes.
+const nonEmptyString = { type: 'string', minLength: 1 } as const;
+
+const peerRequestSchema = {
+    type: 'object',
+    required: ['baseUrl', 'name', 'publicKey', 'signature', 'expiry'],
+    properties: { baseUrl: nonEmptyString, name: nonEmptyString, publicKey: nonEmptyString, signature: nonEmptyString, expiry: nonEmptyString },
+} as const;
+
+const resourceRequestSchema = {
+    type: 'object',
+    required: ['publicKey', 'signature', 'expiry', 'resources'],
+    properties: { publicKey: nonEmptyString, signature: nonEmptyString, expiry: nonEmptyString, resources: { type: 'array' } },
+} as const;
+
+const runRequestSchema = {
+    type: 'object',
+    required: ['source'],
+    properties: { source: { type: 'string' } },
+} as const;
+
+const resourceRunRequestSchema = {
+    type: 'object',
+    required: ['resourcePath', 'resourceName', 'functionName', 'parameters'],
+    properties: {
+        resourcePath: { type: 'string' },
+        resourceName: { type: 'string' },
+        functionName: { type: 'string' },
+        parameters: {
+            type: 'array',
+            items: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } },
+        },
+        paymentVoucher: {
+            type: 'object',
+            required: ['requestId', 'invocationId', 'amount', 'recipientAddress', 'signature', 'expiresAt', 'invocationHash', 'publicKey'],
+            properties: {
+                requestId: { type: 'string' },
+                invocationId: { type: 'string' },
+                amount: { type: 'integer' },
+                recipientAddress: { type: 'string' },
+                signature: { type: 'string' },
+                expiresAt: { type: 'string' },
+                invocationHash: { type: 'string' },
+                publicKey: { type: 'string' },
+            },
+        },
+    },
+} as const;
+
+/** Constant-time comparison. Hashing first gives equal-length buffers for timingSafeEqual. */
+function secretsEqual(a: string, b: string): boolean {
+    const digest = (value: string) => createHash('sha256').update(value).digest();
+    return timingSafeEqual(digest(a), digest(b));
+}
+
+/**
+ * A voucher is valid when it is bound to this exact call, signed by its public key, unexpired,
+ * and pays at least the function's cost to the function's recipient.
+ */
+function isValidPaymentVoucher(voucher: PaymentVoucher, manifest: StellariumResourceFunctionPaymentManifest, request: ResourceRunRequest): boolean {
+    const expectedHash = invocationHash(request.resourcePath, request.resourceName, request.functionName, request.parameters);
+    if (voucher.invocationHash !== expectedHash) {
+        return false;
+    }
+    if (voucher.amount < manifest.costLamports) {
+        return false;
+    }
+    if (voucher.recipientAddress !== manifest.recipientAddress) {
+        return false;
+    }
+    const expiresAt = Date.parse(voucher.expiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+        return false;
+    }
+    return safeVerifyData(paymentVoucherPayload(voucher), voucher.publicKey, voucher.signature);
+}
+
 /**
  * Encapsulates the routes
  * @param fastify Encapsulated Fastify Instance
  * @param options plugin options, refer to https://fastify.dev/docs/latest/Reference/Plugins/#plugin-options
  */
 const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
+
+    // Rate limiting is opt-in per route via `config.rateLimit`.
+    await fastify.register(rateLimit, { global: false });
 
     // Start Meta Routes
 
@@ -55,11 +145,8 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     });
 
     fastify.get('/self', async (request, reply) => {
-        return { 
-            baseUrl: process.env.BASE_URL,
-            publicKey: process.env.SIGNING_PUBLIC_KEY,
-            name: process.env.BASE_URL,
-         }
+        const { baseUrl, publicKey } = options.service.config;
+        return { baseUrl, publicKey, name: baseUrl };
     });
 
     fastify.get('/peers', async (request, reply) => {
@@ -67,9 +154,14 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         return { peers };
     });
 
-    fastify.put('/peers', async (request, reply) => {
-        const peer = request.body as PeerRequest;
-        await options.service.peerRepository.createIfNotExists(peer, peer.signature, peer.expiry);
+    fastify.put('/peers', { schema: { body: peerRequestSchema } }, async (request, reply) => {
+        const { baseUrl, name, publicKey, signature, expiry } = request.body as PeerRequest;
+        const result = await options.service.peerRepository.announce({ baseUrl, name, publicKey }, signature, expiry);
+        if (!result.ok) {
+            return result.error === 'conflict'
+                ? reply.status(409).send({ error: 'Base URL or name belongs to another peer' })
+                : reply.status(400).send({ error: 'Invalid signature' });
+        }
         return { success: true };
     });
 
@@ -98,7 +190,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         }
     });
 
-    fastify.put('/all-resources', async (request, reply) => {
+    fastify.put('/all-resources', { schema: { body: resourceRequestSchema } }, async (request, reply) => {
         const resourceRequest = request.body as ResourceRequest;
         
         const resources = resourceRequest.resources;
@@ -109,38 +201,48 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             return reply.status(400).send({ error: 'Peer not found' });
         }
 
-        const success = await options.service.resourceRepository.saveAll(resources, existingPeer, resourceRequest.signature, resourceRequest.expiry);
-        if (!success) {
+        const result = await options.service.resourceRepository.saveAll(resources, existingPeer, resourceRequest.signature, resourceRequest.expiry);
+        if (!result.ok) {
             return reply.status(400).send({ error: 'Invalid signature' });
         }
 
-        return { success: true };
+        // Resources this peer may not publish (not served from its base URL, or owned elsewhere).
+        return { success: true, rejected: result.rejected };
     });
 
     // End Meta Routes
 
     // Start Run Routes
 
-    fastify.post('/run', async (request, reply) => {
-        const runRequest = request.body as RunRequest;
-        
-        // Check that the API Key matches the env variable
+    // Authenticate before body validation, so unauthenticated callers learn nothing about the schema.
+    fastify.post('/run', { schema: { body: runRequestSchema }, preValidation: async (request, reply) => {
+        // Check that the API Key matches the configured key
         const authorizationHeader = request.headers['authorization'];
         if (!authorizationHeader) {
             return reply.status(401).send({ error: 'Authorization header is required' });
         }
         const apiKey = authorizationHeader.split(' ')[1];
-        if (apiKey !== process.env.API_KEY) {
+        // An unset API key must not match a header with no token.
+        const expectedApiKey = options.service.config.apiKey;
+        if (!expectedApiKey || !apiKey || !secretsEqual(apiKey, expectedApiKey)) {
             return reply.status(401).send({ error: 'Invalid API Key' });
         }
-        
+    } }, async (request, reply) => {
+        const runRequest = request.body as RunRequest;
+
+        let script: ReturnType<typeof parseScript>;
         try {
-            const script = parseScript(runRequest.source);
+            script = parseScript(runRequest.source);
+        } catch (error) {
+            // A script that doesn't parse is the caller's mistake, not a server failure.
+            return reply.status(400).send({ error: 'Invalid script', details: error instanceof Error ? error.message : undefined });
+        }
 
-            if (script.declaration.kind !== 'request') {
-                return reply.status(400).send({ error: 'Invalid script' });
-            }
+        if (script.declaration.kind !== 'request') {
+            return reply.status(400).send({ error: 'Invalid script' });
+        }
 
+        try {
             const result = await interpretParsed(script, { 
                 resourceResolver: options.service.resourceResolver, 
                 resourceInvoker: options.service.resourceInvoker
@@ -153,7 +255,10 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         }
     });
 
-    fastify.post('/run/resource', async (request, reply) => {
+    fastify.post('/run/resource', {
+        schema: { body: resourceRunRequestSchema },
+        config: { rateLimit: options.rateLimit ?? { max: 100, timeWindow: '1 minute' } },
+    }, async (request, reply) => {
         const resourceRequest = request.body as ResourceRunRequest;
         const paymentVoucher = resourceRequest.paymentVoucher;
 
@@ -162,29 +267,34 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             return reply.status(400).send({ error: 'Resource not found' });
         }
 
-        if (paymentVoucher && resource.metadata.paymentManifest) {
-            const isValid = verifyData(
-                paymentVoucherPayload(paymentVoucher, resourceRequest.resourcePath, resourceRequest.resourceName, resourceRequest.parameters),
-                paymentVoucher.publicKey,
-                paymentVoucher.signature,
-            );
-            if (!isValid) {
+        const resourceFunction = resource.functions.find(fn => fn.name === resourceRequest.functionName);
+        if (!resourceFunction) {
+            return reply.status(400).send({ error: 'Function not found' });
+        }
+
+        // Payment manifests are per function. A paid function is never run without a valid voucher.
+        const paymentManifest = resourceFunction.paymentManifest;
+        if (paymentManifest) {
+            if (!paymentVoucher) {
+                return reply.status(402).send({ error: 'Payment voucher is required' });
+            }
+            if (!isValidPaymentVoucher(paymentVoucher, paymentManifest, resourceRequest)) {
                 return reply.status(400).send({ error: 'Invalid payment voucher' });
             }
         }
 
         const result = await options.service.resourceInvoker.invoke(resource, resourceRequest.functionName, resourceRequest.parameters);
 
-        // A voucher is optional. Settlement runs only after a successful invoke. Run this on a separate thread to avoid blocking the main thread.
-        if (paymentVoucher) {
+        // Settle only verified vouchers, and only after a successful invoke. A voucher sent to a free function is ignored.
+        // Run this on a separate thread to avoid blocking the main thread.
+        if (paymentManifest && paymentVoucher && !result.error) {
             setTimeout(async () => {
-                
-                await options.service.operatorClient.settlePayment({
-                    voucher: paymentVoucher,
-                    resourcePath: resourceRequest.resourcePath,
-                    resourceName: resourceRequest.resourceName,
-                    parameters: resourceRequest.parameters,
-                });
+                // Nothing awaits this callback, so an uncaught error here would be an unhandled rejection.
+                try {
+                    await options.service.operatorClient.settlePayment({ voucher: paymentVoucher });
+                } catch (error) {
+                    fastify.log.error(error, 'Failed to settle payment');
+                }
             }, 0);
         }
 

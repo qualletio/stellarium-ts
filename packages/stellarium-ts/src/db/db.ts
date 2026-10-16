@@ -1,14 +1,34 @@
 import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
+import { open, type Database } from 'sqlite';
 
-const db = await open({
-  filename: './requestscript.db', // Specify the database file
-  driver: sqlite3.Database,
-});
+export const DEFAULT_DATABASE_PATH = './requestscript.db';
 
-// Create tables
+/**
+ * Bumped whenever the schema changes in a way `CREATE TABLE IF NOT EXISTS` can't apply.
+ * Version 1 dropped `UNIQUE (base_url)` from `resource` and added uniqueness to the function tables.
+ */
+const SCHEMA_VERSION = 1;
 
-export async function createTables() {
+/** Opens (or creates) the node database and brings its schema up to date. Pass ':memory:' for tests. */
+export async function openDatabase(filename: string = DEFAULT_DATABASE_PATH): Promise<Database> {
+    const db = await open({ filename, driver: sqlite3.Database });
+    await createTables(db);
+    return db;
+}
+
+export async function createTables(db: Database) {
+    const { user_version: version } = await db.get<{ user_version: number }>('PRAGMA user_version') ?? { user_version: 0 };
+    if (version < SCHEMA_VERSION) {
+        // Resource rows are a cache of what peers advertise, and are relearned on the next broadcast.
+        // SQLite can't drop a constraint in place, so rebuild them. Peers are kept.
+        await db.exec(`
+            DROP TABLE IF EXISTS resource_function_payment_manifest;
+            DROP TABLE IF EXISTS resource_function_parameter;
+            DROP TABLE IF EXISTS resource_function;
+            DROP TABLE IF EXISTS resource;
+        `);
+    }
+
     await db.exec(`
         CREATE TABLE IF NOT EXISTS peer (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,8 +54,7 @@ export async function createTables() {
 
             FOREIGN KEY (peer_id) REFERENCES peer(id),
 
-            UNIQUE (path, name),
-            UNIQUE (base_url)
+            UNIQUE (path, name)
         );
 
         CREATE TABLE IF NOT EXISTS resource_function (
@@ -46,7 +65,9 @@ export async function createTables() {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
 
-            FOREIGN KEY (resource_id) REFERENCES resource(id)
+            FOREIGN KEY (resource_id) REFERENCES resource(id),
+
+            UNIQUE (resource_id, name)
         );
 
         CREATE TABLE IF NOT EXISTS resource_function_parameter (
@@ -57,7 +78,9 @@ export async function createTables() {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
 
-            FOREIGN KEY (resource_function_id) REFERENCES resource_function(id)
+            FOREIGN KEY (resource_function_id) REFERENCES resource_function(id),
+
+            UNIQUE (resource_function_id, name)
         );
 
         CREATE TABLE IF NOT EXISTS resource_function_payment_manifest (
@@ -68,10 +91,11 @@ export async function createTables() {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
 
-            FOREIGN KEY (resource_function_id) REFERENCES resource_function(id)
+            FOREIGN KEY (resource_function_id) REFERENCES resource_function(id),
+
+            UNIQUE (resource_function_id)
         );
     `);
+
+    await db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
-
-
-export default db;

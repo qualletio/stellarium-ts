@@ -5,34 +5,25 @@ PostgreSQL, the operator API, and two Stellarium nodes: a caller and a paid
 resource provider. All money is **local test SOL**. Commands assume macOS/Linux,
 run from the repository root unless a different directory is shown.
 
-**Current status (2026-10-11): this checkout cannot complete paid end-to-end
-settlement yet.** Escrow creation can be exercised after configuring and deploying
-the program. Sections 7–9 describe the full-system test after the source blockers
-in section 1 are fixed. An HTTP success or a receipt alone is not proof of payment.
-This guide does not apply those application fixes or deploy anything for you.
+**Current status (2026-10-16):** the source blockers this guide used to list are
+fixed, and the paid two-node flow is covered by automated tests (see the end of this
+guide). The validator-backed procedure in sections 7–9 has not been rerun since
+those fixes. An HTTP success or a receipt alone is not proof of payment.
+This guide does not deploy anything for you.
 
-## 1. Source blockers to resolve first
+## 1. What the source does now
 
-The source is the authority here; `apps/operator/README.md` describes several
-behaviors that are not implemented in the current checkout.
+The source is the authority here. Summary of the behavior this guide relies on:
 
-| Area | Current problem | Required behavior before the full test |
-| --- | --- | --- |
-| Program authority | `programs/escrow_program/src/lib.rs`: `ESCROW_AUTHORITY = None` | Compile with the local operator's public key (section 4). |
-| Node entry point | `src/server.ts` exports a class but never instantiates it | Supply a launcher that registers a resource and calls `start` (section 7). Running the package's current `start` script alone does not start a node. |
-| Node runtime imports | `@/crypto/utils.js` aliases remain in emitted JavaScript | Replace runtime aliases with relative `.js` imports, or configure a runtime that resolves them. Plain `node dist/...` does not understand TypeScript `paths`. |
-| SQLite startup | `packages/stellarium-ts/src/db/db.ts` has missing commas before foreign keys and trailing commas before `)` | Correct SQL so `createTables()` succeeds on an empty database. |
-| SQLite repositories | Schema uses singular `resource*` tables; `ResourceRepository` queries plural `resources`, `resource_functions`, etc. `resource.peer_id` is required but inserts omit it | Align schema and queries, and persist the peer that owns a resource. Preserve paid manifests across discovery. |
-| Resource lookup | `getExternalResources()` uses `db.get` then `.map`; function lookup binds three values to two placeholders and does not join by resource path/name | Use `db.all`; look up the resource first or join it to its functions; fetch manifests using the function ID. Return camel-case fields expected by discovery. |
-| Peer discovery | Peer inserts bind `name` as `public_key`; queries bind too many values; `getPeerByPublicKey()` returns raw snake-case fields; resource broadcast omits `publicKey` | Store/map peer fields correctly; send the provider's public key in resource broadcasts; sign exactly the payload the receiver verifies. |
-| Caller signing | `packages/stellarium-ts/src/service.ts` constructs the invoker with `"TODO", "TODO"` | Load `SIGNING_PUBLIC_KEY` (SPKI DER base64url) and `SIGNING_PRIVATE_KEY` (PKCS8 DER base64url). The current 10,000-lamport per-call limit permits the fixture below. |
-| Provider verification | `/v1/run/resource` verifies the entire returned voucher, including its signature; the caller signs a different payload with resource context | Verify `{ requestId, invocationId, amount, recipientAddress, expiresAt, resourcePath, resourceName, parameters, publicKey }` in that insertion order, excluding `signature`. Check expiry and the function's expected cost/recipient before execution. |
-| Operator user address | `settlePayment()` calls `new PublicKey(voucher.publicKey)` on a base64url SPKI key | Validate Ed25519 SPKI, extract its raw 32-byte public key, then derive the base58 Solana user address. Do not reinterpret DER as a Solana address. |
-| Operator withdrawal | `settlePayment()` returns `status: "existing"` whenever the valid initialized escrow exists | Remove this creation-only short circuit from withdrawal. An initialized escrow is the prerequisite for payment, not a completed payment. |
-| Operator database | No migration provisions `receipts` | Provision the current table (section 5). There is no `operator_payment_settlement` implementation in this checkout. |
-| Operator authorization/errors | `apiToken` is passed to routes but never checked; no route schema/error handler uses `OperationError.statusCode` | Enforce escrow bearer authorization; validate bodies/amounts; map intentional failures to their HTTP statuses. Currently intentional errors generally become HTTP 500. |
-| Payment durability | Receipt is written before broadcast; duplicate lookup and insert are not atomic; no unique claim or reconciliation | Add durable atomic claiming, payload identity checks, and saved transaction state. A receipt can currently exist without a successful transfer. |
-| Provider completion | Settlement runs in an unhandled async `setTimeout`; `OperatorClient` discards response details | Catch/report failures and retain the signature/status. Ensure the test can wait for confirmed settlement independently of the resource response. |
+| Area | Behavior |
+| --- | --- |
+| Program authority | `programs/escrow_program/src/lib.rs` has local fixture keys compiled in. Replace them with your own (section 4). |
+| Node configuration | `StellariumNode.start` takes `baseUrl`, keys, `apiKey`, `operatorUrl`, `costLimitLamports` and `databasePath`, falling back to the environment. It rejects when a required value is missing. |
+| SQLite | Schema is created on startup and reused on restart. Bootstrapping is idempotent, and a provider may host several resources. |
+| Peer discovery | Announcements are signed over `{ baseUrl, name, publicKey, expiry }` and verified with the announced key. Resource broadcasts carry the sender's `publicKey`, and a peer may only publish its own resources. |
+| Provider verification | `/v1/run/resource` requires a voucher for a paid function and checks its invocation hash, amount, recipient, expiry and signature before running it. It settles only after a successful run. |
+| Operator authorization/errors | `POST /v1/escrow` requires `Authorization: Bearer <OPERATOR_API_TOKEN>`. Request bodies are schema-validated, and `OperationError`s keep their HTTP status. |
+| Payment durability | Migrations create `receipts` at startup. A receipt is claimed atomically before broadcast and moves through `pending` → `confirmed`, `unconfirmed`, `failed` or `expired`. A reconciliation loop checks the chain for uncertain receipts. A voucher can be settled again only after `failed` or `expired`. |
 
 Do not work around voucher failures by disabling verification or using a different
 wallet as the escrow user. Fix the key conversion and signed-payload agreement.
@@ -153,7 +144,8 @@ for (const [role, port] of [['caller', 3000], ['provider', 3002]]) {
     OPERATOR_URL: 'http://127.0.0.1:3001/v1',
     SIGNING_PUBLIC_KEY: spki.toString('base64url'),
     SIGNING_PRIVATE_KEY: privateKey.export({format: 'der', type: 'pkcs8'}).toString('base64url'),
-    USER_ADDRESS: new PublicKey(raw).toBase58() };
+    USER_ADDRESS: new PublicKey(raw).toBase58(),
+    API_KEY: randomBytes(32).toString('hex') };
   writeFileSync(`.keys/local-e2e/${role}.env`, Object.entries(values)
     .map(([key, value]) => `${key}=${value}`).join('\n') + '\n', { mode: 0o600, flag: 'wx' });
 }
@@ -246,28 +238,8 @@ docker exec stellarium-local-e2e-postgres pg_isready -U stellarium -d stellarium
 ```
 
 For a previously created container, use `docker start
-stellarium-local-e2e-postgres` instead. Provision the table matching the current
-Drizzle schema; this is not a migration for any future settlement-store redesign:
-
-```sh
-docker exec -i stellarium-local-e2e-postgres psql -U stellarium -d stellarium \
-  -v ON_ERROR_STOP=1 <<'SQL'
-CREATE TABLE IF NOT EXISTS receipts (
-  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  "requestId" varchar(255) NOT NULL,
-  "invocationId" varchar(255) NOT NULL,
-  amount integer NOT NULL,
-  "recipientAddress" varchar(255) NOT NULL,
-  "voucherSignature" varchar(255) NOT NULL,
-  "transactionSignature" varchar(255) NOT NULL,
-  "expiresAt" timestamp NOT NULL,
-  "publicKey" varchar(255) NOT NULL,
-  "resourcePath" varchar(255) NOT NULL,
-  "resourceName" varchar(255) NOT NULL,
-  parameters jsonb NOT NULL
-);
-SQL
-```
+stellarium-local-e2e-postgres` instead. The operator applies the migrations in
+`apps/operator/drizzle/` itself at startup, so no manual table setup is needed.
 
 Start the operator in its terminal, from its workspace so dependencies resolve.
 The Node env file loader avoids putting the secret JSON into a shell command:
@@ -311,8 +283,7 @@ export ESCROW_ADDRESS="$(python3 -c 'import json; print(json.load(open(".keys/lo
 solana --url "$RPC" account "$ESCROW_ADDRESS"
 ```
 
-Current routes return HTTP 200 for successful creation; don't assert the README's
-201 until implemented. Expect `confirmed` and a signature on first creation,
+Successful creation returns HTTP 200 (202 when the result is `unconfirmed`). Expect `confirmed` and a signature on first creation,
 `existing` without a new transaction on a repeat. Verify account owner equals
 the program ID and data length is 73. For a first creation, use the signature
 verification in section 9. If status is `unconfirmed`, check the saved signature
@@ -331,11 +302,11 @@ from another wallet. The user key need not itself have lamports for setup or
 withdrawal: the operator pays the fees. Escrow balance should be rent minimum
 for 73 bytes plus 100,000,000 lamports.
 
-## 7. Start provider and caller (after section 1 fixes)
+## 7. Start provider and caller
 
-**Stop here if those fixes are not implemented.** These launchers cannot make the
-current broken SQLite/discovery/signing paths work. They show how to exercise
-the repaired system without adding a separate frontend or wallet extension.
+These launchers exercise the system without adding a separate frontend or wallet
+extension. `apps/local-resource-node` and `apps/local-caller-node` are equivalent
+fixtures used by `docker compose`.
 
 Save this as `packages/stellarium-ts/local-node.mjs` (a local fixture launcher):
 
@@ -400,27 +371,28 @@ The caller must resolve `com.example.Weather` as **remote**, with base URL
 `http://127.0.0.1:3002` and `temperature`'s 500-lamport manifest. A local resource
 invocation bypasses voucher creation, so it cannot prove settlement. For a
 separate discovery test, announce each peer with a valid signature and then
-broadcast resources; the current startup only broadcasts to already known peers.
-Restarting against existing SQLite data must not duplicate resource rows.
+broadcast resources; startup only broadcasts to already known peers.
+Restarting against existing SQLite data does not duplicate resource rows.
 
 ## 8. Execute the paid request and isolate failures
 
-Record escrow and recipient balances, then call the caller's API using its
-**actual** JSON `{ source }` wire format (the root README's raw text example is
-outdated):
+Record escrow and recipient balances, then call the caller's API with its JSON
+`{ source }` body and its `API_KEY`:
 
 ```sh
 solana --url "$RPC" balance "$ESCROW_ADDRESS" --lamports
 solana --url "$RPC" balance "$RECIPIENT_ADDRESS" --lamports
+export CALLER_API_KEY="$(python3 -c 'from pathlib import Path; print(dict(line.split("=",1) for line in Path(".keys/local-e2e/caller.env").read_text().splitlines())["API_KEY"])')"
 curl -sS -i http://127.0.0.1:3000/v1/run \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $CALLER_API_KEY" \
   -d '{"source":"request GetTemperature {\n const weather: com.example.Weather\n return weather.temperature(city: \"Oslo\")\n}"}'
-# Expected resource result: {"returnValue":12}
+# Expected resource result: {"returnValue":{"value":12,"error":null}}
 ```
 
 Follow caller, provider, and operator logs. Wait separately for the provider's
-operator request to finish; the resource response currently precedes settlement.
-Do not mistake `{ returnValue: 12 }` for payment completion.
+operator request to finish; the resource response precedes settlement.
+Do not mistake the resource result for payment completion.
 
 Read the receipt and preserve request ID, invocation ID and transaction signature:
 
@@ -443,8 +415,8 @@ const invoker = new CombinationResourceInvoker(null, 10000,
   process.env.SIGNING_PUBLIC_KEY, process.env.SIGNING_PRIVATE_KEY);
 const parameters = [{ name: 'city', value: 'Oslo' }];
 const voucher = invoker.createPaymentVoucher(process.env.RECIPIENT_ADDRESS,
-  500, 'com.example', 'Weather', parameters);
-const submission = { voucher, resourcePath: 'com.example', resourceName: 'Weather', parameters };
+  500, 'com.example', 'Weather', 'temperature', parameters);
+const submission = { voucher };
 writeFileSync('../../.keys/local-e2e/payment.json', JSON.stringify(submission));
 console.log('Voucher saved with a two-minute lifetime.');
 JS
@@ -453,15 +425,14 @@ curl -sS -i http://127.0.0.1:3001/v1/payment \
   -H 'Content-Type: application/json' --data-binary @.keys/local-e2e/payment.json
 ```
 
-This matches the current operator body (no `manifest` field). The provider should
-validate the manifest against the signed voucher. Preserve parameter key order;
-signatures cover `JSON.stringify`, not canonical JSON. The direct test generates
+This matches the operator body (no `manifest` field). The provider validates the
+voucher against its own manifest before running the function. Preserve parameter key order;
+the invocation hash and signature cover `JSON.stringify`, not canonical JSON. The direct test generates
 a new authorization each time it runs, so do not rerun it to retry an uncertain
 payment. Reuse the saved body and first reconcile its saved signature.
 
-Expected fixed behavior: a confirmed result with a withdrawal signature, one
-receipt, and a 500-lamport transfer. Current source instead fails converting the
-SPKI key; after only that fix it can return `existing` with no withdrawal.
+Expected behavior: a confirmed result with a withdrawal signature, one
+`confirmed` receipt, and a 500-lamport transfer.
 
 ## 9. Verify on the local chain
 
@@ -582,20 +553,20 @@ The full-system happy path passes only when all of these hold:
 5. Escrow decreases by exactly 500 lamports; recipient increases by exactly 500;
    operator pays the transaction fee; escrow state and rent reserve stay valid.
 
-Run these additional cases after implementing the corresponding fixes. Use
+Run these additional cases. Use
 fresh IDs for independent test authorizations, but the **same saved voucher** for
 replay tests. Inspect chain balances and signatures, not only HTTP status codes.
 
 | Case | Expected result |
 | --- | --- |
 | Repeat escrow creation | `existing`, same PDA, no extra setup transaction. |
-| Missing/wrong escrow token | 401; no setup transaction. **Currently not enforced.** |
+| Missing/wrong escrow token | 401; no setup transaction. |
 | Tamper signed amount/recipient/context | Rejected, no withdrawal or receipt. |
-| Expired voucher | Rejected before submission, no transfer. Current operator reports expiry as an `OperationError(401)` but route handling needs fixing. |
+| Expired voucher | 401 before submission, no transfer. |
 | Insufficient spendable escrow balance | Rejected, no withdrawal, rent preserved. |
 | Missing escrow | Rejected, no withdrawal. |
-| Same voucher twice / concurrent submissions | Exactly one on-chain payment; a deterministic saved result or conflict. **Current receipt lookup is not concurrency-safe.** |
-| Operator restart and retry same voucher | No second transfer; saved state reconciles to the original signature. |
+| Same voucher twice / concurrent submissions | Exactly one on-chain payment; the repeat gets 409. |
+| Operator restart and retry same voucher | No second transfer; reconciliation resolves the saved signature to `confirmed`, `failed` or `expired`. |
 | RPC interruption around broadcast | Treat as uncertain, query the saved signature; do not mint a replacement voucher or rebuild a transfer automatically. |
 | Resource execution fails | No settlement; provider reports the execution failure. |
 | Payment fails after resource succeeds | Explicit observable settlement failure; resource result alone must not mark the test passed. |
@@ -604,15 +575,16 @@ replay tests. Inspect chain balances and signatures, not only HTTP status codes.
 
 | Symptom | Check |
 | --- | --- |
-| `ERR_MODULE_NOT_FOUND` for `@/…` | Runtime alias fixes and a fresh compile. |
-| SQLite `near FOREIGN` / missing table | Section 1 schema and repository alignment; working directory for each node. |
+| `… is required: pass it to StellariumNode.start` | The node's env file is loaded and has that variable. |
+| `/v1/run` answers 401 | `Authorization: Bearer` matches the caller's `API_KEY`. |
+| Paid call answers 402 or 400 | The caller knows the provider's current manifest (restart it to relearn) and its `costLimitLamports` covers the cost. |
 | Invalid DER / invalid public key | Caller env loaded into the invoker; SPKI/raw conversion in the operator. |
 | Simulation error, custom program error 0 | Program was built with `ESCROW_AUTHORITY = None`; configure, rebuild, redeploy. |
 | Custom program error 1 | Compiled authority differs from operator `PRIVATE_KEY` public address. |
 | Withdrawal fails with custom program error 2 | Program was built with `PROTOCOL_FEE_RECIPIENT = None`; configure, rebuild, redeploy. |
 | Withdrawal fails with custom program error 3 | Operator `PROTOCOL_FEE_RECIPIENT` differs from the compiled fee wallet. |
-| Payment returns `existing` | Withdrawal still has the erroneous initialization short circuit. |
-| `relation receipts does not exist` | Run section 5 against the operator's actual `DATABASE_URL`. |
+| `relation receipts does not exist` | The operator failed to apply migrations at startup; check its log and `DATABASE_URL`. |
+| Receipt stuck `unconfirmed` | Reconciliation runs every `RECONCILE_INTERVAL_MS` (30s) and waits two minutes after the last change. Rows without `lastValidBlockHeight` need manual review. |
 | `ECONNREFUSED` on 8899/8900 | Validator process, RPC/WS ports, and local URL. |
 | Operator doesn't see a settlement | `OPERATOR_URL` includes `/v1`; provider voucher verification succeeded; background errors surfaced. |
 | Signature not found | Check local RPC, wait for confirmation, check whether ledger was reset. A DB receipt is not chain proof. |
@@ -633,14 +605,11 @@ will derive a different escrow. Restore your temporary public authority source
 edit deliberately when finished; private fixture files under `.keys/` and the
 ledger under `.local-ledger/` are ignored by Git.
 
-## Validation performed while writing this guide
+## Validation
 
-- Both workspace `tsc --noEmit` checks passed.
-- All 18 Rust unit tests passed (`cargo test --locked --offline`).
-- Executing the current SQLite schema against an in-memory database reproduced
-  `SQLITE_ERROR: near "FOREIGN": syntax error`.
-- Solana deploy/transfer/validator flags were checked against installed CLI help.
-- No signer configuration was changed, no local services were started, and no
-  deployment, airdrop, deposit, or payment was submitted as part of writing this
-  guide. Full validator-backed settlement remains unverified until the blockers
-  above are repaired and this procedure is run.
+- `pnpm build`, `pnpm check-types` and `pnpm test` pass. The tests include a two-node
+  network test with real HTTP and a fake operator (discovery, a paid call, settlement,
+  restart, cost limit), node route and repository tests on in-memory SQLite, and operator
+  tests on in-memory PGlite with a fake Solana connection (claims, retries, reconciliation).
+- All 23 Rust unit tests pass (`cargo test`).
+- The validator-backed procedure in this guide has not been rerun since the fixes above.
