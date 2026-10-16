@@ -13,7 +13,7 @@
   "dependencies": {
     "fastify": "^5.12.7",
     "requestscript": "^1.1.0",
-    "stellarium-ts": "0.12.0"
+    "stellarium-ts": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^7.0.2"
