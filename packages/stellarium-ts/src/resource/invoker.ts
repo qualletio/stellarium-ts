@@ -27,6 +27,34 @@ export function paymentVoucherPayload(
     return { requestId, invocationId, amount, recipientAddress, expiresAt, resourcePath, resourceName, parameters, publicKey };
 }
 
+export const EXTERNAL_INVOKE_MAX_RETRIES = 3;
+export const EXTERNAL_INVOKE_BASE_DELAY_MS = 500;
+
+/**
+ * POST to a remote resource, retrying network errors, 429s, and 5xx responses up to
+ * `EXTERNAL_INVOKE_MAX_RETRIES` times with exponential backoff (500ms, 1s, 2s).
+ * Other 4xx responses are returned immediately since retrying won't change them.
+ * Throws the last network error if every attempt fails to connect.
+ */
+async function fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            const response = await fetch(url, init);
+            if (response.status !== 429 && response.status < 500) {
+                return response;
+            }
+            if (attempt >= EXTERNAL_INVOKE_MAX_RETRIES) {
+                return response;
+            }
+        } catch (error) {
+            if (attempt >= EXTERNAL_INVOKE_MAX_RETRIES) {
+                throw error;
+            }
+        }
+        await new Promise(resolve => setTimeout(resolve, EXTERNAL_INVOKE_BASE_DELAY_MS * 2 ** attempt));
+    }
+}
+
 export class CombinationResourceInvoker implements ResourceInvoker {
 
     constructor(private readonly resourceRepository: ResourceRepository, private readonly costLimitLamports: number, private readonly publicKey: string, private readonly privateKey: string) {}
@@ -69,7 +97,9 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 requestBody.paymentVoucher = paymentVoucher;
             }
 
-            const result = await fetch(`${url}/v1/run/resource`, {
+            // The voucher is created once and reused on every attempt, so the operator's
+            // requestId/invocationId check prevents a retried call from being settled twice.
+            const result = await fetchWithRetry(`${url}/v1/run/resource`, {
                 method: 'POST',
                 body: JSON.stringify(requestBody),
                 headers: {
