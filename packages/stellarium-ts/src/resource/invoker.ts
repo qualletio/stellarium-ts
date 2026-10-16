@@ -38,6 +38,8 @@ export function paymentVoucherPayload(voucher: Omit<PaymentVoucher, "signature">
 
 export const EXTERNAL_INVOKE_MAX_RETRIES = 3;
 export const EXTERNAL_INVOKE_BASE_DELAY_MS = 500;
+/** Per attempt. A timed-out attempt is retried like a network error. */
+export const EXTERNAL_INVOKE_TIMEOUT_MS = 30_000;
 
 /**
  * POST to a remote resource, retrying network errors, 429s, and 5xx responses up to
@@ -48,7 +50,7 @@ export const EXTERNAL_INVOKE_BASE_DELAY_MS = 500;
 async function fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
     for (let attempt = 0; ; attempt++) {
         try {
-            const response = await fetch(url, init);
+            const response = await fetch(url, { ...init, signal: AbortSignal.timeout(EXTERNAL_INVOKE_TIMEOUT_MS) });
             if (response.status !== 429 && response.status < 500) {
                 return response;
             }
@@ -117,7 +119,10 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             });
 
             if (!result.ok) {
-                return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: ${result.statusText}` } };
+                // The provider's JSON error is more useful than the status text, which can be empty.
+                const detail = await result.json().then((body) => (body as { error?: unknown } | null)?.error, () => undefined);
+                const reason = typeof detail === 'string' ? detail : `${result.status} ${result.statusText}`.trim();
+                return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: ${reason}` } };
             }
 
             const data = await result.json() as { value: any, error: { message: string } | null };

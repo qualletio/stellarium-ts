@@ -1,4 +1,4 @@
-import { verifyData } from "../crypto/utils.js";
+import { isFreshExpiry, safeVerifyData } from "../crypto/utils.js";
 import { Database } from "sqlite";
 
 export interface Peer {
@@ -7,45 +7,73 @@ export interface Peer {
     publicKey: string;
 }
 
+export interface StoredPeer extends Peer {
+    id: number;
+}
+
+/** Why `announce` rejected a peer. */
+export type PeerAnnouncementError = 'invalid_signature' | 'conflict';
+
+/**
+ * The object a node signs to announce itself. Including `publicKey` binds the
+ * announcement to the key that signed it. Key order is part of the signed bytes.
+ */
+export function peerAnnouncementPayload(peer: Peer, expiry: string) {
+    const { baseUrl, name, publicKey } = peer;
+    return { baseUrl, name, publicKey, expiry };
+}
+
+interface PeerRow {
+    id: number;
+    base_url: string;
+    name: string;
+    public_key: string;
+}
+
+function toPeer(row: PeerRow): StoredPeer {
+    return { id: row.id, baseUrl: row.base_url, name: row.name, publicKey: row.public_key };
+}
+
 export class PeerRepository {
     constructor(private readonly db: Database) {}
 
+    /**
+     * Saves a peer learned from a trusted source (the starting peer) without a signature.
+     * Does nothing if a peer with the same public key, base URL or name already exists.
+     */
     async create(peer: Peer): Promise<void> {
-
-        // Check if the peer already exists
-        const existingPeer = await this.db.get(
-            'SELECT * FROM peer WHERE base_url = ?',
-            [peer.baseUrl]
-        );
-
-        if (existingPeer) {
-            return;
-        }
-
         const createdAt = new Date().toISOString();
         await this.db.run(
-            'INSERT INTO peer (base_url, name, public_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+            'INSERT OR IGNORE INTO peer (base_url, name, public_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
             [peer.baseUrl, peer.name, peer.publicKey, createdAt, createdAt]
         );
     }
 
-    async createIfNotExists(peer: Peer, signature: string, expiry: string): Promise<void> {
-
-        const existingPeer = await this.db.get(
-            'SELECT * FROM peer WHERE base_url = ?',
-            [peer.baseUrl]
-        );
-
-        // If the peer already exists, verify the signature before updating.
-        if (existingPeer) {
-            if (verifyData({ ...peer, expiry }, existingPeer.publicKey, signature) && new Date(expiry) > new Date()) {
-                await this.db.run('UPDATE peer SET base_url = ?, name = ?, updated_at = ? WHERE public_key = ?', [peer.baseUrl, peer.name, new Date().toISOString(), peer.publicKey]);
-                return;
-            }
-            return;
+    /**
+     * Saves a peer that announced itself. The announcement must be signed by `peer.publicKey`.
+     * A known peer (same public key) may change its base URL and name; a new peer may not
+     * take a base URL or name that another peer already holds.
+     */
+    async announce(peer: Peer, signature: string, expiry: string): Promise<{ ok: true } | { ok: false, error: PeerAnnouncementError }> {
+        if (!isFreshExpiry(expiry) || !safeVerifyData(peerAnnouncementPayload(peer, expiry), peer.publicKey, signature)) {
+            return { ok: false, error: 'invalid_signature' };
         }
 
-        await this.create(peer);
+        const holder = await this.db.get<PeerRow>(
+            'SELECT * FROM peer WHERE (base_url = ? OR name = ?) AND public_key != ?',
+            [peer.baseUrl, peer.name, peer.publicKey]
+        );
+        if (holder) {
+            return { ok: false, error: 'conflict' };
+        }
+
+        const now = new Date().toISOString();
+        await this.db.run(
+            `INSERT INTO peer (base_url, name, public_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (public_key) DO UPDATE SET base_url = excluded.base_url, name = excluded.name, updated_at = excluded.updated_at`,
+            [peer.baseUrl, peer.name, peer.publicKey, now, now]
+        );
+        return { ok: true };
     }
 
     async deleteAll(): Promise<void> {
@@ -53,7 +81,7 @@ export class PeerRepository {
     }
 
     async getPeerList(): Promise<Peer[]> {
-        const results = await this.db.all('SELECT * FROM peer');
+        const results = await this.db.all<PeerRow[]>('SELECT * FROM peer');
 
         return results.map(result => ({
             baseUrl: result.base_url,
@@ -62,13 +90,8 @@ export class PeerRepository {
         }));
     }
 
-    async getPeerByPublicKey(publicKey: string): Promise<Peer | undefined> {
-        const result = await this.db.get('SELECT * FROM peer WHERE public_key = ?', [publicKey]);
-
-        if (result) {
-            return result;
-        }
-
-        return undefined;
+    async getPeerByPublicKey(publicKey: string): Promise<StoredPeer | undefined> {
+        const result = await this.db.get<PeerRow>('SELECT * FROM peer WHERE public_key = ?', [publicKey]);
+        return result ? toPeer(result) : undefined;
     }
 }

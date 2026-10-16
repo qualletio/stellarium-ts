@@ -1,20 +1,20 @@
 import { createPublicKey, verify } from "node:crypto";
-import { and, eq } from "drizzle-orm";
-import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { receiptsTable } from "./db/schema.js";
+import { RETRYABLE_RECEIPT_STATUSES } from "./db/schema.js";
 import { OperationError } from "./errors.js";
+import type { ReceiptRepository } from "./repository.js";
 import type { PaymentSubmission } from "./routes.js";
 
 export class PaymentService {
-    constructor(private readonly db: NodePgDatabase) {}
+    constructor(private readonly receipts: ReceiptRepository) {}
 
+    /**
+     * Checks the voucher's signature and expiry, then that it hasn't been settled.
+     * The receipt claim in `EscrowService.settlePayment` is the authoritative duplicate check;
+     * this one rejects most repeats before any RPC calls.
+     */
     async verifyPayment(submission: PaymentSubmission): Promise<void> {
         const { voucher } = submission;
         const { requestId, invocationId, amount, recipientAddress, signature: voucherSignature, expiresAt, invocationHash, publicKey } = voucher;
-        const receipt = await this.db.select().from(receiptsTable).where(and(eq(receiptsTable.requestId, requestId), eq(receiptsTable.invocationId, invocationId)));
-        if (receipt.length > 0) {
-            throw new OperationError(409, 'Receipt has already been settled');
-        }
 
         // Same payload (paymentVoucherPayload) and SPKI key that signData used to create the voucher.
         const payload = JSON.stringify({
@@ -31,7 +31,13 @@ export class PaymentService {
         } catch {
             throw new OperationError(400, 'Invalid voucher public key');
         }
-        const valid = verify(null, Buffer.from(payload), key, Buffer.from(voucherSignature, "base64url"));
+        let valid: boolean;
+        try {
+            valid = verify(null, Buffer.from(payload), key, Buffer.from(voucherSignature, "base64url"));
+        } catch {
+            // Not an Ed25519 key.
+            throw new OperationError(400, 'Invalid voucher public key');
+        }
         if (!valid) {
             throw new OperationError(401, 'Invalid voucher signature');
         }
@@ -39,6 +45,11 @@ export class PaymentService {
         const expiry = Date.parse(expiresAt);
         if (!Number.isFinite(expiry) || expiry < Date.now()) {
             throw new OperationError(401, 'Voucher has expired');
+        }
+
+        const receipt = await this.receipts.getByRequestIdAndInvocationId(requestId, invocationId);
+        if (receipt && !RETRYABLE_RECEIPT_STATUSES.includes(receipt.status)) {
+            throw new OperationError(409, 'Receipt has already been settled');
         }
     }
 }

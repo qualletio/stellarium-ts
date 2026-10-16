@@ -177,7 +177,7 @@ importers:
         version: 5.12.7
       requestscript:
         specifier: ^1.1.0
-        version: 1.1.0(@types/pg@8.23.1)(sqlite3@6.0.1)
+        version: 1.1.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)
       stellarium-ts:
         specifier: workspace:*
         version: link:../../packages/stellarium-ts
@@ -193,7 +193,7 @@ importers:
         version: 5.12.7
       requestscript:
         specifier: ^1.0.5
-        version: 1.1.0(@types/pg@8.23.1)(sqlite3@6.0.1)
+        version: 1.1.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)
       stellarium-ts:
         specifier: workspace:*
         version: link:../../packages/stellarium-ts
@@ -215,7 +215,7 @@ importers:
         version: 18.0.8
       drizzle-orm:
         specifier: 1.0.0-rc.4
-        version: 1.0.0-rc.4(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1)
+        version: 1.0.0-rc.4(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1)
       fastify:
         specifier: ^5.12.5
         version: 5.12.7
@@ -226,12 +226,18 @@ importers:
       '@biomejs/biome':
         specifier: ^2.5.15
         version: 2.5.15
+      '@electric-sql/pglite':
+        specifier: ^0.5.10
+        version: 0.5.10
       '@types/pg':
         specifier: ^8.23.1
         version: 8.23.1
       drizzle-kit:
         specifier: 1.0.0-rc.4
         version: 1.0.0-rc.4
+      stellarium-ts:
+        specifier: workspace:*
+        version: link:../../packages/stellarium-ts
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -255,7 +261,7 @@ importers:
         version: 5.12.7
       requestscript:
         specifier: 1.1.0
-        version: 1.1.0(@types/pg@8.23.1)(sqlite3@6.0.1)
+        version: 1.1.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)
       sqlite:
         specifier: ^5.1.1
         version: 5.1.1
@@ -347,6 +353,9 @@ packages:
 
   '@drizzle-team/brocli@0.12.1':
     resolution: {integrity: sha512-yHwomvolVafvUXhy5TdiJVkuNCxXn+bKOs2aWiWEQh/5YaV97Oa/abJz3dmx7lxgIUsUlS1Jl4mEfvJPo3YsVw==}
+
+  '@electric-sql/pglite@0.5.10':
+    resolution: {integrity: sha512-tXc/25U3ulOkiRQuTFdwIv+JhBqtMdAF7Gvo6CfZZWtSB4+hgC4Wr2vwK5ngvvN5PJfAAEGIsfyCVy1JhCOBYw==}
 
   '@esbuild/aix-ppc64@0.25.12':
     resolution: {integrity: sha512-Hhmwd6CInZ3dwpuGTF8fJG6yoWmsToE+vYgD4nytZVxcu1ulHpUQRAB1UJ8+N1Am3Mz4+xOByoQoSZf4D+CpkA==}
@@ -2212,6 +2221,8 @@ snapshots:
 
   '@drizzle-team/brocli@0.12.1': {}
 
+  '@electric-sql/pglite@0.5.10': {}
+
   '@esbuild/aix-ppc64@0.25.12':
     optional: true
 
@@ -2771,8 +2782,9 @@ snapshots:
       get-tsconfig: 4.14.3
       jiti: 2.7.0
 
-  drizzle-orm@1.0.0-rc.4(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1):
+  drizzle-orm@1.0.0-rc.4(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1):
     optionalDependencies:
+      '@electric-sql/pglite': 0.5.10
       '@types/pg': 8.23.1
       pg: 8.23.1
       sqlite3: 6.0.1
@@ -3356,9 +3368,9 @@ snapshots:
 
   real-require@1.0.0: {}
 
-  requestscript@1.1.0(@types/pg@8.23.1)(sqlite3@6.0.1):
+  requestscript@1.1.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1):
     dependencies:
-      drizzle-orm: 1.0.0-rc.4(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1)
+      drizzle-orm: 1.0.0-rc.4(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1)
       express: 5.3.0
       pg: 8.23.1
     transitivePeerDependencies:

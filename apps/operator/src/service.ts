@@ -1,16 +1,18 @@
-import type { Connection, PublicKey, Signer } from '@solana/web3.js';
-import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { EscrowService } from './escrow/escrowService.js';
+import type { PublicKey, Signer } from '@solana/web3.js';
+import type { Database } from './db/database.js';
+import { type EscrowConnection, EscrowService } from './escrow/escrowService.js';
 import { PaymentService } from './paymentService.js';
+import { ReceiptRepository } from './repository.js';
 
 export interface Service {
     escrowService: EscrowService;
     paymentService: PaymentService;
 }
 
-export function createService(db: NodePgDatabase, escrowProgramId: PublicKey, authority: Signer, feeRecipient: PublicKey, connection: Connection): Service {
+export function createService(db: Database, escrowProgramId: PublicKey, authority: Signer, feeRecipient: PublicKey, connection: EscrowConnection): Service {
+    const receipts = new ReceiptRepository(db);
     return {
-        escrowService: new EscrowService(db, escrowProgramId, authority, feeRecipient, connection),
-        paymentService: new PaymentService(db),
+        escrowService: new EscrowService(receipts, escrowProgramId, authority, feeRecipient, connection),
+        paymentService: new PaymentService(receipts),
     };
 }

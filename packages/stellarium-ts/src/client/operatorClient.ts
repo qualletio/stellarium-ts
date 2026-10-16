@@ -13,6 +13,8 @@ export interface PaymentSubmission {
 
 export const SETTLE_PAYMENT_MAX_RETRIES = 5;
 export const SETTLE_PAYMENT_BASE_DELAY_MS = 1000;
+/** Per attempt. A timed-out attempt is retried like a network error. */
+export const SETTLE_PAYMENT_TIMEOUT_MS = 10_000;
 
 /**
  * Transient failures. Resending is safe even if an earlier attempt reached the operator: it stores a
@@ -32,13 +34,16 @@ function retryDelayMs(response: Response | undefined, attempt: number): number {
 }
 
 export class OperatorClient {
-    constructor(private readonly url: string) {}
+    constructor(private readonly url: string | undefined) {}
 
     /**
      * Retries `RETRYABLE_STATUSES` and network errors up to `SETTLE_PAYMENT_MAX_RETRIES` times.
-     * Throws the last network error if the operator could not be reached.
+     * Throws the last network error if the operator could not be reached, or if no operator URL is configured.
      */
     async settlePayment(payment: PaymentSubmission): Promise<void> {
+        if (!this.url) {
+            throw new Error('Cannot settle payment: no operator URL is configured');
+        }
         const body = JSON.stringify(payment);
         let response: Response;
         for (let attempt = 0; ; attempt++) {
@@ -50,6 +55,7 @@ export class OperatorClient {
                     headers: {
                         'Content-Type': 'application/json',
                     },
+                    signal: AbortSignal.timeout(SETTLE_PAYMENT_TIMEOUT_MS),
                 });
                 if (!RETRYABLE_STATUSES.has(response.status) || attempt >= SETTLE_PAYMENT_MAX_RETRIES) {
                     break;

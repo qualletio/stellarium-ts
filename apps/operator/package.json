@@ -10,7 +10,8 @@
     "start": "node dist/server.js",
     "dev": "node --watch src/server.ts",
     "test": "vitest --passWithNoTests --exclude 'dist/**'",
-    "lint": "biome lint src"
+    "lint": "biome lint src",
+    "check-types": "tsc --noEmit"
   },
   "keywords": [],
   "author": "",
@@ -18,8 +19,10 @@
   "type": "module",
   "devDependencies": {
     "@biomejs/biome": "^2.5.15",
+    "@electric-sql/pglite": "^0.5.10",
     "@types/pg": "^8.23.1",
     "drizzle-kit": "1.0.0-rc.4",
+    "stellarium-ts": "workspace:*",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",
     "vitest": "^4.1.11"

@@ -38,5 +38,27 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # After build: the operator type-checks against stellarium-ts's emitted declarations.
+      - name: Type-check
+        run: pnpm check-types
+
       - name: Test
         run: pnpm test
+
+  escrow-program:
+    name: Escrow program tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: programs/escrow_program
+
+      - name: Test
+        run: cargo test --manifest-path programs/escrow_program/Cargo.toml
