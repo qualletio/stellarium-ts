@@ -1,5 +1,5 @@
 import { Resource, ResourceFunctionCallParameter, ResourceInvoker } from "requestscript";
-import { signData } from "../crypto/utils.js";
+import { hashData, signData } from "../crypto/utils.js";
 import { ResourceRepository } from "./repository.js";
 
 export interface PaymentVoucher {
@@ -9,22 +9,31 @@ export interface PaymentVoucher {
     recipientAddress: string;
     signature: string;
     expiresAt: string;
+    invocationHash: string;
     publicKey: string;
 }
 
 /**
- * The object `createPaymentVoucher` signs. `signature` is excluded, and
- * `resourcePath`, `resourceName`, and `parameters` come from the invocation,
- * not from the voucher itself. Key order is part of the signed bytes.
+ * Hash binding a voucher to one function call. Providers recompute it from the
+ * request they receive and compare it to `voucher.invocationHash`.
+ * Key order is part of the hashed bytes.
  */
-export function paymentVoucherPayload(
-    voucher: Omit<PaymentVoucher, "signature">,
+export function invocationHash(
     resourcePath: string,
     resourceName: string,
+    functionName: string,
     parameters: ResourceFunctionCallParameter[],
-) {
-    const { requestId, invocationId, amount, recipientAddress, expiresAt, publicKey } = voucher;
-    return { requestId, invocationId, amount, recipientAddress, expiresAt, resourcePath, resourceName, parameters, publicKey };
+): string {
+    return hashData({ resourcePath, resourceName, functionName, parameters });
+}
+
+/**
+ * The object `createPaymentVoucher` signs: every voucher field except `signature`.
+ * Key order is part of the signed bytes.
+ */
+export function paymentVoucherPayload(voucher: Omit<PaymentVoucher, "signature">) {
+    const { requestId, invocationId, amount, recipientAddress, expiresAt, invocationHash, publicKey } = voucher;
+    return { requestId, invocationId, amount, recipientAddress, expiresAt, invocationHash, publicKey };
 }
 
 export const EXTERNAL_INVOKE_MAX_RETRIES = 3;
@@ -93,7 +102,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 if (resourceFunction.paymentManifest.costLamports > this.costLimitLamports) {
                     throw new Error(`Function ${functionName} cost ${resourceFunction.paymentManifest.costLamports} lamports, which exceeds the cost limit of ${this.costLimitLamports} lamports`);
                 }
-                paymentVoucher = this.createPaymentVoucher(resourceFunction.paymentManifest.recipientAddress, resourceFunction.paymentManifest.costLamports, resource.path, resource.name, parameters);
+                paymentVoucher = this.createPaymentVoucher(resourceFunction.paymentManifest.recipientAddress, resourceFunction.paymentManifest.costLamports, resource.path, resource.name, functionName, parameters);
                 requestBody.paymentVoucher = paymentVoucher;
             }
 
@@ -124,12 +133,13 @@ export class CombinationResourceInvoker implements ResourceInvoker {
         }
     }
 
-    createPaymentVoucher(recipientAddress: string, amount: number, resourcePath: string, resourceName: string, parameters: ResourceFunctionCallParameter[]): PaymentVoucher {
+    createPaymentVoucher(recipientAddress: string, amount: number, resourcePath: string, resourceName: string, functionName: string, parameters: ResourceFunctionCallParameter[]): PaymentVoucher {
         const requestId = crypto.randomUUID();
         const invocationId = crypto.randomUUID();
         // Expire in 2 minutes
         const expiresAt = new Date(Date.now() + 1000 * 60 * 2).toISOString();
-        const signature = signData(paymentVoucherPayload({ requestId, invocationId, amount, recipientAddress, expiresAt, publicKey: this.publicKey }, resourcePath, resourceName, parameters), this.privateKey);
-        return { requestId, invocationId, amount, recipientAddress, signature, expiresAt, publicKey: this.publicKey };
+        const hash = invocationHash(resourcePath, resourceName, functionName, parameters);
+        const signature = signData(paymentVoucherPayload({ requestId, invocationId, amount, recipientAddress, expiresAt, invocationHash: hash, publicKey: this.publicKey }), this.privateKey);
+        return { requestId, invocationId, amount, recipientAddress, signature, expiresAt, invocationHash: hash, publicKey: this.publicKey };
     }
 }

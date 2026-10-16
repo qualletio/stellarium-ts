@@ -26,7 +26,7 @@ behaviors that are not implemented in the current checkout.
 | Resource lookup | `getExternalResources()` uses `db.get` then `.map`; function lookup binds three values to two placeholders and does not join by resource path/name | Use `db.all`; look up the resource first or join it to its functions; fetch manifests using the function ID. Return camel-case fields expected by discovery. |
 | Peer discovery | Peer inserts bind `name` as `public_key`; queries bind too many values; `getPeerByPublicKey()` returns raw snake-case fields; resource broadcast omits `publicKey` | Store/map peer fields correctly; send the provider's public key in resource broadcasts; sign exactly the payload the receiver verifies. |
 | Caller signing | `packages/stellarium-ts/src/service.ts` constructs the invoker with `"TODO", "TODO"` | Load `SIGNING_PUBLIC_KEY` (SPKI DER base64url) and `SIGNING_PRIVATE_KEY` (PKCS8 DER base64url). The current 10,000-lamport per-call limit permits the fixture below. |
-| Provider verification | `/v1/run/resource` verifies the entire returned voucher, including its signature; the caller signs a different payload with resource context | Verify `{ requestId, invocationId, amount, recipientAddress, expiresAt, resourcePath, resourceName, parameters, publicKey }` in that insertion order, excluding `signature`. Check expiry and the function's expected cost/recipient before execution. |
+| Provider verification | `/v1/run/resource` verifies the entire returned voucher, including its signature; the caller signs a different payload with resource context | Check that `voucher.invocationHash` equals the hash of `{ resourcePath, resourceName, functionName, parameters }` from the request, then verify `{ requestId, invocationId, amount, recipientAddress, expiresAt, invocationHash, publicKey }` in that insertion order, excluding `signature`. Check expiry and the function's expected cost/recipient before execution. |
 | Operator user address | `settlePayment()` calls `new PublicKey(voucher.publicKey)` on a base64url SPKI key | Validate Ed25519 SPKI, extract its raw 32-byte public key, then derive the base58 Solana user address. Do not reinterpret DER as a Solana address. |
 | Operator withdrawal | `settlePayment()` returns `status: "existing"` whenever the valid initialized escrow exists | Remove this creation-only short circuit from withdrawal. An initialized escrow is the prerequisite for payment, not a completed payment. |
 | Operator database | No migration provisions `receipts` | Provision the current table (section 5). There is no `operator_payment_settlement` implementation in this checkout. |
@@ -262,9 +262,7 @@ CREATE TABLE IF NOT EXISTS receipts (
   "transactionSignature" varchar(255) NOT NULL,
   "expiresAt" timestamp NOT NULL,
   "publicKey" varchar(255) NOT NULL,
-  "resourcePath" varchar(255) NOT NULL,
-  "resourceName" varchar(255) NOT NULL,
-  parameters jsonb NOT NULL
+  "invocationHash" varchar(255) NOT NULL
 );
 SQL
 ```
@@ -443,8 +441,8 @@ const invoker = new CombinationResourceInvoker(null, 10000,
   process.env.SIGNING_PUBLIC_KEY, process.env.SIGNING_PRIVATE_KEY);
 const parameters = [{ name: 'city', value: 'Oslo' }];
 const voucher = invoker.createPaymentVoucher(process.env.RECIPIENT_ADDRESS,
-  500, 'com.example', 'Weather', parameters);
-const submission = { voucher, resourcePath: 'com.example', resourceName: 'Weather', parameters };
+  500, 'com.example', 'Weather', 'temperature', parameters);
+const submission = { voucher };
 writeFileSync('../../.keys/local-e2e/payment.json', JSON.stringify(submission));
 console.log('Voucher saved with a two-minute lifetime.');
 JS
@@ -455,7 +453,7 @@ curl -sS -i http://127.0.0.1:3001/v1/payment \
 
 This matches the current operator body (no `manifest` field). The provider should
 validate the manifest against the signed voucher. Preserve parameter key order;
-signatures cover `JSON.stringify`, not canonical JSON. The direct test generates
+the invocation hash and signature cover `JSON.stringify`, not canonical JSON. The direct test generates
 a new authorization each time it runs, so do not rerun it to retry an uncertain
 payment. Reuse the saved body and first reconcile its saved signature.
 

@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { interpretParsed, parseScript } from 'requestscript';
 import { Peer } from './peer/repository.js';
-import { PaymentVoucher, paymentVoucherPayload } from './resource/invoker.js';
+import { invocationHash, PaymentVoucher, paymentVoucherPayload } from './resource/invoker.js';
 import { StellariumResource, StellariumResourceFunction } from './resource/repository.js';
 import type { Service } from './service.js';
 import { verifyData } from './crypto/utils.js';
@@ -163,8 +163,9 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         }
 
         if (paymentVoucher && resource.metadata.paymentManifest) {
-            const isValid = verifyData(
-                paymentVoucherPayload(paymentVoucher, resourceRequest.resourcePath, resourceRequest.resourceName, resourceRequest.parameters),
+            const expectedHash = invocationHash(resourceRequest.resourcePath, resourceRequest.resourceName, resourceRequest.functionName, resourceRequest.parameters);
+            const isValid = paymentVoucher.invocationHash === expectedHash && verifyData(
+                paymentVoucherPayload(paymentVoucher),
                 paymentVoucher.publicKey,
                 paymentVoucher.signature,
             );
@@ -179,12 +180,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         if (paymentVoucher) {
             setTimeout(async () => {
                 
-                await options.service.operatorClient.settlePayment({
-                    voucher: paymentVoucher,
-                    resourcePath: resourceRequest.resourcePath,
-                    resourceName: resourceRequest.resourceName,
-                    parameters: resourceRequest.parameters,
-                });
+                await options.service.operatorClient.settlePayment({ voucher: paymentVoucher });
             }, 0);
         }
 

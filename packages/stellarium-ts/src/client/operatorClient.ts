@@ -6,12 +6,9 @@ export interface PaymentSubmission {
         recipientAddress: string; 
         signature: string; 
         expiresAt: string; 
+        invocationHash: string;
         publicKey: string;
     }
-    // These fields are signed by createPaymentVoucher but absent from its result.
-    resourcePath: string;
-    resourceName: string;
-    parameters: unknown[];
 }
 
 export class OperatorClient {

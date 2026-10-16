@@ -1,0 +1,166 @@
+{
+  "version": "8",
+  "dialect": "postgres",
+  "id": "c3bbb406-a0b8-4fec-9316-fc65cc7f1e54",
+  "prevIds": [
+    "33e21e88-5445-4700-8d3d-0bd35683b4c1"
+  ],
+  "ddl": [
+    {
+      "isRlsEnabled": false,
+      "name": "receipts",
+      "entityType": "tables",
+      "schema": "public"
+    },
+    {
+      "type": "integer",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": {
+        "type": "always",
+        "name": "receipts_id_seq",
+        "increment": "1",
+        "startWith": "1",
+        "minValue": "1",
+        "maxValue": "2147483647",
+        "cache": 1,
+        "cycle": false
+      },
+      "name": "id",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "receipts"
+    },
+    {
+      "type": "varchar(255)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "requestId",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "receipts"
+    },
+    {
+      "type": "varchar(255)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "invocationId",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "receipts"
+    },
+    {
+      "type": "integer",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "amount",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "receipts"
+    },
+    {
+      "type": "varchar(255)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "recipientAddress",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "receipts"
+    },
+    {
+      "type": "varchar(255)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "voucherSignature",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "receipts"
+    },
+    {
+      "type": "varchar(255)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "transactionSignature",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "receipts"
+    },
+    {
+      "type": "timestamp",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "expiresAt",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "receipts"
+    },
+    {
+      "type": "varchar(255)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "publicKey",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "receipts"
+    },
+    {
+      "type": "varchar(255)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "invocationHash",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "receipts"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "receipts_pkey",
+      "schema": "public",
+      "table": "receipts",
+      "entityType": "pks"
+    }
+  ],
+  "renames": []
+}

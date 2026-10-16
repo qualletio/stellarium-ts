@@ -90,8 +90,8 @@ export class EscrowService {
     }
 
     async settlePayment(submission: PaymentSubmission): Promise<OperationResult> {
-        const { voucher, resourcePath, resourceName, parameters } = submission;
-        const { requestId, invocationId, amount, recipientAddress, signature: voucherSignature, expiresAt, publicKey } = voucher;
+        const { voucher } = submission;
+        const { requestId, invocationId, amount, recipientAddress, signature: voucherSignature, expiresAt, invocationHash, publicKey } = voucher;
         const user = solanaUserFromSpki(voucher.publicKey);
         const recipient = new PublicKey(recipientAddress);
         const amountLamports = BigInt(amount);
@@ -150,9 +150,7 @@ export class EscrowService {
             transactionSignature: signature,
             expiresAt: new Date(expiresAt),
             publicKey,
-            resourcePath,
-            resourceName,
-            parameters,
+            invocationHash,
         });
 
         try {

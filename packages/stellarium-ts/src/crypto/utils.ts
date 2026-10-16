@@ -17,6 +17,10 @@ export function signData(data: Object, privateKey: string): string {
     return sign(null, bytes, key).toString('base64url');
 }
 
+export function hashData(data: Object): string {
+    return createHash('sha256').update(JSON.stringify(data)).digest('base64url');
+}
+
 export function verifyData(data: Object, publicKey: string, signature: string): boolean {
     const key = createPublicKey({
         key: Buffer.from(publicKey, "base64url"),

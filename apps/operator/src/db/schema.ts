@@ -1,4 +1,4 @@
-import { integer, jsonb, pgTable, timestamp, varchar } from "drizzle-orm/pg-core";
+import { integer, pgTable, timestamp, varchar } from "drizzle-orm/pg-core";
 
 export const receiptsTable = pgTable("receipts", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
@@ -10,7 +10,5 @@ export const receiptsTable = pgTable("receipts", {
   transactionSignature: varchar({ length: 255 }).notNull(),
   expiresAt: timestamp().notNull(),
   publicKey: varchar({ length: 255 }).notNull(),
-  resourcePath: varchar({ length: 255 }).notNull(),
-  resourceName: varchar({ length: 255 }).notNull(),
-  parameters: jsonb().notNull(),
+  invocationHash: varchar({ length: 255 }).notNull(),
 });

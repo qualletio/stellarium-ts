@@ -9,17 +9,17 @@ export class PaymentService {
     constructor(private readonly db: NodePgDatabase) {}
 
     async verifyPayment(submission: PaymentSubmission): Promise<void> {
-        const { voucher, resourcePath, resourceName, parameters } = submission;
-        const { requestId, invocationId, amount, recipientAddress, signature: voucherSignature, expiresAt, publicKey } = voucher;
+        const { voucher } = submission;
+        const { requestId, invocationId, amount, recipientAddress, signature: voucherSignature, expiresAt, invocationHash, publicKey } = voucher;
         const receipt = await this.db.select().from(receiptsTable).where(and(eq(receiptsTable.requestId, requestId), eq(receiptsTable.invocationId, invocationId)));
         if (receipt.length > 0) {
             throw new OperationError(409, 'Receipt has already been settled');
         }
 
-        // Same payload and SPKI key that signData used to create the voucher.
+        // Same payload (paymentVoucherPayload) and SPKI key that signData used to create the voucher.
         const payload = JSON.stringify({
             requestId, invocationId, amount, recipientAddress,
-            expiresAt, resourcePath, resourceName, parameters, publicKey,
+            expiresAt, invocationHash, publicKey,
         });
         const key = createPublicKey({
             key: Buffer.from(publicKey, "base64url"),

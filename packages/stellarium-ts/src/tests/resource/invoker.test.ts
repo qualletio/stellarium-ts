@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { verifyData } from "../../crypto/utils.js";
-import { CombinationResourceInvoker, EXTERNAL_INVOKE_MAX_RETRIES, paymentVoucherPayload } from "../../resource/invoker.js";
+import { CombinationResourceInvoker, EXTERNAL_INVOKE_MAX_RETRIES, invocationHash, paymentVoucherPayload } from "../../resource/invoker.js";
 import type { ResourceRepository } from "../../resource/repository.js";
 import type { Resource } from "requestscript";
 
@@ -17,7 +17,7 @@ function generateBase64KeyPair() {
 }
 
 describe("payment voucher", () => {
-    test("verifies the signed invocation payload, not the voucher object", () => {
+    test("signs the voucher fields, binding the call through invocationHash", () => {
         const { publicKey, privateKey } = generateBase64KeyPair();
         const invoker = new CombinationResourceInvoker({} as ResourceRepository, 100_000, publicKey, privateKey);
         const parameters = [{ name: "city", value: "Oslo" }];
@@ -26,15 +26,21 @@ describe("payment voucher", () => {
             10000,
             "com.example",
             "Weather",
+            "forecast",
             parameters,
         );
 
-        expect(verifyData(
-            paymentVoucherPayload(voucher, "com.example", "Weather", parameters),
-            voucher.publicKey,
-            voucher.signature,
-        )).toBe(true);
+        expect(voucher.invocationHash).toBe(invocationHash("com.example", "Weather", "forecast", parameters));
+        expect(verifyData(paymentVoucherPayload(voucher), voucher.publicKey, voucher.signature)).toBe(true);
         expect(verifyData(voucher, voucher.publicKey, voucher.signature)).toBe(false);
+    });
+
+    test("invocationHash changes with the function name or parameters", () => {
+        const parameters = [{ name: "city", value: "Oslo" }];
+        const hash = invocationHash("com.example", "Weather", "forecast", parameters);
+
+        expect(invocationHash("com.example", "Weather", "history", parameters)).not.toBe(hash);
+        expect(invocationHash("com.example", "Weather", "forecast", [{ name: "city", value: "Bergen" }])).not.toBe(hash);
     });
 });
 
@@ -129,5 +135,6 @@ describe("external invoke retries", () => {
         expect(bodies).toHaveLength(3);
         expect(new Set(bodies).size).toBe(1);
         expect(JSON.parse(bodies[0]).paymentVoucher.requestId).toBeDefined();
+        expect(JSON.parse(bodies[0]).paymentVoucher.invocationHash).toBe(invocationHash("com.example", "Weather", "forecast", parameters));
     });
 });
