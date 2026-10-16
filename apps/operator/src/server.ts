@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
+import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
 import routes from './routes.js';
 import { createService } from './service.js';
@@ -29,6 +30,11 @@ try {
 fastify.log.info('Applied database migrations');
 const service = createService(db, escrowProgramId, privateKey, protocolFeeRecipient, connection);
 
+// Applies to every operator route. Limits are per client IP.
+await fastify.register(rateLimit, {
+  max: Number(process.env.RATE_LIMIT_MAX ?? 100),
+  timeWindow: process.env.RATE_LIMIT_TIME_WINDOW ?? '1 minute',
+});
 fastify.register(routes, { prefix: '/v1', service });
 
 fastify.listen({ port: 3001, host: '0.0.0.0' }, function (err, address) {

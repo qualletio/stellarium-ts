@@ -1,3 +1,4 @@
+import rateLimit from '@fastify/rate-limit';
 import type { FastifyPluginAsync } from 'fastify';
 import { interpretParsed, parseScript } from 'requestscript';
 import { Peer } from './peer/repository.js';
@@ -6,8 +7,15 @@ import { StellariumResource, StellariumResourceFunction } from './resource/repos
 import type { Service } from './service.js';
 import { verifyData } from './crypto/utils.js';
 
+export interface RateLimitConfig {
+    max: number;
+    /** Milliseconds, or a string such as '1 minute'. */
+    timeWindow: number | string;
+}
+
 interface RouteOptions {
     service: Service;
+    rateLimit?: RateLimitConfig;
 }
 
 interface PeerRequest extends Peer {
@@ -45,6 +53,9 @@ interface RunRequest {
  * @param options plugin options, refer to https://fastify.dev/docs/latest/Reference/Plugins/#plugin-options
  */
 const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
+
+    // Rate limiting is opt-in per route via `config.rateLimit`.
+    await fastify.register(rateLimit, { global: false });
 
     // Start Meta Routes
 
@@ -153,7 +164,9 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         }
     });
 
-    fastify.post('/run/resource', async (request, reply) => {
+    fastify.post('/run/resource', {
+        config: { rateLimit: options.rateLimit ?? { max: 100, timeWindow: '1 minute' } },
+    }, async (request, reply) => {
         const resourceRequest = request.body as ResourceRunRequest;
         const paymentVoucher = resourceRequest.paymentVoucher;
 

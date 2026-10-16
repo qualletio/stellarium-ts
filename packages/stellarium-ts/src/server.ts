@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { FastifyInstance } from 'fastify';
 import { createTables } from './db/db.js';
 import { StellariumResource } from './resource/repository.js';
-import routes from './routes.js';
+import routes, { RateLimitConfig } from './routes.js';
 import { createService } from './service.js';
 import { StartupService } from './startup.js';
 
@@ -10,6 +10,8 @@ export interface StellariumNodeOptions {
     port?: number;
     host?: string;
     startingPeer?: string;
+    /** Per-IP rate limit for `POST /v1/run/resource`. Defaults to 100 requests per minute. */
+    rateLimit?: RateLimitConfig;
 }
 
 export class StellariumNode {
@@ -24,7 +26,7 @@ export class StellariumNode {
 
         await createTables();
 
-        fastify.register(routes, { prefix: '/v1', service });
+        fastify.register(routes, { prefix: '/v1', service, rateLimit: options.rateLimit });
 
         // Run the server!
         fastify.listen({ port: options.port ?? 3000, host: options.host ?? '0.0.0.0' }, function (err, address) {

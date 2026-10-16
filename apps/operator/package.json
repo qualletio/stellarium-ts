@@ -25,6 +25,7 @@
     "vitest": "^4.1.11"
   },
   "dependencies": {
+    "@fastify/rate-limit": "^11.2.1",
     "@solana/web3.js": "^1.99.0",
     "dotenv": "^18.0.7",
     "drizzle-orm": "1.0.0-rc.4",
