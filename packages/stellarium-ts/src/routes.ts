@@ -157,7 +157,12 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         const resourceRequest = request.body as ResourceRunRequest;
         const paymentVoucher = resourceRequest.paymentVoucher;
 
-        if (paymentVoucher) {
+        const resource = await options.service.resourceRepository.getInternalResource(resourceRequest.resourcePath, resourceRequest.resourceName);
+        if (!resource) {
+            return reply.status(400).send({ error: 'Resource not found' });
+        }
+
+        if (paymentVoucher && resource.metadata.paymentManifest) {
             const isValid = verifyData(
                 paymentVoucherPayload(paymentVoucher, resourceRequest.resourcePath, resourceRequest.resourceName, resourceRequest.parameters),
                 paymentVoucher.publicKey,
@@ -166,10 +171,6 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             if (!isValid) {
                 return reply.status(400).send({ error: 'Invalid payment voucher' });
             }
-        }
-        const resource = await options.service.resourceRepository.getInternalResource(resourceRequest.resourcePath, resourceRequest.resourceName);
-        if (!resource) {
-            return reply.status(400).send({ error: 'Resource not found' });
         }
 
         const result = await options.service.resourceInvoker.invoke(resource, resourceRequest.functionName, resourceRequest.parameters);
