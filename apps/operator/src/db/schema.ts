@@ -1,4 +1,4 @@
-import { integer, pgTable, timestamp, varchar } from "drizzle-orm/pg-core";
+import { integer, pgTable, timestamp, unique, varchar } from "drizzle-orm/pg-core";
 
 export const receiptsTable = pgTable("receipts", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
@@ -11,4 +11,7 @@ export const receiptsTable = pgTable("receipts", {
   expiresAt: timestamp().notNull(),
   publicKey: varchar({ length: 255 }).notNull(),
   invocationHash: varchar({ length: 255 }).notNull(),
-});
+}, (table) => [
+  // A voucher settles at most once, even when two submissions race past the duplicate check.
+  unique("receipts_requestId_invocationId_unique").on(table.requestId, table.invocationId),
+]);

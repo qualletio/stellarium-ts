@@ -16,6 +16,12 @@ export interface OperationResult {
     lastValidBlockHeight?: number;
 }
 
+// Postgres unique_violation. Drizzle wraps the pg error in DrizzleQueryError.cause.
+function isUniqueViolation(error: unknown): boolean {
+    const pgError = error as { code?: unknown; cause?: { code?: unknown } } | undefined;
+    return pgError?.code === '23505' || pgError?.cause?.code === '23505';
+}
+
 /**
  * The EscrowService is responsible for communicating with Solana to initiate and withdraw from an escrow account.
  */
@@ -92,8 +98,13 @@ export class EscrowService {
     async settlePayment(submission: PaymentSubmission): Promise<OperationResult> {
         const { voucher } = submission;
         const { requestId, invocationId, amount, recipientAddress, signature: voucherSignature, expiresAt, invocationHash, publicKey } = voucher;
-        const user = solanaUserFromSpki(voucher.publicKey);
-        const recipient = new PublicKey(recipientAddress);
+        let user: PublicKey, recipient: PublicKey;
+        try {
+            user = solanaUserFromSpki(voucher.publicKey);
+            recipient = new PublicKey(recipientAddress);
+        } catch {
+            throw new OperationError(400, 'Invalid voucher public key or recipient address');
+        }
         const amountLamports = BigInt(amount);
 
         const instruction = createWithdrawEscrowInstruction({
@@ -141,17 +152,23 @@ export class EscrowService {
         const signature = this.signatureAddress(transaction.signatures[0]!);
         const result = { escrowAddress: instruction.escrowAddress.toBase58(), signature, ...lifetime };
 
-        await this.db.insert(receiptsTable).values({
-            requestId,
-            invocationId,
-            amount,
-            recipientAddress: recipient.toBase58(),
-            voucherSignature,
-            transactionSignature: signature,
-            expiresAt: new Date(expiresAt),
-            publicKey,
-            invocationHash,
-        });
+        // The receipt is written before sending, so a duplicate submission fails here instead of paying twice.
+        try {
+            await this.db.insert(receiptsTable).values({
+                requestId,
+                invocationId,
+                amount,
+                recipientAddress: recipient.toBase58(),
+                voucherSignature,
+                transactionSignature: signature,
+                expiresAt: new Date(expiresAt),
+                publicKey,
+                invocationHash,
+            });
+        } catch (error) {
+            if (isUniqueViolation(error)) throw new OperationError(409, 'Receipt has already been settled');
+            throw error;
+        }
 
         try {
             await this.connection.sendTransaction(transaction, {

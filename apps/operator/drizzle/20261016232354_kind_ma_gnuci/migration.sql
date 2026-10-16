@@ -1,0 +1,1 @@
+ALTER TABLE "receipts" ADD CONSTRAINT "receipts_requestId_invocationId_unique" UNIQUE("requestId","invocationId");

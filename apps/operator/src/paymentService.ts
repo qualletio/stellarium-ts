@@ -21,11 +21,16 @@ export class PaymentService {
             requestId, invocationId, amount, recipientAddress,
             expiresAt, invocationHash, publicKey,
         });
-        const key = createPublicKey({
-            key: Buffer.from(publicKey, "base64url"),
-            format: "der",
-            type: "spki",
-        });
+        let key;
+        try {
+            key = createPublicKey({
+                key: Buffer.from(publicKey, "base64url"),
+                format: "der",
+                type: "spki",
+            });
+        } catch {
+            throw new OperationError(400, 'Invalid voucher public key');
+        }
         const valid = verify(null, Buffer.from(payload), key, Buffer.from(voucherSignature, "base64url"));
         if (!valid) {
             throw new OperationError(401, 'Invalid voucher signature');
