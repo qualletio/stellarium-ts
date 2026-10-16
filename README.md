@@ -160,6 +160,8 @@ pnpm dev     # reload src/server.ts when it changes
 
 `pnpm build` emits `dist/`, which is what the package exports. Start a node from your own process with `StellariumNode`, as shown above.
 
+`apps/local-caller-node` and `apps/local-resource-node` depend on the workspace package (`workspace:*`), so they also run the compiled code in `dist/`, not `src/`. After editing `packages/stellarium-ts`, rebuild it with `pnpm --filter stellarium-ts build`, or keep `pnpm --filter stellarium-ts exec tsc --watch` running while you work.
+
 ### Running Locally
 
 Install Solana using their guide: https://solana.com/docs/intro/installation
