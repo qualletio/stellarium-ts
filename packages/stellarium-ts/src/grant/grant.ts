@@ -69,6 +69,11 @@ export const MAX_GRANT_LIFETIME_MS = 1000 * 60 * 60 * 24 * 30;
 export const MAX_AUTHORIZATION_LIFETIME_MS = 1000 * 60 * 2;
 /** Longest delegation chain, root included. */
 export const MAX_GRANT_CHAIN_LENGTH = 4;
+/**
+ * How far ahead of the verifier's clock a signer's clock may run. Signers use the full lifetimes
+ * above, so verifiers accept expiries up to this much past them.
+ */
+export const CLOCK_SKEW_TOLERANCE_MS = 1000 * 30;
 
 /** The object a grant's signature covers: every field except `signature`. Key order is part of the signed bytes. */
 export function grantPayload(grant: Omit<Grant, "signature">) {
@@ -169,9 +174,10 @@ export function capabilityMatches(capability: Capability, resourcePath: string, 
     if (capability.functionName !== undefined && capability.functionName !== functionName) {
         return false;
     }
+    // A constrained parameter must appear exactly once, so a duplicate can't carry a different value past the check.
     return Object.entries(capability.constraints ?? {}).every(([name, value]) => {
-        const parameter = parameters.find(p => p.name === name);
-        return parameter !== undefined && sameJson(parameter.value, value);
+        const matching = parameters.filter(p => p.name === name);
+        return matching.length === 1 && sameJson(matching[0].value, value);
     });
 }
 
@@ -205,7 +211,7 @@ export function verifyChain(grants: unknown, rootKey: string): ChainResult {
     }
 
     for (const [index, grant] of grants.entries()) {
-        if (!isFreshExpiry(grant.expiresAt, MAX_GRANT_LIFETIME_MS)) {
+        if (!isFreshExpiry(grant.expiresAt, MAX_GRANT_LIFETIME_MS + CLOCK_SKEW_TOLERANCE_MS)) {
             return { ok: false, reason: `grant ${index} expired` };
         }
         if (!safeVerifyData(grantPayload(grant), grant.issuer, grant.signature)) {

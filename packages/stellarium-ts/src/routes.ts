@@ -6,8 +6,9 @@ import { Peer } from './peer/repository.js';
 import { invocationHash, PaymentVoucher, paymentVoucherPayload } from './resource/invoker.js';
 import { StellariumResource, StellariumResourceFunction, StellariumResourceFunctionPaymentManifest } from './resource/repository.js';
 import type { Service } from './service.js';
-import { isValidPublicKey, safeVerifyData } from './crypto/utils.js';
-import type { GrantRenewalRequest, GrantRequest } from './grant/grant.js';
+import { safeVerifyData } from './crypto/utils.js';
+import type { Grant, GrantRenewalRequest, GrantRequest } from './grant/grant.js';
+import { InvalidPublicKeyError } from './grant/service.js';
 
 export interface RateLimitConfig {
     max: number;
@@ -328,6 +329,15 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             return reply.status(400).send({ error: 'Function not found' });
         }
 
+        // Grant constraints and the function both read parameters by name, so each name must be
+        // declared and appear once. Otherwise a duplicate or extra parameter could pass a
+        // constraint check with one value and reach the function with another.
+        const declared = new Set(resourceFunction.parameters.map(parameter => parameter.name));
+        const names = resourceRequest.parameters.map(parameter => parameter.name);
+        if (new Set(names).size !== names.length || !names.every(name => declared.has(name))) {
+            return reply.status(400).send({ error: 'Parameters must be declared by the function and appear once each' });
+        }
+
         // A restricted function is never run without a grant from this node. Checked before the
         // voucher, so an unauthorized caller never gets near settlement.
         if (resourceFunction.restricted) {
@@ -385,7 +395,14 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         if (!options.service.grantService.acceptsRequests) {
             return reply.status(403).send({ error: 'This node does not issue grants on request' });
         }
-        const grants = await options.service.grantService.handleRequest(request.body as GrantRequest);
+        let grants: Grant[] | undefined;
+        try {
+            grants = await options.service.grantService.handleRequest(request.body as GrantRequest);
+        } catch (error) {
+            // An approval hook that throws or returns an invalid approval is this node's fault, not the requester's.
+            fastify.log.error(error, 'Failed to decide grant request');
+            return reply.status(500).send({ error: 'Internal server error' });
+        }
         if (!grants) {
             return reply.status(403).send({ error: 'Grant request refused' });
         }
@@ -433,10 +450,14 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         if (reason !== undefined && typeof reason !== 'string') {
             return reply.status(400).send({ error: 'reason must be a string' });
         }
-        if (!isValidPublicKey(publicKey)) {
-            return reply.status(400).send({ error: 'Invalid public key' });
+        try {
+            await options.service.grantService.block(publicKey, reason);
+        } catch (error) {
+            if (error instanceof InvalidPublicKeyError) {
+                return reply.status(400).send({ error: error.message });
+            }
+            throw error;
         }
-        await options.service.grantService.block(publicKey, reason);
         return { success: true };
     });
 

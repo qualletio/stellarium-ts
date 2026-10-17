@@ -10,6 +10,7 @@ export {
     grantRenewalPayload,
     grantRequestPayload,
     grantsHash,
+    CLOCK_SKEW_TOLERANCE_MS,
     invocationAuthorizationPayload,
     MAX_AUTHORIZATION_LIFETIME_MS,
     MAX_GRANT_CHAIN_LENGTH,
@@ -21,3 +22,4 @@ export {
     type InvocationAuthorization,
 } from './grant/grant.js';
 export type { ApproveGrant, GrantApproval, GrantOptions } from './grant/service.js';
+export type { HeldGrantKey } from './grant/repository.js';

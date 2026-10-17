@@ -99,31 +99,43 @@ export async function createTables(db: Database) {
         );
 
         -- Grants this node signed, kept so their audience can renew them.
-        -- A delegated grant's parent_grant_id is the id of the held grant it narrows.
+        -- A delegated grant's parent_grant_issuer and parent_grant_id name the held grant it narrows.
         CREATE TABLE IF NOT EXISTS issued_grant (
             id TEXT PRIMARY KEY,
             audience TEXT NOT NULL,
             capabilities TEXT NOT NULL,
+            parent_grant_issuer TEXT,
             parent_grant_id TEXT,
             lifetime_ms INTEGER NOT NULL,
             renewable_until TEXT,
             created_at TEXT NOT NULL
         );
 
-        -- Chains whose leaf grant names this node as its audience, keyed by the leaf's id.
+        -- Chains whose leaf grant names this node as its audience, keyed by the leaf's issuer and id.
+        -- Issuers choose their own ids, so an id alone doesn't identify a grant.
         CREATE TABLE IF NOT EXISTS held_grant (
-            id TEXT PRIMARY KEY,
+            issuer TEXT NOT NULL,
+            id TEXT NOT NULL,
             root_issuer_base_url TEXT NOT NULL,
             chain TEXT NOT NULL,
             issued_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+
+            PRIMARY KEY (issuer, id)
         );
 
         CREATE TABLE IF NOT EXISTS revoked_grant (
             grant_id TEXT PRIMARY KEY,
             revoked_at TEXT NOT NULL
         );
+
+        -- publicKey:nonce of accepted authorizations and grant requests, until they expire.
+        CREATE TABLE IF NOT EXISTS seen_nonce (
+            key TEXT PRIMARY KEY,
+            expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS seen_nonce_expires_at ON seen_nonce (expires_at);
 
         -- Keys an admin blocked from calling this node or getting grants from it.
         CREATE TABLE IF NOT EXISTS blocked_caller (

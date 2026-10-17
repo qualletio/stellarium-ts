@@ -6,6 +6,7 @@ import {
     type Capability,
     capabilityCovers,
     capabilityMatches,
+    CLOCK_SKEW_TOLERANCE_MS,
     type Grant,
     type GrantRenewalRequest,
     type GrantRequest,
@@ -23,7 +24,7 @@ import {
     signGrant,
     verifyChain,
 } from "./grant.js";
-import type { BlockedCaller, GrantRepository } from "./repository.js";
+import type { BlockedCaller, GrantRepository, HeldGrantKey } from "./repository.js";
 
 export interface GrantOptions {
     /** How long each issued copy lasts. At most `MAX_GRANT_LIFETIME_MS`. */
@@ -53,13 +54,33 @@ export interface InvocationTarget {
 export interface RefreshResult {
     renewed: string[];
     failed: { id: string, error: string }[];
+    /** Chains expired for longer than `HELD_GRANT_RETENTION_MS` whose issuer still refused renewal. They are deleted. */
+    removed: string[];
 }
 
 /** Per grant request or renewal. */
 export const GRANT_RENEW_TIMEOUT_MS = 10_000;
+/**
+ * How long a held chain is kept after it expires while its issuer refuses to renew it. A refusal
+ * may be temporary, such as while this node's key is blocked, so chains aren't deleted at once.
+ */
+export const HELD_GRANT_RETENTION_MS = MAX_GRANT_LIFETIME_MS;
+/** How often claiming a nonce also deletes expired ones. */
+const NONCE_SWEEP_INTERVAL_MS = 60_000;
+
+/** Thrown by `block` for a key that isn't an Ed25519 SPKI key. */
+export class InvalidPublicKeyError extends Error {
+    constructor() {
+        super('Invalid public key');
+    }
+}
+
+/** The issuer answered a renewal with a refusal, as opposed to failing to answer. */
+class RenewalRefusedError extends Error {}
 
 const expired = (grant: Grant, now = Date.now()) => Date.parse(grant.expiresAt) <= now;
 const leafOf = (chain: Grant[]) => chain[chain.length - 1];
+const heldKey = (chain: Grant[]): HeldGrantKey => ({ issuer: leafOf(chain).issuer, id: leafOf(chain).id });
 
 /**
  * Issues, holds, renews and verifies capability grants. Every node plays all three roles:
@@ -67,8 +88,7 @@ const leafOf = (chain: Grant[]) => chain[chain.length - 1];
  * its own audiences, and renewal of either kind goes through `renew`.
  */
 export class GrantService {
-    /** `${publicKey}:${nonce}` of accepted authorizations, until they expire. */
-    private readonly seenNonces = new Map<string, number>();
+    private lastNonceSweep = 0;
 
     /** Without `approveGrant`, this node refuses every grant request. */
     constructor(private readonly repository: GrantRepository, private readonly config: Pick<NodeConfig, "baseUrl" | "publicKey" | "privateKey">, private readonly approveGrant?: ApproveGrant) {}
@@ -79,18 +99,23 @@ export class GrantService {
 
     /** Issues a root grant for this node's resources. Returns it as a one-grant chain. */
     async issue(audience: string, capabilities: Capability[], options: GrantOptions): Promise<Grant[]> {
-        this.checkOptions(options);
+        checkCapabilities(capabilities);
+        checkOptions(options);
         const grant = this.sign(crypto.randomUUID(), audience, capabilities, options.lifetimeMs, null);
-        await this.repository.saveIssued({ id: grant.id, audience, capabilities, parentGrantId: null, lifetimeMs: options.lifetimeMs, renewableUntil: options.renewableUntil ?? null });
+        await this.repository.saveIssued({ id: grant.id, audience, capabilities, parent: null, lifetimeMs: options.lifetimeMs, renewableUntil: options.renewableUntil ?? null });
         return [grant];
     }
 
-    /** Narrows a grant this node holds for another audience. The child expires no later than the held grant. */
-    async delegate(heldGrantId: string, audience: string, capabilities: Capability[], options: GrantOptions): Promise<Grant[]> {
-        this.checkOptions(options);
-        const chain = await this.repository.getHeld(heldGrantId);
-        if (!chain || expired(leafOf(chain))) {
-            throw new Error(`No unexpired held grant ${heldGrantId}`);
+    /**
+     * Narrows a grant this node holds for another audience. The child expires no later than the
+     * held grant. Name the held grant by its id, or by its issuer and id when two issuers used the same id.
+     */
+    async delegate(heldGrant: string | HeldGrantKey, audience: string, capabilities: Capability[], options: GrantOptions): Promise<Grant[]> {
+        checkCapabilities(capabilities);
+        checkOptions(options);
+        const chain = await this.findHeld(heldGrant);
+        if (expired(leafOf(chain))) {
+            throw new Error(`No unexpired held grant ${leafOf(chain).id}`);
         }
         if (chain.length >= MAX_GRANT_CHAIN_LENGTH) {
             throw new Error(`Grant chains are limited to ${MAX_GRANT_CHAIN_LENGTH} grants`);
@@ -101,7 +126,7 @@ export class GrantService {
         }
 
         const grant = this.sign(crypto.randomUUID(), audience, capabilities, options.lifetimeMs, parent);
-        await this.repository.saveIssued({ id: grant.id, audience, capabilities, parentGrantId: heldGrantId, lifetimeMs: options.lifetimeMs, renewableUntil: options.renewableUntil ?? null });
+        await this.repository.saveIssued({ id: grant.id, audience, capabilities, parent: heldKey(chain), lifetimeMs: options.lifetimeMs, renewableUntil: options.renewableUntil ?? null });
         return [...chain, grant];
     }
 
@@ -120,7 +145,7 @@ export class GrantService {
      */
     async block(publicKey: string, reason?: string): Promise<void> {
         if (!isValidPublicKey(publicKey)) {
-            throw new Error('Invalid public key');
+            throw new InvalidPublicKeyError();
         }
         await this.repository.block(publicKey, reason ?? null);
     }
@@ -141,7 +166,7 @@ export class GrantService {
     /** Handles a holder's renewal request for a grant this node issued. Returns the fresh chain, or undefined if refused. */
     async renew(request: GrantRenewalRequest): Promise<Grant[] | undefined> {
         // A replayed request only hands the audience another copy that it alone can use, so nonces aren't tracked.
-        if (!isFreshExpiry(request.expiresAt, MAX_AUTHORIZATION_LIFETIME_MS) || !safeVerifyData(grantRenewalPayload(request), request.publicKey, request.signature)) {
+        if (!isFreshExpiry(request.expiresAt, MAX_AUTHORIZATION_LIFETIME_MS + CLOCK_SKEW_TOLERANCE_MS) || !safeVerifyData(grantRenewalPayload(request), request.publicKey, request.signature)) {
             return undefined;
         }
         const issued = await this.repository.getIssued(request.grantId);
@@ -153,8 +178,8 @@ export class GrantService {
         }
 
         let chain: Grant[] = [];
-        if (issued.parentGrantId !== null) {
-            const held = await this.repository.getHeld(issued.parentGrantId);
+        if (issued.parent !== null) {
+            const held = await this.repository.getHeld(issued.parent);
             if (!held || expired(leafOf(held))) {
                 return undefined;
             }
@@ -170,7 +195,8 @@ export class GrantService {
 
     /**
      * Handles a caller's request for a new root grant: checks its signature and nonce, then
-     * asks the approval hook. Returns the issued chain, or undefined if refused.
+     * asks the approval hook. Returns the issued chain, or undefined if refused. Throws if the
+     * hook throws or returns an invalid approval; the caller must then sign a new request.
      */
     async handleRequest(request: GrantRequest): Promise<Grant[] | undefined> {
         if (!this.approveGrant) {
@@ -184,14 +210,14 @@ export class GrantService {
         if (details !== null && (typeof details !== 'object' || Array.isArray(details))) {
             return undefined;
         }
-        if (!isFreshExpiry(expiresAt, MAX_AUTHORIZATION_LIFETIME_MS) || !safeVerifyData(grantRequestPayload(request), publicKey, signature)) {
+        if (!isFreshExpiry(expiresAt, MAX_AUTHORIZATION_LIFETIME_MS + CLOCK_SKEW_TOLERANCE_MS) || !safeVerifyData(grantRequestPayload(request), publicKey, signature)) {
             return undefined;
         }
         if (await this.isBlocked(publicKey)) {
             return undefined;
         }
         // The hook may have side effects, such as using up an invite code, so it sees each request once.
-        if (!this.claimNonce(`request:${publicKey}`, nonce, Date.parse(expiresAt))) {
+        if (!await this.claimNonce(`request:${publicKey}`, nonce, Date.parse(expiresAt))) {
             return undefined;
         }
 
@@ -200,8 +226,11 @@ export class GrantService {
             return undefined;
         }
         const granted = approval.capabilities ?? capabilities;
-        if (granted.length === 0 || !granted.every(isCapability)) {
-            throw new Error('approveGrant returned invalid capabilities');
+        try {
+            checkCapabilities(granted);
+            checkOptions(approval);
+        } catch (error) {
+            throw new Error(`approveGrant returned an invalid approval: ${error instanceof Error ? error.message : String(error)}`);
         }
         return this.issue(publicKey, granted, approval);
     }
@@ -247,23 +276,23 @@ export class GrantService {
     }
 
     /**
-     * A held chain, rooted at the node serving `rootBaseUrl`, that covers the call. An expired
-     * chain is renewed once before giving up. Undefined when this node holds no usable grant.
+     * A held chain, rooted at the node serving `rootBaseUrl`, that covers the call. When every
+     * such chain has expired, the latest-expiring one is renewed, once, before giving up, so a
+     * call waits on at most one renewal. Undefined when this node holds no usable grant.
      */
     async chainFor(rootBaseUrl: string, target: InvocationTarget): Promise<Grant[] | undefined> {
         const chains = (await this.repository.getHeldByRoot(rootBaseUrl)).filter(chain =>
             leafOf(chain).capabilities.some(capability => capabilityMatches(capability, target.resourcePath, target.resourceName, target.functionName, target.parameters)));
 
-        let chain = chains.find(candidate => !expired(leafOf(candidate)));
-        for (const candidate of chain ? [] : chains) {
-            try {
-                chain = await this.renewHeld(candidate);
-                break;
-            } catch {
-                // Try the next one.
-            }
+        const chain = chains.find(candidate => !expired(leafOf(candidate)));
+        if (chain || chains.length === 0) {
+            return chain;
         }
-        return chain;
+        try {
+            return await this.renewHeld(chains[0]);
+        } catch {
+            return undefined;
+        }
     }
 
     /** Builds the authorization sent with a call. Sign a new one per attempt: providers refuse a reused nonce. */
@@ -275,9 +304,12 @@ export class GrantService {
         return { publicKey: this.config.publicKey, grants: chain, nonce, expiresAt, signature };
     }
 
-    /** Renews every held chain past half its lifetime. A failed renewal keeps the current copy. */
+    /**
+     * Renews every held chain past half its lifetime. A failed renewal keeps the current copy,
+     * unless the issuer refused it and the chain expired more than `HELD_GRANT_RETENTION_MS` ago.
+     */
     async refreshDue(): Promise<RefreshResult> {
-        const result: RefreshResult = { renewed: [], failed: [] };
+        const result: RefreshResult = { renewed: [], failed: [], removed: [] };
         const now = Date.now();
         for (const chain of await this.repository.getAllHeld()) {
             const leaf = leafOf(chain);
@@ -290,6 +322,11 @@ export class GrantService {
                 await this.renewHeld(chain);
                 result.renewed.push(leaf.id);
             } catch (error) {
+                if (error instanceof RenewalRefusedError && expired(leaf, now - HELD_GRANT_RETENTION_MS)) {
+                    await this.repository.deleteHeld(heldKey(chain));
+                    result.removed.push(leaf.id);
+                    continue;
+                }
                 result.failed.push({ id: leaf.id, error: error instanceof Error ? error.message : String(error) });
             }
         }
@@ -301,7 +338,7 @@ export class GrantService {
      * this node, unrevoked, addressed to the signer and covers the call, and the nonce is new.
      */
     async verifyInvocation(authorization: unknown, target: InvocationTarget): Promise<boolean> {
-        if (!isAuthorization(authorization) || !isFreshExpiry(authorization.expiresAt, MAX_AUTHORIZATION_LIFETIME_MS)) {
+        if (!isAuthorization(authorization) || !isFreshExpiry(authorization.expiresAt, MAX_AUTHORIZATION_LIFETIME_MS + CLOCK_SKEW_TOLERANCE_MS)) {
             return false;
         }
         const chain = verifyChain(authorization.grants, this.config.publicKey);
@@ -326,19 +363,35 @@ export class GrantService {
         return this.claimNonce(authorization.publicKey, authorization.nonce, Date.parse(authorization.expiresAt));
     }
 
-    private claimNonce(publicKey: string, nonce: string, expiresAt: number): boolean {
+    /**
+     * Nonces are kept in the node's database, so they survive a restart. Replicas of a node that
+     * don't share a database don't see each other's nonces.
+     */
+    private async claimNonce(publicKey: string, nonce: string, expiresAt: number): Promise<boolean> {
         const now = Date.now();
-        for (const [key, expiry] of this.seenNonces) {
-            if (expiry <= now) {
-                this.seenNonces.delete(key);
+        if (now - this.lastNonceSweep >= NONCE_SWEEP_INTERVAL_MS) {
+            this.lastNonceSweep = now;
+            await this.repository.deleteExpiredNonces(now);
+        }
+        return this.repository.claimNonce(`${publicKey}:${nonce}`, expiresAt);
+    }
+
+    private async findHeld(heldGrant: string | HeldGrantKey): Promise<Grant[]> {
+        if (typeof heldGrant !== 'string') {
+            const chain = await this.repository.getHeld(heldGrant);
+            if (!chain) {
+                throw new Error(`No held grant ${heldGrant.id} from ${heldGrant.issuer}`);
             }
+            return chain;
         }
-        const key = `${publicKey}:${nonce}`;
-        if (this.seenNonces.has(key)) {
-            return false;
+        const chains = await this.repository.getHeldById(heldGrant);
+        if (chains.length === 0) {
+            throw new Error(`No held grant ${heldGrant}`);
         }
-        this.seenNonces.set(key, expiresAt);
-        return true;
+        if (chains.length > 1) {
+            throw new Error(`Several issuers gave this node a grant with id ${heldGrant}: name the issuer too`);
+        }
+        return chains[0];
     }
 
     /** Asks the leaf grant's issuer for a fresh chain and stores it. Throws if refused or invalid. */
@@ -353,8 +406,11 @@ export class GrantService {
             headers: { 'Content-Type': 'application/json' },
             signal: AbortSignal.timeout(GRANT_RENEW_TIMEOUT_MS),
         });
+        if (response.status === 403) {
+            throw new RenewalRefusedError(`Renewal of grant ${leaf.id} refused`);
+        }
         if (!response.ok) {
-            throw new Error(`Renewal of grant ${leaf.id} refused: ${response.status}`);
+            throw new Error(`Renewal of grant ${leaf.id} failed: ${response.status}`);
         }
         const { grants } = await response.json() as { grants: Grant[] };
 
@@ -381,14 +437,21 @@ export class GrantService {
             parent: parent ? grantHash(parent) : null,
         }, this.config.privateKey);
     }
+}
 
-    private checkOptions(options: GrantOptions): void {
-        if (!Number.isSafeInteger(options.lifetimeMs) || options.lifetimeMs <= 0 || options.lifetimeMs > MAX_GRANT_LIFETIME_MS) {
-            throw new Error(`lifetimeMs must be a positive integer of at most ${MAX_GRANT_LIFETIME_MS}`);
-        }
-        if (options.renewableUntil !== undefined && !Number.isFinite(Date.parse(options.renewableUntil))) {
-            throw new Error('renewableUntil must be a date');
-        }
+/** Verifiers refuse a grant with no capabilities or a malformed one, so it is never signed. */
+function checkCapabilities(capabilities: unknown): void {
+    if (!Array.isArray(capabilities) || capabilities.length === 0 || !capabilities.every(isCapability)) {
+        throw new Error('capabilities must be a nonempty list of capabilities, each with a resourcePath');
+    }
+}
+
+function checkOptions(options: GrantOptions): void {
+    if (!Number.isSafeInteger(options.lifetimeMs) || options.lifetimeMs <= 0 || options.lifetimeMs > MAX_GRANT_LIFETIME_MS) {
+        throw new Error(`lifetimeMs must be a positive integer of at most ${MAX_GRANT_LIFETIME_MS}`);
+    }
+    if (options.renewableUntil !== undefined && !Number.isFinite(Date.parse(options.renewableUntil))) {
+        throw new Error('renewableUntil must be a date');
     }
 }
 

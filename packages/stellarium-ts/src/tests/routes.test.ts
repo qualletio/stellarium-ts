@@ -563,6 +563,20 @@ describe("restricted functions", () => {
             expect(response.json()).toEqual({ error: "Grant request refused" });
         });
 
+        test("answers 500 when the approval hook returns an invalid approval", async () => {
+            await fastify.close();
+            await db.close();
+            db = await openDatabase(":memory:");
+            service = createService(db, [restricted], testConfig(), { approveGrant: () => ({ lifetimeMs: -1 }) });
+            fastify = Fastify();
+            await fastify.register(routes, { prefix: "/v1", service });
+            await fastify.ready();
+
+            const response = await fastify.inject({ method: "POST", url: "/v1/grants/request", payload: grantRequest(null) });
+            expect(response.statusCode).toBe(500);
+            expect(response.json()).toEqual({ error: "Internal server error" });
+        });
+
         test("rejects a request with missing fields or no capabilities", async () => {
             const { capabilities: _, ...withoutCapabilities } = grantRequest(null);
             expect((await fastify.inject({ method: "POST", url: "/v1/grants/request", payload: withoutCapabilities })).statusCode).toBe(400);
@@ -586,6 +600,15 @@ describe("restricted functions", () => {
         const response = await runResource({ ...call("open"), parameters: [{ name: "city", value: "Paris" }], authorization: callerGrants.authorize(grant, call("open")) });
 
         expect(response.statusCode).toBe(403);
+    });
+
+    test("refuses duplicate or undeclared parameters before checking the grant", async () => {
+        const constrained = await service.grantService.issue(caller.publicKey, [{ resourcePath: "com.example", resourceName: "Vault", constraints: { city: "Oslo" } }], { lifetimeMs: 3_600_000 });
+        for (const extra of [[{ name: "city", value: "Oslo" }, { name: "city", value: "Paris" }], [{ name: "other", value: 1 }, { name: "city", value: "Oslo" }]]) {
+            const smuggled = { ...call("open"), parameters: extra };
+            const response = await runResource({ ...smuggled, authorization: callerGrants.authorize(constrained, smuggled) });
+            expect(response.statusCode).toBe(400);
+        }
     });
 
     test("refuses a malformed authorization", async () => {

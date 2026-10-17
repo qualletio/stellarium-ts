@@ -144,6 +144,11 @@ describe("capabilityMatches", () => {
         expect(capabilityMatches({ ...weather, constraints: { city: "Paris" } }, "com.example", "Weather", "temperature", oslo)).toBe(false);
         expect(capabilityMatches({ ...weather, constraints: { units: "C" } }, "com.example", "Weather", "temperature", oslo)).toBe(false);
     });
+
+    test("refuses a constrained parameter that appears more than once", () => {
+        const duplicated = [...oslo, { name: "city", value: "Paris" }];
+        expect(capabilityMatches({ ...weather, constraints: { city: "Oslo" } }, "com.example", "Weather", "temperature", duplicated)).toBe(false);
+    });
 });
 
 describe("capabilityCovers", () => {

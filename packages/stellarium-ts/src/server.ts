@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { FastifyInstance } from 'fastify';
 import { DEFAULT_DATABASE_PATH, openDatabase } from './db/db.js';
 import type { Capability, Grant } from './grant/grant.js';
+import type { HeldGrantKey } from './grant/repository.js';
 import type { ApproveGrant, GrantOptions } from './grant/service.js';
 import { StellariumResource } from './resource/repository.js';
 import routes, { RateLimitConfig } from './routes.js';
@@ -94,18 +95,34 @@ export class StellariumNode {
         }
         this.service = service;
 
-        const refresher = setInterval(() => {
-            service.grantService.refreshDue().then(
-                ({ failed }) => {
+        // Each run is scheduled after the previous one finishes, so slow renewals never overlap.
+        const refreshIntervalMs = options.grantRefreshIntervalMs ?? DEFAULT_GRANT_REFRESH_INTERVAL_MS;
+        let refresher: NodeJS.Timeout | undefined;
+        let closed = false;
+        const scheduleRefresh = () => {
+            refresher = setTimeout(async () => {
+                try {
+                    const { failed, removed } = await service.grantService.refreshDue();
                     for (const { id, error } of failed) {
                         fastify.log.warn(`Failed to renew grant ${id}: ${error}`);
                     }
-                },
-                (error) => fastify.log.error(error, 'Failed to renew grants'),
-            );
-        }, options.grantRefreshIntervalMs ?? DEFAULT_GRANT_REFRESH_INTERVAL_MS);
-        refresher.unref();
-        fastify.addHook('onClose', async () => clearInterval(refresher));
+                    for (const id of removed) {
+                        fastify.log.info(`Removed long-expired grant ${id}: its issuer refused renewal`);
+                    }
+                } catch (error) {
+                    fastify.log.error(error, 'Failed to renew grants');
+                }
+                if (!closed) {
+                    scheduleRefresh();
+                }
+            }, refreshIntervalMs);
+            refresher.unref();
+        };
+        scheduleRefresh();
+        fastify.addHook('onClose', async () => {
+            closed = true;
+            clearTimeout(refresher);
+        });
 
         await fastify.register(routes, { prefix: '/v1', service, rateLimit: options.rateLimit });
 
@@ -123,9 +140,12 @@ export class StellariumNode {
         return this.started().grantService.issue(audience, capabilities, options);
     }
 
-    /** Narrows a grant this node holds for another audience. Hand the returned chain to the audience. */
-    async delegateGrant(heldGrantId: string, audience: string, capabilities: Capability[], options: GrantOptions): Promise<Grant[]> {
-        return this.started().grantService.delegate(heldGrantId, audience, capabilities, options);
+    /**
+     * Narrows a grant this node holds for another audience. Hand the returned chain to the audience.
+     * Name the held grant by its id, or by its issuer and id when two issuers used the same id.
+     */
+    async delegateGrant(heldGrant: string | HeldGrantKey, audience: string, capabilities: Capability[], options: GrantOptions): Promise<Grant[]> {
+        return this.started().grantService.delegate(heldGrant, audience, capabilities, options);
     }
 
     /** Asks another node for a grant on its resources, and stores it. Throws if refused. */

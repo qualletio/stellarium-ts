@@ -1,10 +1,10 @@
 import type { Database } from "sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { openDatabase } from "../../db/db.js";
-import { type Capability, type GrantRenewalRequest, type GrantRequest, grantRequestPayload } from "../../grant/grant.js";
+import { type Capability, type GrantRenewalRequest, type GrantRequest, grantRequestPayload, signGrant } from "../../grant/grant.js";
 import { signData } from "../../crypto/utils.js";
 import { GrantRepository } from "../../grant/repository.js";
-import { type ApproveGrant, GrantService, type InvocationTarget } from "../../grant/service.js";
+import { type ApproveGrant, GrantService, HELD_GRANT_RETENTION_MS, type InvocationTarget } from "../../grant/service.js";
 import { generateBase64KeyPair } from "../helpers.js";
 
 const HOUR = 3_600_000;
@@ -127,10 +127,10 @@ describe("GrantService", () => {
         await caller.service.add([grant]);
 
         vi.setSystemTime(Date.now() + 0.4 * HOUR);
-        expect(await caller.service.refreshDue()).toEqual({ renewed: [], failed: [] });
+        expect(await caller.service.refreshDue()).toEqual({ renewed: [], failed: [], removed: [] });
 
         vi.setSystemTime(Date.now() + 0.2 * HOUR);
-        expect(await caller.service.refreshDue()).toEqual({ renewed: [grant.id], failed: [] });
+        expect(await caller.service.refreshDue()).toEqual({ renewed: [grant.id], failed: [], removed: [] });
         const [renewed] = (await caller.service.chainFor("http://provider", target))!;
         expect(renewed.id).toBe(grant.id);
         expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(Date.parse(grant.expiresAt));
@@ -144,6 +144,22 @@ describe("GrantService", () => {
         await provider.service.revoke(revocable.id);
         vi.setSystemTime(Date.now() + 0.6 * HOUR);
         expect((await caller.service.refreshDue()).failed.map(f => f.id)).toContain(revocable.id);
+    });
+
+    test("deletes a chain that is still refused long after it expired", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        const provider = await node("http://provider");
+        const caller = await node("http://caller");
+        const [grant] = await provider.service.issue(caller.publicKey, [weather], { lifetimeMs: HOUR });
+        await caller.service.add([grant]);
+        await provider.service.revoke(grant.id);
+
+        vi.setSystemTime(Date.now() + 2 * HOUR);
+        expect((await caller.service.refreshDue()).removed).toEqual([]);
+
+        vi.setSystemTime(Date.now() + HELD_GRANT_RETENTION_MS);
+        expect(await caller.service.refreshDue()).toEqual({ renewed: [], failed: [], removed: [grant.id] });
+        expect(await caller.service.refreshDue()).toEqual({ renewed: [], failed: [], removed: [] });
     });
 
     test("an expired chain is renewed when it is needed", async () => {
@@ -180,12 +196,70 @@ describe("GrantService", () => {
         expect(await provider.service.verifyInvocation(user.service.authorize(chain, target), target)).toBe(true);
     });
 
+    test("accepts an authorization from a caller whose clock runs a little ahead", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        const provider = await node("http://provider");
+        const caller = await node("http://caller");
+        const [grant] = await provider.service.issue(caller.publicKey, [weather], { lifetimeMs: HOUR });
+
+        vi.setSystemTime(Date.now() + 10_000);
+        const authorization = caller.service.authorize([grant], target);
+        vi.setSystemTime(Date.now() - 10_000);
+
+        expect(await provider.service.verifyInvocation(authorization, target)).toBe(true);
+    });
+
+    test("remembers accepted nonces across a restart", async () => {
+        const provider = await node("http://provider");
+        const caller = await node("http://caller");
+        const [grant] = await provider.service.issue(caller.publicKey, [weather], { lifetimeMs: HOUR });
+        const authorization = caller.service.authorize([grant], target);
+        expect(await provider.service.verifyInvocation(authorization, target)).toBe(true);
+
+        const restarted = new GrantService(new GrantRepository(databases[0]), { baseUrl: "http://provider", publicKey: provider.publicKey, privateKey: provider.privateKey });
+        expect(await restarted.verifyInvocation(authorization, target)).toBe(false);
+    });
+
+    test("keeps chains from different issuers that reuse a grant id", async () => {
+        const provider = await node("http://provider");
+        const other = await node("http://other");
+        const caller = await node("http://caller");
+        const [grant] = await provider.service.issue(caller.publicKey, [weather], { lifetimeMs: HOUR });
+        const colliding = { ...grant, issuer: other.publicKey, issuerBaseUrl: "http://other" };
+        const forged = signGrant(colliding, other.privateKey);
+
+        await caller.service.add([grant]);
+        await caller.service.add([forged]);
+
+        expect(await caller.service.chainFor("http://provider", target)).toEqual([grant]);
+        expect(await caller.service.chainFor("http://other", target)).toEqual([forged]);
+        await expect(caller.service.delegate(grant.id, "key", [weather], { lifetimeMs: HOUR })).rejects.toThrow("name the issuer");
+        expect(await caller.service.delegate({ issuer: provider.publicKey, id: grant.id }, "key", [weather], { lifetimeMs: HOUR })).toHaveLength(2);
+    });
+
+    test("tries at most one renewal when every matching chain has expired", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        const provider = await node("http://provider");
+        const caller = await node("http://caller");
+        for (let i = 0; i < 3; i++) {
+            const [grant] = await provider.service.issue(caller.publicKey, [weather], { lifetimeMs: HOUR });
+            await caller.service.add([grant]);
+            await provider.service.revoke(grant.id);
+        }
+
+        vi.setSystemTime(Date.now() + 2 * HOUR);
+        expect(await caller.service.chainFor("http://provider", target)).toBeUndefined();
+        expect(fetch).toHaveBeenCalledOnce();
+    });
+
     test("issue and delegate check their options", async () => {
         const provider = await node("http://provider");
         await expect(provider.service.issue("key", [weather], { lifetimeMs: 0 })).rejects.toThrow("lifetimeMs");
         await expect(provider.service.issue("key", [weather], { lifetimeMs: 31 * 24 * HOUR })).rejects.toThrow("lifetimeMs");
         await expect(provider.service.issue("key", [weather], { lifetimeMs: HOUR, renewableUntil: "soon" })).rejects.toThrow("renewableUntil");
-        await expect(provider.service.delegate("missing", "key", [weather], { lifetimeMs: HOUR })).rejects.toThrow("No unexpired held grant");
+        await expect(provider.service.delegate("missing", "key", [weather], { lifetimeMs: HOUR })).rejects.toThrow("No held grant missing");
+        await expect(provider.service.issue("key", [], { lifetimeMs: HOUR })).rejects.toThrow("capabilities");
+        await expect(provider.service.issue("key", [{ resourcePath: "" }], { lifetimeMs: HOUR })).rejects.toThrow("capabilities");
     });
 
     describe("grant requests", () => {
@@ -269,7 +343,7 @@ describe("GrantService", () => {
             const badCapabilities = await node("http://bad-capabilities", () => ({ lifetimeMs: HOUR, capabilities: [] }));
 
             await expect(badLifetime.service.handleRequest(signedRequest(caller))).rejects.toThrow("lifetimeMs");
-            await expect(badCapabilities.service.handleRequest(signedRequest(caller))).rejects.toThrow("invalid capabilities");
+            await expect(badCapabilities.service.handleRequest(signedRequest(caller))).rejects.toThrow("invalid approval");
         });
     });
 

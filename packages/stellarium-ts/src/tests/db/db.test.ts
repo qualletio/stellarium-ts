@@ -62,7 +62,7 @@ describe("openDatabase", () => {
         const db = await openDatabase(filename);
         const columns = await db.all<{ name: string }[]>("PRAGMA table_info(resource_function)");
         expect(columns.map(column => column.name)).toContain("restricted");
-        await db.run("INSERT INTO held_grant (id, root_issuer_base_url, chain, issued_at, expires_at, updated_at) VALUES ('g', 'http://p', '[]', 'now', 'now', 'now')");
+        await db.run("INSERT INTO held_grant (issuer, id, root_issuer_base_url, chain, issued_at, expires_at, updated_at) VALUES ('k', 'g', 'http://p', '[]', 'now', 'now', 'now')");
         await db.close();
 
         // Grants are not a cache of anything a peer resends, so a reopen must not drop them.
