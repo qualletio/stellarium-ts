@@ -217,9 +217,11 @@ export class ResourceRepository {
         return this.resources.map(r => ({ ...r, baseUrl: this.baseUrl }));
     }
 
-    async getExternalResources(): Promise<StellariumResource[]> {
+    /** Learned resources in insertion order. A negative `limit` means no limit. */
+    async getExternalResources(offset = 0, limit = -1): Promise<StellariumResource[]> {
         const results = await this.db.all<ResourceRow[]>(
-            'SELECT * FROM resource',
+            'SELECT * FROM resource ORDER BY id LIMIT ? OFFSET ?',
+            [limit, offset],
         );
 
         return Promise.all(results.map(async (r) => ({
@@ -284,7 +286,17 @@ export class ResourceRepository {
         };
     }
 
-    async getAllResources(): Promise<StellariumResource[]> {
-        return [...await this.getInternalResources(), ...await this.getExternalResources()];
+    /**
+     * One page of every resource this node knows: the ones it hosts first, then learned ones.
+     * Both are in a fixed order, so offsets stay stable as resources are learned.
+     */
+    async getResources(offset: number, limit: number): Promise<StellariumResource[]> {
+        const internal = (await this.getInternalResources()).slice(offset, offset + limit);
+        const remaining = limit - internal.length;
+        if (remaining <= 0) {
+            return internal;
+        }
+        const externalOffset = Math.max(0, offset - this.resources.length);
+        return [...internal, ...await this.getExternalResources(externalOffset, remaining)];
     }
 }
