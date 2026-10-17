@@ -144,7 +144,7 @@ Routes are mounted at `/v1`.
 | `POST /v1/run/resource`  | One function call          | Called by peers to run a function hosted here                                 |
 | `POST /v1/grants/request`| Signed grant request       | Ask for a new grant, decided by the node's `approveGrant` hook: `{ "grants" }` |
 | `POST /v1/grants/renew`  | Signed renewal request     | Re-issue a grant this node issued to its audience: `{ "grants" }`             |
-| `PUT /v1/admin/revoked-grants/:grantId` | — | Revoke a grant. Requires the API key                                  |
+| `PUT /v1/admin/revoked-grants/:grantId` | — | Revoke a grant this node issued, or another issuer's grant with `?issuer=<key>`. Requires the API key |
 | `GET /v1/admin/blocked-callers` | —                   | One page of blocked caller keys: `{ "callers": [{ "publicKey", "reason", "blockedAt" }], "nextOffset" }`. Requires the API key |
 | `PUT /v1/admin/blocked-callers/:publicKey` | Optional `{ "reason" }` | Block a caller key. Requires the API key                          |
 | `DELETE /v1/admin/blocked-callers/:publicKey` | —     | Unblock a caller key (`404` if not blocked). Requires the API key             |
@@ -215,6 +215,9 @@ The `/v1/admin` routes take the same `Authorization: Bearer <API_KEY>` as `/v1/r
 # Revoke one grant, and everything delegated from it.
 curl -X PUT "http://127.0.0.1:3000/v1/admin/revoked-grants/$GRANT_ID" -H "Authorization: Bearer $API_KEY"
 
+# Revoke a grant delegated further down a chain. Issuers choose their own ids, so name its issuer too.
+curl -X PUT "http://127.0.0.1:3000/v1/admin/revoked-grants/$GRANT_ID?issuer=$DELEGATOR_KEY" -H "Authorization: Bearer $API_KEY"
+
 # Block a caller's key, and lift the block later.
 curl -X PUT "http://127.0.0.1:3000/v1/admin/blocked-callers/$CALLER_KEY" \
   -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' -d '{"reason": "abuse"}'
@@ -230,7 +233,7 @@ Unrestricted free functions stay open to everyone, since their callers are anony
 
 A capability's `resourcePath` is exact, a prefix such as `com.example.*`, or `*`. An omitted `resourceName` or `functionName` matches any, and each constraint requires that parameter to equal the given value. The hosting node refuses any call (`400`) whose parameters repeat a name or use one the function doesn't declare, so a constraint always sees the value the function gets.
 
-A grant lasts at most 30 days, and a chain holds at most four grants. Each node renews its held grants in the background, once they are past half their lifetime (checked every `grantRefreshIntervalMs`, 5 minutes by default), so calls don't wait on renewal. A held grant that its issuer still refuses to renew 30 days after it expired is deleted. A grant keeps its `id` across renewals, and `renewableUntil` ends renewal at a given time. Verifiers allow signers' clocks to run up to 30 seconds ahead (`CLOCK_SKEW_TOLERANCE_MS`). Seen authorization nonces are kept in the node's database, so they survive restarts, but replicas that don't share a database don't share them either. A revocation at the hosting node takes effect immediately. A delegator's revocation only stops renewal, so it takes effect when the current copy expires.
+A grant lasts at most 30 days, and a chain holds at most four grants. Each node renews its held grants in the background, once they are past half their lifetime (checked every `grantRefreshIntervalMs`, 5 minutes by default), so calls don't wait on renewal. A held grant that its issuer still refuses to renew 30 days after it expired is deleted. A grant keeps its `id` across renewals. `renewableUntil` ends access at a given time: no copy expires later, and none is renewed after it. Verifiers allow signers' clocks to run up to 30 seconds ahead (`CLOCK_SKEW_TOLERANCE_MS`). Seen authorization nonces are kept in the node's database, so they survive restarts, but replicas that don't share a database don't share them either. A revocation at the hosting node takes effect immediately. A delegator's revocation only stops renewal, so it takes effect when the current copy expires.
 
 Resources are bound with `const <name>: <path>.<ResourceName>` and called with named arguments. See the [RequestScript readme](https://www.npmjs.com/package/requestscript) for the language.
 

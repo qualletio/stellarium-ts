@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { FastifyInstance } from 'fastify';
 import { DEFAULT_DATABASE_PATH, openDatabase } from './db/db.js';
 import type { Capability, Grant } from './grant/grant.js';
-import type { HeldGrantKey } from './grant/repository.js';
+import type { GrantKey } from './grant/repository.js';
 import type { ApproveGrant, GrantOptions } from './grant/service.js';
 import { StellariumResource } from './resource/repository.js';
 import routes, { RateLimitConfig } from './routes.js';
@@ -32,7 +32,10 @@ export interface StellariumNodeOptions {
     costLimitLamports?: number;
     /** SQLite file. Defaults to `./requestscript.db`; use ':memory:' for tests. */
     databasePath?: string;
-    /** Grant chains addressed to this node, stored at start. Each is root first. */
+    /**
+     * Grant chains addressed to this node, stored at start. Each is root first. A stored renewal
+     * of the same grant is kept, and an expired chain is skipped with a warning.
+     */
     grants?: Grant[][];
     /** How often held grants past half their lifetime are renewed. Defaults to 5 minutes. */
     grantRefreshIntervalMs?: number;
@@ -90,8 +93,11 @@ export class StellariumNode {
         fastify.addHook('onClose', async () => db.close());
 
         const service = createService(db, this.resources, config, { approveGrant: options.approveGrant });
+        // A configured chain may be older than its stored renewal, or long expired; neither should stop the node.
         for (const chain of options.grants ?? []) {
-            await service.grantService.add(chain);
+            if (!await service.grantService.seed(chain)) {
+                fastify.log.warn(`Skipped expired grant ${chain[chain.length - 1]?.id} from the start options`);
+            }
         }
         this.service = service;
 
@@ -144,7 +150,7 @@ export class StellariumNode {
      * Narrows a grant this node holds for another audience. Hand the returned chain to the audience.
      * Name the held grant by its id, or by its issuer and id when two issuers used the same id.
      */
-    async delegateGrant(heldGrant: string | HeldGrantKey, audience: string, capabilities: Capability[], options: GrantOptions): Promise<Grant[]> {
+    async delegateGrant(heldGrant: string | GrantKey, audience: string, capabilities: Capability[], options: GrantOptions): Promise<Grant[]> {
         return this.started().grantService.delegate(heldGrant, audience, capabilities, options);
     }
 
@@ -158,9 +164,12 @@ export class StellariumNode {
         return this.started().grantService.add(chain);
     }
 
-    /** Refuses the grant, and every grant delegated from it, in calls to this node, and stops its renewal. */
-    async revokeGrant(grantId: string): Promise<void> {
-        return this.started().grantService.revoke(grantId);
+    /**
+     * Refuses the grant, and every grant delegated from it, in calls to this node, and stops its renewal.
+     * Name a grant this node issued by its id, and any other grant by its issuer and id.
+     */
+    async revokeGrant(grant: string | GrantKey): Promise<void> {
+        return this.started().grantService.revoke(grant);
     }
 
     /** Refuses this caller key in restricted calls, renewals, grant requests and paid calls. */

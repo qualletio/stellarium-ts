@@ -16,6 +16,7 @@ import {
     grantsHash,
     type InvocationAuthorization,
     invocationAuthorizationPayload,
+    isAuthorization,
     isCapability,
     isGrant,
     MAX_AUTHORIZATION_LIFETIME_MS,
@@ -24,12 +25,12 @@ import {
     signGrant,
     verifyChain,
 } from "./grant.js";
-import type { BlockedCaller, GrantRepository, HeldGrantKey } from "./repository.js";
+import type { BlockedCaller, GrantRepository, GrantKey } from "./repository.js";
 
 export interface GrantOptions {
     /** How long each issued copy lasts. At most `MAX_GRANT_LIFETIME_MS`. */
     lifetimeMs: number;
-    /** No renewals after this time. Omit to allow renewal until revoked. */
+    /** Access ends at this time: no copy expires later, and none is renewed after it. Omit to allow renewal until revoked. */
     renewableUntil?: string;
 }
 
@@ -67,6 +68,8 @@ export const GRANT_RENEW_TIMEOUT_MS = 10_000;
 export const HELD_GRANT_RETENTION_MS = MAX_GRANT_LIFETIME_MS;
 /** How often claiming a nonce also deletes expired ones. */
 const NONCE_SWEEP_INTERVAL_MS = 60_000;
+/** Most renewals `refreshDue` has in flight at once. */
+const REFRESH_CONCURRENCY = 8;
 
 /** Thrown by `block` for a key that isn't an Ed25519 SPKI key. */
 export class InvalidPublicKeyError extends Error {
@@ -75,12 +78,18 @@ export class InvalidPublicKeyError extends Error {
     }
 }
 
-/** The issuer answered a renewal with a refusal, as opposed to failing to answer. */
-class RenewalRefusedError extends Error {}
+/** Another node answered a grant request or renewal with a refusal, as opposed to failing to answer. */
+class GrantRefusedError extends Error {}
 
 const expired = (grant: Grant, now = Date.now()) => Date.parse(grant.expiresAt) <= now;
 const leafOf = (chain: Grant[]) => chain[chain.length - 1];
-const heldKey = (chain: Grant[]): HeldGrantKey => ({ issuer: leafOf(chain).issuer, id: leafOf(chain).id });
+const keyOf = (grant: Grant): GrantKey => ({ issuer: grant.issuer, id: grant.id });
+const heldKey = (chain: Grant[]): GrantKey => keyOf(leafOf(chain));
+/** The root grant's issuer, or `''` when the chain is malformed, so that `verifyChain` refuses it. */
+const rootIssuer = (chain: unknown) => Array.isArray(chain) && isGrant(chain[0]) ? chain[0].issuer : '';
+const isWellFormed = (chain: unknown): chain is Grant[] => Array.isArray(chain) && chain.length > 0 && chain.every(isGrant);
+/** True when `renewed` holds the same grants as `chain`, position by position. Renewal keeps each grant's issuer and id. */
+const sameGrants = (renewed: Grant[], chain: Grant[]) => renewed.length === chain.length && renewed.every((grant, index) => grant.issuer === chain[index].issuer && grant.id === chain[index].id);
 
 /**
  * Issues, holds, renews and verifies capability grants. Every node plays all three roles:
@@ -101,7 +110,7 @@ export class GrantService {
     async issue(audience: string, capabilities: Capability[], options: GrantOptions): Promise<Grant[]> {
         checkCapabilities(capabilities);
         checkOptions(options);
-        const grant = this.sign(crypto.randomUUID(), audience, capabilities, options.lifetimeMs, null);
+        const grant = this.sign(crypto.randomUUID(), audience, capabilities, options.lifetimeMs, null, options.renewableUntil ?? null);
         await this.repository.saveIssued({ id: grant.id, audience, capabilities, parent: null, lifetimeMs: options.lifetimeMs, renewableUntil: options.renewableUntil ?? null });
         return [grant];
     }
@@ -110,7 +119,7 @@ export class GrantService {
      * Narrows a grant this node holds for another audience. The child expires no later than the
      * held grant. Name the held grant by its id, or by its issuer and id when two issuers used the same id.
      */
-    async delegate(heldGrant: string | HeldGrantKey, audience: string, capabilities: Capability[], options: GrantOptions): Promise<Grant[]> {
+    async delegate(heldGrant: string | GrantKey, audience: string, capabilities: Capability[], options: GrantOptions): Promise<Grant[]> {
         checkCapabilities(capabilities);
         checkOptions(options);
         const chain = await this.findHeld(heldGrant);
@@ -125,18 +134,19 @@ export class GrantService {
             throw new Error('A delegated grant may only narrow the grant it is delegated from');
         }
 
-        const grant = this.sign(crypto.randomUUID(), audience, capabilities, options.lifetimeMs, parent);
+        const grant = this.sign(crypto.randomUUID(), audience, capabilities, options.lifetimeMs, parent, options.renewableUntil ?? null);
         await this.repository.saveIssued({ id: grant.id, audience, capabilities, parent: heldKey(chain), lifetimeMs: options.lifetimeMs, renewableUntil: options.renewableUntil ?? null });
         return [...chain, grant];
     }
 
     /**
-     * Revoked ids are refused in any chain this node verifies, and are never renewed. A
+     * Revoked grants are refused in any chain this node verifies, and are never renewed. A
      * delegator's revocation only stops renewal, since the provider never sees it, so it
-     * takes effect when the current copy expires.
+     * takes effect when the current copy expires. Name a grant this node issued by its id, and
+     * any other grant, such as one delegated further down a chain, by its issuer and id.
      */
-    async revoke(grantId: string): Promise<void> {
-        await this.repository.revoke(grantId);
+    async revoke(grant: string | GrantKey): Promise<void> {
+        await this.repository.revoke(typeof grant === 'string' ? { issuer: this.config.publicKey, id: grant } : grant);
     }
 
     /**
@@ -185,12 +195,12 @@ export class GrantService {
             }
             chain = held;
         }
-        if (await this.repository.anyRevoked([issued.id, ...chain.map(grant => grant.id)])) {
+        if (await this.repository.anyRevoked([{ issuer: this.config.publicKey, id: issued.id }, ...chain.map(keyOf)])) {
             return undefined;
         }
 
         const parent = chain.length > 0 ? leafOf(chain) : null;
-        return [...chain, this.sign(issued.id, issued.audience, issued.capabilities, issued.lifetimeMs, parent)];
+        return [...chain, this.sign(issued.id, issued.audience, issued.capabilities, issued.lifetimeMs, parent, issued.renewableUntil)];
     }
 
     /**
@@ -204,7 +214,7 @@ export class GrantService {
         }
         const { publicKey, capabilities, nonce, expiresAt, signature } = request;
         const details = request.details ?? null;
-        if (!Array.isArray(capabilities) || capabilities.length === 0 || !capabilities.every(isCapability)) {
+        if (!validCapabilities(capabilities)) {
             return undefined;
         }
         if (details !== null && (typeof details !== 'object' || Array.isArray(details))) {
@@ -243,29 +253,18 @@ export class GrantService {
         const unsigned = { publicKey: this.config.publicKey, capabilities, details: details ?? null, nonce: crypto.randomUUID(), expiresAt: new Date(Date.now() + MAX_AUTHORIZATION_LIFETIME_MS).toISOString() };
         const request: GrantRequest = { ...unsigned, signature: signData(grantRequestPayload(unsigned), this.config.privateKey) };
 
-        const response = await fetch(`${providerBaseUrl}/v1/grants/request`, {
-            method: 'POST',
-            body: JSON.stringify(request),
-            headers: { 'Content-Type': 'application/json' },
-            signal: AbortSignal.timeout(GRANT_RENEW_TIMEOUT_MS),
-        });
-        if (!response.ok) {
-            const detail = await response.json().then((body) => (body as { error?: unknown } | null)?.error, () => undefined);
-            throw new Error(`Grant request to ${providerBaseUrl} refused: ${typeof detail === 'string' ? detail : response.status}`);
-        }
-        const { grants } = await response.json() as { grants: Grant[] };
-
-        const chain = verifyChain(grants, Array.isArray(grants) && isGrant(grants[0]) ? grants[0].issuer : '');
-        if (!chain.ok || grants.length !== 1 || grants[0].issuerBaseUrl !== providerBaseUrl || chain.leaf.audience !== this.config.publicKey) {
+        const grants = await this.postForGrants(`${providerBaseUrl}/v1/grants/request`, request, `Grant request to ${providerBaseUrl}`);
+        const chain = verifyChain(grants, rootIssuer(grants));
+        if (!chain.ok || (grants as Grant[]).length !== 1 || (grants as Grant[])[0].issuerBaseUrl !== providerBaseUrl || chain.leaf.audience !== this.config.publicKey) {
             throw new Error(`Grant request to ${providerBaseUrl} returned an invalid grant`);
         }
-        await this.repository.saveHeld(grants);
-        return grants;
+        await this.repository.saveHeld(grants as Grant[]);
+        return grants as Grant[];
     }
 
     /** Stores a chain whose leaf names this node as its audience. Throws if the chain is invalid. */
     async add(chain: Grant[]): Promise<void> {
-        const result = verifyChain(chain, Array.isArray(chain) && isGrant(chain[0]) ? chain[0].issuer : '');
+        const result = verifyChain(chain, rootIssuer(chain));
         if (!result.ok) {
             throw new Error(`Invalid grant chain: ${result.reason}`);
         }
@@ -276,20 +275,48 @@ export class GrantService {
     }
 
     /**
+     * Stores a chain passed in the node's start options. A held copy of the same grant that
+     * expires no earlier is a renewal of it, so it is kept. Returns false, storing nothing, for
+     * an expired chain. Throws if the chain is otherwise invalid.
+     */
+    async seed(chain: Grant[]): Promise<boolean> {
+        if (isWellFormed(chain)) {
+            const held = await this.repository.getHeld(heldKey(chain));
+            if (held && Date.parse(leafOf(held).expiresAt) >= Date.parse(leafOf(chain).expiresAt)) {
+                return true;
+            }
+            // No grant in a valid chain outlives its parent, so the leaf expires first.
+            if (expired(leafOf(chain))) {
+                return false;
+            }
+        }
+        await this.add(chain);
+        return true;
+    }
+
+    /**
      * A held chain, rooted at the node serving `rootBaseUrl`, that covers the call. When every
      * such chain has expired, the latest-expiring one is renewed, once, before giving up, so a
      * call waits on at most one renewal. Undefined when this node holds no usable grant.
      */
     async chainFor(rootBaseUrl: string, target: InvocationTarget): Promise<Grant[] | undefined> {
-        const chains = (await this.repository.getHeldByRoot(rootBaseUrl)).filter(chain =>
-            leafOf(chain).capabilities.some(capability => capabilityMatches(capability, target.resourcePath, target.resourceName, target.functionName, target.parameters)));
+        const now = Date.now();
+        // The provider refuses a chain from a key it no longer uses, such as after a key rotation.
+        // When this node doesn't know the provider as a peer, chains from any root key are tried.
+        const rootKey = await this.repository.getPeerKey(rootBaseUrl);
+        const usable = (chain: Grant[]) => (rootKey === undefined || chain[0].issuer === rootKey)
+            && leafOf(chain).capabilities.some(capability => capabilityMatches(capability, target.resourcePath, target.resourceName, target.functionName, target.parameters));
 
-        const chain = chains.find(candidate => !expired(leafOf(candidate)));
-        if (chain || chains.length === 0) {
+        const chain = (await this.repository.getUnexpiredHeldByRoot(rootBaseUrl, now)).find(usable);
+        if (chain) {
             return chain;
         }
+        const latestExpired = (await this.repository.getExpiredHeldByRoot(rootBaseUrl, now)).find(usable);
+        if (!latestExpired) {
+            return undefined;
+        }
         try {
-            return await this.renewHeld(chains[0]);
+            return await this.renewHeld(latestExpired);
         } catch {
             return undefined;
         }
@@ -309,25 +336,46 @@ export class GrantService {
      * unless the issuer refused it and the chain expired more than `HELD_GRANT_RETENTION_MS` ago.
      */
     async refreshDue(): Promise<RefreshResult> {
-        const result: RefreshResult = { renewed: [], failed: [], removed: [] };
         const now = Date.now();
-        for (const chain of await this.repository.getAllHeld()) {
+        const due = (await this.repository.getAllHeld()).filter(chain => {
             const leaf = leafOf(chain);
             const issuedAt = Date.parse(leaf.issuedAt);
-            const halfway = issuedAt + (Date.parse(leaf.expiresAt) - issuedAt) / 2;
-            if (now < halfway) {
-                continue;
-            }
+            return now >= issuedAt + (Date.parse(leaf.expiresAt) - issuedAt) / 2;
+        });
+
+        // Renewals run a few at a time, so one slow issuer doesn't hold up the rest.
+        type Outcome = { renewed: string } | { removed: string } | { failed: { id: string, error: string } };
+        const outcomes: Outcome[] = [];
+        const refresh = async (chain: Grant[]): Promise<Outcome> => {
+            const leaf = leafOf(chain);
             try {
                 await this.renewHeld(chain);
-                result.renewed.push(leaf.id);
+                return { renewed: leaf.id };
             } catch (error) {
-                if (error instanceof RenewalRefusedError && expired(leaf, now - HELD_GRANT_RETENTION_MS)) {
+                if (error instanceof GrantRefusedError && expired(leaf, now - HELD_GRANT_RETENTION_MS)) {
                     await this.repository.deleteHeld(heldKey(chain));
-                    result.removed.push(leaf.id);
-                    continue;
+                    return { removed: leaf.id };
                 }
-                result.failed.push({ id: leaf.id, error: error instanceof Error ? error.message : String(error) });
+                return { failed: { id: leaf.id, error: error instanceof Error ? error.message : String(error) } };
+            }
+        };
+        let next = 0;
+        const worker = async () => {
+            while (next < due.length) {
+                const index = next++;
+                outcomes[index] = await refresh(due[index]);
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(REFRESH_CONCURRENCY, due.length) }, worker));
+
+        const result: RefreshResult = { renewed: [], failed: [], removed: [] };
+        for (const outcome of outcomes) {
+            if ('renewed' in outcome) {
+                result.renewed.push(outcome.renewed);
+            } else if ('removed' in outcome) {
+                result.removed.push(outcome.removed);
+            } else {
+                result.failed.push(outcome.failed);
             }
         }
         return result;
@@ -353,7 +401,7 @@ export class GrantService {
         if (!chain.leaf.capabilities.some(capability => capabilityMatches(capability, target.resourcePath, target.resourceName, target.functionName, target.parameters))) {
             return false;
         }
-        if (await this.repository.anyRevoked(authorization.grants.map(grant => grant.id))) {
+        if (await this.repository.anyRevoked(authorization.grants.map(keyOf))) {
             return false;
         }
         // Every audience in the chain, so blocking a delegator also cuts off what it handed on.
@@ -376,7 +424,7 @@ export class GrantService {
         return this.repository.claimNonce(`${publicKey}:${nonce}`, expiresAt);
     }
 
-    private async findHeld(heldGrant: string | HeldGrantKey): Promise<Grant[]> {
+    private async findHeld(heldGrant: string | GrantKey): Promise<Grant[]> {
         if (typeof heldGrant !== 'string') {
             const chain = await this.repository.getHeld(heldGrant);
             if (!chain) {
@@ -400,32 +448,40 @@ export class GrantService {
         const unsigned = { grantId: leaf.id, publicKey: this.config.publicKey, nonce: crypto.randomUUID(), expiresAt: new Date(Date.now() + MAX_AUTHORIZATION_LIFETIME_MS).toISOString() };
         const request: GrantRenewalRequest = { ...unsigned, signature: signData(grantRenewalPayload(unsigned), this.config.privateKey) };
 
-        const response = await fetch(`${leaf.issuerBaseUrl}/v1/grants/renew`, {
+        const grants = await this.postForGrants(`${leaf.issuerBaseUrl}/v1/grants/renew`, request, `Renewal of grant ${leaf.id}`);
+        // The issuer may not swap in a different grant, root or chain, so the renewal replaces the held copy.
+        const renewed = verifyChain(grants, chain[0].issuer);
+        if (!renewed.ok || !sameGrants(grants as Grant[], chain) || renewed.leaf.audience !== this.config.publicKey) {
+            throw new Error(`Renewal of grant ${leaf.id} returned an invalid chain`);
+        }
+        await this.repository.saveHeld(grants as Grant[]);
+        return grants as Grant[];
+    }
+
+    /**
+     * POSTs a signed request to another node's grant endpoint and returns the chain it answered
+     * with, unverified. Throws `GrantRefusedError` if the node refused, and an Error if it failed.
+     */
+    private async postForGrants(url: string, body: GrantRequest | GrantRenewalRequest, description: string): Promise<unknown> {
+        const response = await fetch(url, {
             method: 'POST',
-            body: JSON.stringify(request),
+            body: JSON.stringify(body),
             headers: { 'Content-Type': 'application/json' },
             signal: AbortSignal.timeout(GRANT_RENEW_TIMEOUT_MS),
         });
-        if (response.status === 403) {
-            throw new RenewalRefusedError(`Renewal of grant ${leaf.id} refused`);
-        }
         if (!response.ok) {
-            throw new Error(`Renewal of grant ${leaf.id} failed: ${response.status}`);
+            const detail = await response.json().then((answer) => (answer as { error?: unknown } | null)?.error, () => undefined);
+            const reason = typeof detail === 'string' ? detail : response.status;
+            throw response.status === 403 ? new GrantRefusedError(`${description} refused: ${reason}`) : new Error(`${description} failed: ${reason}`);
         }
-        const { grants } = await response.json() as { grants: Grant[] };
-
-        // The issuer may not swap in a different grant or root.
-        const renewed = verifyChain(grants, chain[0].issuer);
-        if (!renewed.ok || renewed.leaf.id !== leaf.id || renewed.leaf.audience !== this.config.publicKey) {
-            throw new Error(`Renewal of grant ${leaf.id} returned an invalid chain`);
-        }
-        await this.repository.saveHeld(grants);
-        return grants;
+        const answer = await response.json() as { grants?: unknown } | null;
+        return answer?.grants;
     }
 
-    private sign(id: string, audience: string, capabilities: Capability[], lifetimeMs: number, parent: Grant | null): Grant {
+    /** The copy expires after `lifetimeMs`, but no later than its parent or `renewableUntil`. */
+    private sign(id: string, audience: string, capabilities: Capability[], lifetimeMs: number, parent: Grant | null, renewableUntil: string | null): Grant {
         const now = Date.now();
-        const expiresAt = Math.min(now + lifetimeMs, parent ? Date.parse(parent.expiresAt) : Infinity);
+        const expiresAt = Math.min(now + lifetimeMs, parent ? Date.parse(parent.expiresAt) : Infinity, renewableUntil !== null ? Date.parse(renewableUntil) : Infinity);
         return signGrant({
             id,
             issuer: this.config.publicKey,
@@ -440,8 +496,12 @@ export class GrantService {
 }
 
 /** Verifiers refuse a grant with no capabilities or a malformed one, so it is never signed. */
+function validCapabilities(capabilities: unknown): capabilities is Capability[] {
+    return Array.isArray(capabilities) && capabilities.length > 0 && capabilities.every(isCapability);
+}
+
 function checkCapabilities(capabilities: unknown): void {
-    if (!Array.isArray(capabilities) || capabilities.length === 0 || !capabilities.every(isCapability)) {
+    if (!validCapabilities(capabilities)) {
         throw new Error('capabilities must be a nonempty list of capabilities, each with a resourcePath');
     }
 }
@@ -450,15 +510,8 @@ function checkOptions(options: GrantOptions): void {
     if (!Number.isSafeInteger(options.lifetimeMs) || options.lifetimeMs <= 0 || options.lifetimeMs > MAX_GRANT_LIFETIME_MS) {
         throw new Error(`lifetimeMs must be a positive integer of at most ${MAX_GRANT_LIFETIME_MS}`);
     }
-    if (options.renewableUntil !== undefined && !Number.isFinite(Date.parse(options.renewableUntil))) {
-        throw new Error('renewableUntil must be a date');
+    // A grant expires by renewableUntil, so a past one would only sign an expired grant.
+    if (options.renewableUntil !== undefined && !(Date.parse(options.renewableUntil) > Date.now())) {
+        throw new Error('renewableUntil must be a future date');
     }
-}
-
-function isAuthorization(value: unknown): value is InvocationAuthorization {
-    if (typeof value !== 'object' || value === null) {
-        return false;
-    }
-    const { publicKey, grants, nonce, expiresAt, signature } = value as Record<string, unknown>;
-    return typeof publicKey === 'string' && Array.isArray(grants) && typeof nonce === 'string' && typeof expiresAt === 'string' && typeof signature === 'string';
 }

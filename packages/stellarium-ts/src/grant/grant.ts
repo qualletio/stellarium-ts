@@ -133,6 +133,11 @@ export function isGrant(value: unknown): value is Grant {
         && isString(value.signature);
 }
 
+export function isAuthorization(value: unknown): value is InvocationAuthorization {
+    return isObject(value)
+        && isString(value.publicKey) && Array.isArray(value.grants) && isString(value.nonce) && isString(value.expiresAt) && isString(value.signature);
+}
+
 /** A `prefix.*` pattern's prefix, `''` for `*`, or undefined for an exact path. */
 function wildcardPrefix(pattern: string): string | undefined {
     if (pattern === "*") {

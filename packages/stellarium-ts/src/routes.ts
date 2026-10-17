@@ -84,6 +84,13 @@ const pageQuerySchema = {
     },
 } as const;
 
+const revokeQuerySchema = {
+    type: 'object',
+    properties: {
+        issuer: { type: 'string', minLength: 1 },
+    },
+} as const;
+
 /**
  * Fetches one extra item to tell whether another page follows. `nextOffset` is null on the last page.
  */
@@ -427,13 +434,14 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     // Authenticated before validation, like /run, so unauthenticated callers learn nothing about the schema.
 
     /**
-     * Revokes a grant by id: this node refuses it in any chain, with everything delegated from
-     * it, and stops renewing it. The id need not be one this node issued, so a grant delegated
-     * further down a chain can be cut off too.
+     * Revokes a grant: this node refuses it in any chain, with everything delegated from it, and
+     * stops renewing it. Without `?issuer=`, the grant is one this node issued. With it, the grant
+     * may be one delegated further down a chain, so it can be cut off too.
      */
-    fastify.put('/admin/revoked-grants/:grantId', { preValidation: requireApiKey }, async (request) => {
+    fastify.put('/admin/revoked-grants/:grantId', { preValidation: requireApiKey, schema: { querystring: revokeQuerySchema } }, async (request) => {
         const { grantId } = request.params as { grantId: string };
-        await options.service.grantService.revoke(grantId);
+        const { issuer } = request.query as { issuer?: string };
+        await options.service.grantService.revoke(issuer === undefined ? grantId : { issuer, id: grantId });
         return { success: true };
     });
 

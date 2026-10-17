@@ -6,7 +6,7 @@ export interface IssuedGrant {
     audience: string;
     capabilities: Capability[];
     /** The held grant this one was delegated from, or null for a root grant. */
-    parent: HeldGrantKey | null;
+    parent: GrantKey | null;
     lifetimeMs: number;
     renewableUntil: string | null;
 }
@@ -33,8 +33,11 @@ interface BlockedCallerRow {
     blocked_at: string;
 }
 
-/** Identifies a held chain by its leaf grant. Issuers choose their own ids, so the id alone isn't enough. */
-export interface HeldGrantKey {
+/**
+ * Identifies a grant, such as a held chain's leaf or a revoked grant. Issuers choose their own
+ * ids, so the id alone isn't enough.
+ */
+export interface GrantKey {
     issuer: string;
     id: string;
 }
@@ -43,7 +46,10 @@ interface HeldGrantRow {
     chain: string;
 }
 
-/** Grants this node issued, grants it holds, grant ids it revoked, nonces it has seen, and caller keys it blocked. */
+/** Stored times are normalized so that SQL can order and compare them as text. */
+const isoTime = (time: string | number) => new Date(typeof time === 'string' ? Date.parse(time) : time).toISOString();
+
+/** Grants this node issued, grants it holds, grants it revoked, nonces it has seen, and caller keys it blocked. */
 export class GrantRepository {
     constructor(private readonly db: Database) {}
 
@@ -76,11 +82,11 @@ export class GrantRepository {
             `INSERT INTO held_grant (issuer, id, root_issuer_base_url, chain, issued_at, expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (issuer, id) DO UPDATE SET root_issuer_base_url = excluded.root_issuer_base_url, chain = excluded.chain,
                 issued_at = excluded.issued_at, expires_at = excluded.expires_at, updated_at = excluded.updated_at`,
-            [leaf.issuer, leaf.id, chain[0].issuerBaseUrl, JSON.stringify(chain), leaf.issuedAt, leaf.expiresAt, new Date().toISOString()]
+            [leaf.issuer, leaf.id, chain[0].issuerBaseUrl, JSON.stringify(chain), isoTime(leaf.issuedAt), isoTime(leaf.expiresAt), new Date().toISOString()]
         );
     }
 
-    async getHeld(key: HeldGrantKey): Promise<Grant[] | undefined> {
+    async getHeld(key: GrantKey): Promise<Grant[] | undefined> {
         const row = await this.db.get<HeldGrantRow>('SELECT chain FROM held_grant WHERE issuer = ? AND id = ?', [key.issuer, key.id]);
         return row ? JSON.parse(row.chain) : undefined;
     }
@@ -91,13 +97,19 @@ export class GrantRepository {
         return rows.map(row => JSON.parse(row.chain));
     }
 
-    async deleteHeld(key: HeldGrantKey): Promise<void> {
+    async deleteHeld(key: GrantKey): Promise<void> {
         await this.db.run('DELETE FROM held_grant WHERE issuer = ? AND id = ?', [key.issuer, key.id]);
     }
 
-    /** Chains rooted at the node serving `rootIssuerBaseUrl`, latest expiry first. Expired chains included. */
-    async getHeldByRoot(rootIssuerBaseUrl: string): Promise<Grant[][]> {
-        const rows = await this.db.all<HeldGrantRow[]>('SELECT chain FROM held_grant WHERE root_issuer_base_url = ? ORDER BY expires_at DESC', [rootIssuerBaseUrl]);
+    /** Unexpired chains rooted at the node serving `rootIssuerBaseUrl`, latest expiry first. */
+    async getUnexpiredHeldByRoot(rootIssuerBaseUrl: string, now: number): Promise<Grant[][]> {
+        const rows = await this.db.all<HeldGrantRow[]>('SELECT chain FROM held_grant WHERE root_issuer_base_url = ? AND expires_at > ? ORDER BY expires_at DESC', [rootIssuerBaseUrl, isoTime(now)]);
+        return rows.map(row => JSON.parse(row.chain));
+    }
+
+    /** Expired chains rooted at the node serving `rootIssuerBaseUrl`, latest expiry first. */
+    async getExpiredHeldByRoot(rootIssuerBaseUrl: string, now: number): Promise<Grant[][]> {
+        const rows = await this.db.all<HeldGrantRow[]>('SELECT chain FROM held_grant WHERE root_issuer_base_url = ? AND expires_at <= ? ORDER BY expires_at DESC', [rootIssuerBaseUrl, isoTime(now)]);
         return rows.map(row => JSON.parse(row.chain));
     }
 
@@ -106,16 +118,22 @@ export class GrantRepository {
         return rows.map(row => JSON.parse(row.chain));
     }
 
-    async revoke(grantId: string): Promise<void> {
-        await this.db.run('INSERT INTO revoked_grant (grant_id, revoked_at) VALUES (?, ?) ON CONFLICT (grant_id) DO NOTHING', [grantId, new Date().toISOString()]);
+    /** The key of the peer serving `baseUrl`, if this node knows it. */
+    async getPeerKey(baseUrl: string): Promise<string | undefined> {
+        const row = await this.db.get<{ public_key: string }>('SELECT public_key FROM peer WHERE base_url = ?', [baseUrl]);
+        return row?.public_key;
     }
 
-    async anyRevoked(grantIds: string[]): Promise<boolean> {
-        if (grantIds.length === 0) {
+    async revoke(key: GrantKey): Promise<void> {
+        await this.db.run('INSERT INTO revoked_grant (issuer, grant_id, revoked_at) VALUES (?, ?, ?) ON CONFLICT (issuer, grant_id) DO NOTHING', [key.issuer, key.id, new Date().toISOString()]);
+    }
+
+    async anyRevoked(keys: GrantKey[]): Promise<boolean> {
+        if (keys.length === 0) {
             return false;
         }
-        const placeholders = grantIds.map(() => '?').join(', ');
-        const row = await this.db.get(`SELECT 1 FROM revoked_grant WHERE grant_id IN (${placeholders}) LIMIT 1`, grantIds);
+        const conditions = keys.map(() => '(issuer = ? AND grant_id = ?)').join(' OR ');
+        const row = await this.db.get(`SELECT 1 FROM revoked_grant WHERE ${conditions} LIMIT 1`, keys.flatMap(key => [key.issuer, key.id]));
         return row !== undefined;
     }
 

@@ -124,10 +124,15 @@ export async function createTables(db: Database) {
 
             PRIMARY KEY (issuer, id)
         );
+        CREATE INDEX IF NOT EXISTS held_grant_root ON held_grant (root_issuer_base_url, expires_at);
 
+        -- Keyed like held grants, so revoking one issuer's grant leaves another's with the same id alone.
         CREATE TABLE IF NOT EXISTS revoked_grant (
-            grant_id TEXT PRIMARY KEY,
-            revoked_at TEXT NOT NULL
+            issuer TEXT NOT NULL,
+            grant_id TEXT NOT NULL,
+            revoked_at TEXT NOT NULL,
+
+            PRIMARY KEY (issuer, grant_id)
         );
 
         -- publicKey:nonce of accepted authorizations and grant requests, until they expire.

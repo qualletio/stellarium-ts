@@ -1,9 +1,10 @@
 import type { Database } from "sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { openDatabase } from "../../db/db.js";
-import { type Capability, type GrantRenewalRequest, type GrantRequest, grantRequestPayload, signGrant } from "../../grant/grant.js";
+import { type Capability, type Grant, type GrantRenewalRequest, type GrantRequest, grantHash, grantRequestPayload, signGrant } from "../../grant/grant.js";
 import { signData } from "../../crypto/utils.js";
 import { GrantRepository } from "../../grant/repository.js";
+import { PeerRepository } from "../../peer/repository.js";
 import { type ApproveGrant, GrantService, HELD_GRANT_RETENTION_MS, type InvocationTarget } from "../../grant/service.js";
 import { generateBase64KeyPair } from "../helpers.js";
 
@@ -21,7 +22,7 @@ describe("GrantService", () => {
         const keys = generateBase64KeyPair();
         const service = new GrantService(new GrantRepository(db), { baseUrl, ...keys }, approveGrant);
         nodes.set(baseUrl, service);
-        return { service, ...keys };
+        return { service, db, ...keys };
     }
 
     beforeEach(() => {
@@ -250,6 +251,99 @@ describe("GrantService", () => {
         vi.setSystemTime(Date.now() + 2 * HOUR);
         expect(await caller.service.chainFor("http://provider", target)).toBeUndefined();
         expect(fetch).toHaveBeenCalledOnce();
+    });
+
+    test("a revocation names the grant's issuer, so another issuer's grant with the same id is unaffected", async () => {
+        const provider = await node("http://provider");
+        const gateway = await node("http://gateway");
+        const user = await node("http://user");
+        const [root] = await provider.service.issue(gateway.publicKey, [weather], { lifetimeMs: HOUR });
+        await gateway.service.add([root]);
+        const chain = await gateway.service.delegate(root.id, user.publicKey, [weather], { lifetimeMs: HOUR });
+
+        // Revoking the root's id under the gateway's key, as when the gateway reuses that id for its own grant, must not hit the root.
+        await provider.service.revoke({ issuer: gateway.publicKey, id: root.id });
+        expect(await provider.service.verifyInvocation(user.service.authorize(chain, target), target)).toBe(true);
+
+        await provider.service.revoke({ issuer: gateway.publicKey, id: chain[1].id });
+        expect(await provider.service.verifyInvocation(user.service.authorize(chain, target), target)).toBe(false);
+    });
+
+    test("copies expire by renewableUntil, and a past renewableUntil is refused", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        const provider = await node("http://provider");
+        const caller = await node("http://caller");
+        const renewableUntil = new Date(Date.now() + 1.5 * HOUR).toISOString();
+        const [grant] = await provider.service.issue(caller.publicKey, [weather], { lifetimeMs: 2 * HOUR, renewableUntil });
+        expect(grant.expiresAt).toBe(renewableUntil);
+
+        const [short] = await provider.service.issue(caller.publicKey, [weather], { lifetimeMs: HOUR, renewableUntil });
+        await caller.service.add([short]);
+        vi.setSystemTime(Date.now() + 0.9 * HOUR);
+        expect((await caller.service.refreshDue()).renewed).toEqual([short.id]);
+        const [renewed] = (await caller.service.chainFor("http://provider", target))!;
+        expect(renewed.expiresAt).toBe(renewableUntil);
+
+        await expect(provider.service.issue("key", [weather], { lifetimeMs: HOUR, renewableUntil: new Date(Date.now() - 1).toISOString() })).rejects.toThrow("renewableUntil");
+    });
+
+    test("seed keeps a stored renewal and skips an expired chain", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        const provider = await node("http://provider");
+        const caller = await node("http://caller");
+        const configured = await provider.service.issue(caller.publicKey, [weather], { lifetimeMs: HOUR });
+        expect(await caller.service.seed(configured)).toBe(true);
+
+        vi.setSystemTime(Date.now() + 0.6 * HOUR);
+        await caller.service.refreshDue();
+        const renewed = (await caller.service.chainFor("http://provider", target))!;
+        expect(renewed[0].expiresAt).not.toBe(configured[0].expiresAt);
+
+        // A restart passes the configured chain again, after it has expired but while the renewal hasn't.
+        vi.setSystemTime(Date.now() + 0.5 * HOUR);
+        expect(await caller.service.seed(configured)).toBe(true);
+        expect(await caller.service.chainFor("http://provider", target)).toEqual(renewed);
+
+        const fresh = await node("http://fresh");
+        expect(await fresh.service.seed(configured)).toBe(false);
+        expect(await fresh.service.chainFor("http://provider", target)).toBeUndefined();
+        await expect(fresh.service.seed([{ ...configured[0], expiresAt: new Date(Date.now() + HOUR).toISOString() }])).rejects.toThrow("Invalid grant chain");
+    });
+
+    test("refuses a renewal that swaps in a different chain ending in the same id", async () => {
+        const provider = await node("http://provider");
+        const gateway = await node("http://gateway");
+        const middle = await node("http://middle");
+        const user = await node("http://user");
+        const [root] = await provider.service.issue(gateway.publicKey, [weather], { lifetimeMs: HOUR });
+        await gateway.service.add([root]);
+        const chain = await gateway.service.delegate(root.id, user.publicKey, [weather], { lifetimeMs: HOUR });
+        await user.service.add(chain);
+
+        const [, toMiddle] = await gateway.service.delegate(root.id, middle.publicKey, [weather], { lifetimeMs: HOUR });
+        const swapped: Grant = signGrant({ ...chain[1], issuer: middle.publicKey, issuerBaseUrl: "http://middle", parent: grantHash(toMiddle) }, middle.privateKey);
+        vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ grants: [root, toMiddle, swapped] }), { status: 200 }));
+
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(Date.now() + 0.6 * HOUR);
+        const { failed } = await user.service.refreshDue();
+        expect(failed).toEqual([{ id: chain[1].id, error: expect.stringContaining("invalid chain") }]);
+        expect(await user.db.get("SELECT COUNT(*) AS count FROM held_grant")).toEqual({ count: 1 });
+    });
+
+    test("prefers a chain rooted at the provider's known key", async () => {
+        const provider = await node("http://provider");
+        const impostor = await node("http://impostor");
+        const caller = await node("http://caller");
+        const genuine = await provider.service.issue(caller.publicKey, [weather], { lifetimeMs: HOUR });
+        // Rooted at the provider's URL, but signed by another key, and expiring later.
+        const stale = signGrant({ ...genuine[0], id: "stale", issuer: impostor.publicKey, expiresAt: new Date(Date.now() + 2 * HOUR).toISOString() }, impostor.privateKey);
+        await caller.service.add(genuine);
+        await caller.service.add([stale]);
+        expect(await caller.service.chainFor("http://provider", target)).toEqual([stale]);
+
+        await new PeerRepository(caller.db).create({ baseUrl: "http://provider", name: "provider", publicKey: provider.publicKey });
+        expect(await caller.service.chainFor("http://provider", target)).toEqual(genuine);
     });
 
     test("issue and delegate check their options", async () => {

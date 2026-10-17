@@ -654,6 +654,11 @@ describe("restricted functions", () => {
             expect(run.statusCode).toBe(403);
         });
 
+        test("?issuer= revokes another issuer's grant, leaving this node's grant with the same id alone", async () => {
+            expect((await admin("PUT", `/v1/admin/revoked-grants/${grant[0].id}?issuer=${caller.publicKey}`)).json()).toEqual({ success: true });
+            expect((await runResource({ ...call("open"), authorization: callerGrants.authorize(grant, call("open")) })).statusCode).toBe(200);
+        });
+
         test("blocking a caller refuses its calls until it is unblocked", async () => {
             expect((await admin("PUT", `/v1/admin/blocked-callers/${caller.publicKey}`, { reason: "abuse" })).json()).toEqual({ success: true });
             expect((await runResource({ ...call("open"), authorization: callerGrants.authorize(grant, call("open")) })).statusCode).toBe(403);

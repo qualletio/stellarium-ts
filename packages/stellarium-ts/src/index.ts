@@ -22,4 +22,4 @@ export {
     type InvocationAuthorization,
 } from './grant/grant.js';
 export type { ApproveGrant, GrantApproval, GrantOptions } from './grant/service.js';
-export type { HeldGrantKey } from './grant/repository.js';
+export type { GrantKey } from './grant/repository.js';
