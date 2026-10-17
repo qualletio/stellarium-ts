@@ -142,10 +142,16 @@ Routes are mounted at `/v1`.
 | `PUT /v1/all-resources`  | Signed resource broadcast  | Store a peer's resources                                                      |
 | `POST /v1/run`           | `{ "source": "..." }`      | Run one `request` script. Requires `Authorization: Bearer <API_KEY>`          |
 | `POST /v1/run/resource`  | One function call          | Called by peers to run a function hosted here                                 |
+| `POST /v1/grants/request`| Signed grant request       | Ask for a new grant, decided by the node's `approveGrant` hook: `{ "grants" }` |
+| `POST /v1/grants/renew`  | Signed renewal request     | Re-issue a grant this node issued to its audience: `{ "grants" }`             |
+| `PUT /v1/admin/revoked-grants/:grantId` | — | Revoke a grant. Requires the API key                                  |
+| `GET /v1/admin/blocked-callers` | —                   | One page of blocked caller keys: `{ "callers": [{ "publicKey", "reason", "blockedAt" }], "nextOffset" }`. Requires the API key |
+| `PUT /v1/admin/blocked-callers/:publicKey` | Optional `{ "reason" }` | Block a caller key. Requires the API key                          |
+| `DELETE /v1/admin/blocked-callers/:publicKey` | —     | Unblock a caller key (`404` if not blocked). Requires the API key             |
 
-`GET /v1/peers` and `GET /v1/resources` are paginated with `?offset=` (default `0`) and `?limit=` (default `100`, at most `500`). `nextOffset` is the `offset` of the next page, or `null` on the last page.
+`GET /v1/peers`, `GET /v1/resources` and `GET /v1/admin/blocked-callers` are paginated with `?offset=` (default `0`) and `?limit=` (default `100`, at most `500`). `nextOffset` is the `offset` of the next page, or `null` on the last page.
 
-`GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, and functions (`name`, `returnType`, `parameters`, and `paymentManifest` for paid functions). Function implementations stay on the node that hosts them.
+`GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, and functions (`name`, `returnType`, `parameters`, `paymentManifest` for paid functions, and `restricted: true` for functions that need a grant). Function implementations stay on the node that hosts them.
 
 `POST /v1/run` takes a JSON body whose `source` is the script. The declaration must be a `request`. A successful run responds `200` with `{ "returnValue": ... }`. Each resource call in the script evaluates to `{ "value", "error" }`, so a script can handle a failed call. A missing or wrong API key responds `401`. A script that doesn't parse, or is not a request, responds `400` with `{ "error": "Invalid script" }`. Any other failure responds `500` with `{ "error": "Internal server error" }`.
 
@@ -170,6 +176,61 @@ A function with a `paymentManifest` (`costLamports`, `recipientAddress`) is paid
 - has a valid signature.
 
 A paid call without a voucher responds `402`; an invalid voucher responds `400`. After the function runs without an error, the node sends the voucher to the operator to settle. Vouchers sent to free functions are ignored.
+
+### Restricted functions and grants
+
+A function with `restricted: true` runs only for callers holding a **grant** from the hosting node. A grant is a signed statement that one key may call some functions until an expiry. Its holder can **delegate** a narrower grant to another key, and the caller sends the whole chain with each call. The hosting node checks the chain's signatures without looking up the caller. It refuses a restricted call without an authorization, or with an invalid one, with `403`. It checks this before the payment voucher.
+
+```ts
+// On the provider: grant a caller access to every function of com.example.Weather for a day.
+const chain = await provider.issueGrant(callerPublicKey, [{ resourcePath: 'com.example', resourceName: 'Weather' }], { lifetimeMs: 24 * 60 * 60 * 1000 });
+
+// On the caller: store it, or pass it at start with `grants: [chain]`.
+await caller.addGrant(chain);
+
+// The caller may hand a narrower grant on, for example one function and one parameter value.
+const delegated = await caller.delegateGrant(chain[0].id, otherPublicKey, [{ resourcePath: 'com.example', resourceName: 'Weather', functionName: 'temperature', constraints: { city: 'Oslo' } }], { lifetimeMs: 60 * 60 * 1000 });
+
+// Refuse the grant, and everything delegated from it, in calls to the provider.
+await provider.revokeGrant(chain[0].id);
+```
+
+A provider can also let callers ask for grants. Its `approveGrant` hook decides each signed request. The hook gets the caller's key, the capabilities it asked for, and any `details` (such as an invite code). It returns the grant's options, optionally with narrower capabilities, or `undefined` to refuse. Each signed request reaches the hook at most once. Without a hook, the node refuses every request. When the hook is set, a `403` for a restricted call includes `grantEndpoint`, so a caller knows where to ask.
+
+```ts
+await provider.start(fastify, {
+    approveGrant: ({ publicKey, capabilities, details }) =>
+        details?.invite === process.env.INVITE_CODE ? { lifetimeMs: 24 * 60 * 60 * 1000 } : undefined,
+});
+
+// On the caller. Throws if refused; otherwise stores the grant, which is then renewed like any other.
+await caller.requestGrant('https://provider.example', [{ resourcePath: 'com.example', resourceName: 'Weather' }], { invite: 'letmein' });
+```
+
+#### Revoking grants and blocking callers
+
+The `/v1/admin` routes take the same `Authorization: Bearer <API_KEY>` as `/v1/run`. The same actions are available in code as `revokeGrant`, `blockCaller` and `unblockCaller`.
+
+```sh
+# Revoke one grant, and everything delegated from it.
+curl -X PUT "http://127.0.0.1:3000/v1/admin/revoked-grants/$GRANT_ID" -H "Authorization: Bearer $API_KEY"
+
+# Block a caller's key, and lift the block later.
+curl -X PUT "http://127.0.0.1:3000/v1/admin/blocked-callers/$CALLER_KEY" \
+  -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' -d '{"reason": "abuse"}'
+curl -X DELETE "http://127.0.0.1:3000/v1/admin/blocked-callers/$CALLER_KEY" -H "Authorization: Bearer $API_KEY"
+```
+
+A blocked key is refused wherever the node can identify a caller:
+- in restricted calls, at any position in the grant chain, so blocking a delegator also cuts off the grants it handed on
+- in grant renewals and grant requests
+- in paid calls, where the voucher carries the payer's key (`403 Caller is blocked`).
+
+Unrestricted free functions stay open to everyone, since their callers are anonymous. Unblocking restores access, and a held grant that expired while blocked is renewed on the next call. Revocation, unlike blocking, is permanent.
+
+A capability's `resourcePath` is exact, a prefix such as `com.example.*`, or `*`. An omitted `resourceName` or `functionName` matches any, and each constraint requires that parameter to equal the given value.
+
+A grant lasts at most 30 days, and a chain holds at most four grants. Each node renews its held grants in the background, once they are past half their lifetime (checked every `grantRefreshIntervalMs`, 5 minutes by default), so calls don't wait on renewal. A grant keeps its `id` across renewals, and `renewableUntil` ends renewal at a given time. A revocation at the hosting node takes effect immediately. A delegator's revocation only stops renewal, so it takes effect when the current copy expires.
 
 Resources are bound with `const <name>: <path>.<ResourceName>` and called with named arguments. See the [RequestScript readme](https://www.npmjs.com/package/requestscript) for the language.
 

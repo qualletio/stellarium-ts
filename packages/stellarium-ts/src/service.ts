@@ -5,6 +5,8 @@ import { CombinationResourceResolver } from "./resource/resolver.js";
 import { ResourceRepository, type StellariumResource } from "./resource/repository.js";
 import { CombinationResourceInvoker } from "./resource/invoker.js";
 import { OperatorClient } from "./client/operatorClient.js";
+import { GrantRepository } from "./grant/repository.js";
+import { type ApproveGrant, GrantService } from "./grant/service.js";
 
 /** Settings a node runs with. `StellariumNode.start` fills these from its options, then the environment. */
 export interface NodeConfig {
@@ -29,14 +31,22 @@ export interface Service {
     resourceResolver: ResourceResolver;
     resourceInvoker: ResourceInvoker;
     operatorClient: OperatorClient;
+    grantService: GrantService;
 }
 
-export function createService(db: Database, resources: StellariumResource[], config: NodeConfig): Service {
+export interface ServiceOptions {
+    /** Decides `POST /v1/grants/request`. Without it, every request is refused. */
+    approveGrant?: ApproveGrant;
+}
+
+export function createService(db: Database, resources: StellariumResource[], config: NodeConfig, options: ServiceOptions = {}): Service {
     const resourceRepository = new ResourceRepository(db, resources, config.baseUrl);
 
     const resourceResolver = new CombinationResourceResolver(resourceRepository);
 
-    const resourceInvoker = new CombinationResourceInvoker(resourceRepository, config.costLimitLamports, config.publicKey, config.privateKey);
+    const grantService = new GrantService(new GrantRepository(db), config, options.approveGrant);
+
+    const resourceInvoker = new CombinationResourceInvoker(resourceRepository, config.costLimitLamports, config.publicKey, config.privateKey, grantService);
 
     const operatorClient = new OperatorClient(config.operatorUrl);
 
@@ -47,5 +57,6 @@ export function createService(db: Database, resources: StellariumResource[], con
         resourceResolver,
         resourceInvoker,
         operatorClient,
+        grantService,
     };
 }

@@ -1,5 +1,6 @@
 import { Resource, ResourceFunctionCallParameter, ResourceInvoker } from "requestscript";
 import { hashData, signData } from "../crypto/utils.js";
+import type { GrantService } from "../grant/service.js";
 import { ResourceRepository } from "./repository.js";
 
 export interface PaymentVoucher {
@@ -47,10 +48,10 @@ export const EXTERNAL_INVOKE_TIMEOUT_MS = 30_000;
  * Other 4xx responses are returned immediately since retrying won't change them.
  * Throws the last network error if every attempt fails to connect.
  */
-async function fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+async function fetchWithRetry(url: string, init: () => RequestInit): Promise<Response> {
     for (let attempt = 0; ; attempt++) {
         try {
-            const response = await fetch(url, { ...init, signal: AbortSignal.timeout(EXTERNAL_INVOKE_TIMEOUT_MS) });
+            const response = await fetch(url, { ...init(), signal: AbortSignal.timeout(EXTERNAL_INVOKE_TIMEOUT_MS) });
             if (response.status !== 429 && response.status < 500) {
                 return response;
             }
@@ -68,10 +69,12 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
 
 export class CombinationResourceInvoker implements ResourceInvoker {
 
-    constructor(private readonly resourceRepository: ResourceRepository, private readonly costLimitLamports: number, private readonly publicKey: string, private readonly privateKey: string) {}
+    /** Without a `grantService`, calls to restricted remote functions fail. */
+    constructor(private readonly resourceRepository: ResourceRepository, private readonly costLimitLamports: number, private readonly publicKey: string, private readonly privateKey: string, private readonly grantService?: GrantService) {}
     /**
      * Invoke a function on a resource.
      * If the resource has a baseUrl, it will be invoked as a remote function.
+     * If the function is restricted, it attaches an authorization from a held grant.
      * If the resource has a paymentManifest, it will create a payment voucher and pass it to the resource.
      * Otherwise, it will be invoked as a local function.
      * 
@@ -98,6 +101,13 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 throw new Error(`Function ${functionName} not found in resource ${resource.name}`);
             }
 
+            const target = { resourcePath: resource.path, resourceName: resource.name, functionName, parameters };
+            // Checked before the voucher, so a call this node can't make never signs one.
+            const chain = resourceFunction.restricted ? await this.grantService?.chainFor(url, target) : undefined;
+            if (resourceFunction.restricted && !chain) {
+                return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: it requires a grant from ${url}, and this node holds none that covers the call` } };
+            }
+
             let paymentVoucher: PaymentVoucher | undefined;
             if (resourceFunction.paymentManifest) {
                 console.log(`Resource function ${resource.name}.${functionName} has a payment manifest, creating payment voucher...`);
@@ -110,13 +120,14 @@ export class CombinationResourceInvoker implements ResourceInvoker {
 
             // The voucher is created once and reused on every attempt, so the operator's
             // requestId/invocationId check prevents a retried call from being settled twice.
-            const result = await fetchWithRetry(`${url}/v1/run/resource`, {
+            // The authorization is signed per attempt, since the provider refuses a reused nonce.
+            const result = await fetchWithRetry(`${url}/v1/run/resource`, () => ({
                 method: 'POST',
-                body: JSON.stringify(requestBody),
+                body: JSON.stringify(chain && this.grantService ? { ...requestBody, authorization: this.grantService.authorize(chain, target) } : requestBody),
                 headers: {
                     'Content-Type': 'application/json',
                 },
-            });
+            }));
 
             if (!result.ok) {
                 // The provider's JSON error is more useful than the status text, which can be empty.

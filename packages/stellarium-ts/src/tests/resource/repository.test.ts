@@ -34,6 +34,14 @@ describe("ResourceRepository", () => {
     });
 
     describe("learn", () => {
+        test("keeps which functions are restricted", async () => {
+            await repository.learn(resource("Vault", [{ name: "open", restricted: true }, { name: "peek" }]));
+
+            const functions = (await repository.getResource("com.provider.Vault"))?.functions as StellariumResourceFunction[];
+            expect(functions.map(fn => [fn.name, fn.restricted])).toEqual([["open", true], ["peek", undefined]]);
+            expect((await repository.getResourceFunction("com.provider", "Vault", "open"))?.restricted).toBe(true);
+        });
+
         test("is idempotent, so startup can run on every boot", async () => {
             const learned = resource("Forecast", [{ name: "tomorrow" }]);
 

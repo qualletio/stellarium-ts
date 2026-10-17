@@ -1,12 +1,15 @@
 import 'dotenv/config';
 import { FastifyInstance } from 'fastify';
 import { DEFAULT_DATABASE_PATH, openDatabase } from './db/db.js';
+import type { Capability, Grant } from './grant/grant.js';
+import type { ApproveGrant, GrantOptions } from './grant/service.js';
 import { StellariumResource } from './resource/repository.js';
 import routes, { RateLimitConfig } from './routes.js';
-import { createService, type NodeConfig } from './service.js';
+import { createService, type NodeConfig, type Service } from './service.js';
 import { StartupService } from './startup.js';
 
 export const DEFAULT_COST_LIMIT_LAMPORTS = 10_000;
+export const DEFAULT_GRANT_REFRESH_INTERVAL_MS = 1000 * 60 * 5;
 
 export interface StellariumNodeOptions {
     port?: number;
@@ -28,6 +31,15 @@ export interface StellariumNodeOptions {
     costLimitLamports?: number;
     /** SQLite file. Defaults to `./requestscript.db`; use ':memory:' for tests. */
     databasePath?: string;
+    /** Grant chains addressed to this node, stored at start. Each is root first. */
+    grants?: Grant[][];
+    /** How often held grants past half their lifetime are renewed. Defaults to 5 minutes. */
+    grantRefreshIntervalMs?: number;
+    /**
+     * Decides callers' requests for grants on this node's resources (`POST /v1/grants/request`).
+     * Without it, callers can only get grants from `issueGrant`.
+     */
+    approveGrant?: ApproveGrant;
 }
 
 function required(name: string, value: string | undefined): string {
@@ -61,6 +73,7 @@ export function resolveConfig(options: StellariumNodeOptions, resources: Stellar
 
 export class StellariumNode {
     private resources: StellariumResource[] = [];
+    private service?: Service;
 
     async register(resource: StellariumResource): Promise<void> {
         this.resources.push(resource);
@@ -75,7 +88,24 @@ export class StellariumNode {
         const db = await openDatabase(options.databasePath ?? DEFAULT_DATABASE_PATH);
         fastify.addHook('onClose', async () => db.close());
 
-        const service = createService(db, this.resources, config);
+        const service = createService(db, this.resources, config, { approveGrant: options.approveGrant });
+        for (const chain of options.grants ?? []) {
+            await service.grantService.add(chain);
+        }
+        this.service = service;
+
+        const refresher = setInterval(() => {
+            service.grantService.refreshDue().then(
+                ({ failed }) => {
+                    for (const { id, error } of failed) {
+                        fastify.log.warn(`Failed to renew grant ${id}: ${error}`);
+                    }
+                },
+                (error) => fastify.log.error(error, 'Failed to renew grants'),
+            );
+        }, options.grantRefreshIntervalMs ?? DEFAULT_GRANT_REFRESH_INTERVAL_MS);
+        refresher.unref();
+        fastify.addHook('onClose', async () => clearInterval(refresher));
 
         await fastify.register(routes, { prefix: '/v1', service, rateLimit: options.rateLimit });
 
@@ -86,5 +116,47 @@ export class StellariumNode {
             const startupService = new StartupService(fastify.log, service, options.startingPeer, config.baseUrl, config.publicKey, config.privateKey);
             await startupService.seedFromPeer();
         }
+    }
+
+    /** Issues a root grant for this node's resources. Hand the returned chain to the audience. */
+    async issueGrant(audience: string, capabilities: Capability[], options: GrantOptions): Promise<Grant[]> {
+        return this.started().grantService.issue(audience, capabilities, options);
+    }
+
+    /** Narrows a grant this node holds for another audience. Hand the returned chain to the audience. */
+    async delegateGrant(heldGrantId: string, audience: string, capabilities: Capability[], options: GrantOptions): Promise<Grant[]> {
+        return this.started().grantService.delegate(heldGrantId, audience, capabilities, options);
+    }
+
+    /** Asks another node for a grant on its resources, and stores it. Throws if refused. */
+    async requestGrant(providerBaseUrl: string, capabilities: Capability[], details?: Record<string, unknown>): Promise<Grant[]> {
+        return this.started().grantService.request(providerBaseUrl, capabilities, details);
+    }
+
+    /** Stores a grant chain addressed to this node. */
+    async addGrant(chain: Grant[]): Promise<void> {
+        return this.started().grantService.add(chain);
+    }
+
+    /** Refuses the grant, and every grant delegated from it, in calls to this node, and stops its renewal. */
+    async revokeGrant(grantId: string): Promise<void> {
+        return this.started().grantService.revoke(grantId);
+    }
+
+    /** Refuses this caller key in restricted calls, renewals, grant requests and paid calls. */
+    async blockCaller(publicKey: string, reason?: string): Promise<void> {
+        return this.started().grantService.block(publicKey, reason);
+    }
+
+    /** False when the key wasn't blocked. */
+    async unblockCaller(publicKey: string): Promise<boolean> {
+        return this.started().grantService.unblock(publicKey);
+    }
+
+    private started(): Service {
+        if (!this.service) {
+            throw new Error('StellariumNode.start must be called first');
+        }
+        return this.service;
     }
 }

@@ -20,7 +20,7 @@ describe("openDatabase", () => {
         await (await openDatabase(filename)).close();
         const db = await openDatabase(filename);
 
-        expect(await db.get("PRAGMA user_version")).toEqual({ user_version: 1 });
+        expect(await db.get("PRAGMA user_version")).toEqual({ user_version: 2 });
         await db.close();
     });
 
@@ -47,5 +47,27 @@ describe("openDatabase", () => {
             INSERT INTO resource (path, name, base_url, created_at, updated_at) VALUES ('com.p', 'B', 'http://p', 'now', 'now');
         `);
         await db.close();
+    });
+
+    test("adds the restricted column to a version 1 database and keeps held grants on later opens", async () => {
+        const filename = path.join(dir, "v1.db");
+        const old = await open({ filename, driver: sqlite3.Database });
+        await old.exec(`
+            CREATE TABLE resource_function (id INTEGER PRIMARY KEY AUTOINCREMENT, resource_id INTEGER NOT NULL, name TEXT NOT NULL,
+                return_type TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (resource_id, name));
+            PRAGMA user_version = 1;
+        `);
+        await old.close();
+
+        const db = await openDatabase(filename);
+        const columns = await db.all<{ name: string }[]>("PRAGMA table_info(resource_function)");
+        expect(columns.map(column => column.name)).toContain("restricted");
+        await db.run("INSERT INTO held_grant (id, root_issuer_base_url, chain, issued_at, expires_at, updated_at) VALUES ('g', 'http://p', '[]', 'now', 'now', 'now')");
+        await db.close();
+
+        // Grants are not a cache of anything a peer resends, so a reopen must not drop them.
+        const reopened = await openDatabase(filename);
+        expect(await reopened.all("SELECT id FROM held_grant")).toEqual([{ id: "g" }]);
+        await reopened.close();
     });
 });
