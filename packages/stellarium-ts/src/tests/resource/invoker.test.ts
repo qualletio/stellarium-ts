@@ -4,6 +4,8 @@ import { verifyData } from "../../crypto/utils.js";
 import { CombinationResourceInvoker, EXTERNAL_INVOKE_MAX_RETRIES, invocationHash, paymentVoucherPayload } from "../../resource/invoker.js";
 import type { ResourceRepository } from "../../resource/repository.js";
 import type { Resource } from "requestscript";
+import type { Grant, InvocationAuthorization } from "../../grant/grant.js";
+import type { GrantService } from "../../grant/service.js";
 
 function generateBase64KeyPair() {
     const { publicKey, privateKey } = generateKeyPairSync("ed25519", {
@@ -136,5 +138,61 @@ describe("external invoke retries", () => {
         expect(new Set(bodies).size).toBe(1);
         expect(JSON.parse(bodies[0]).paymentVoucher.requestId).toBeDefined();
         expect(JSON.parse(bodies[0]).paymentVoucher.invocationHash).toBe(invocationHash("com.example", "Weather", "forecast", parameters));
+    });
+});
+
+describe("restricted functions", () => {
+    const resource = { path: "com.example", name: "Weather", metadata: { baseUrl: "https://remote.example" }, functions: [] } as unknown as Resource;
+    const parameters = [{ name: "city", value: "Oslo" }];
+    const chain = [{ id: "grant" }] as unknown as Grant[];
+
+    function createInvoker(grantService: Partial<GrantService> | undefined, paymentManifest?: { costLamports: number; recipientAddress: string }) {
+        const { publicKey, privateKey } = generateBase64KeyPair();
+        const repository = { getResourceFunction: async () => ({ restricted: true, paymentManifest }) } as unknown as ResourceRepository;
+        return new CombinationResourceInvoker(repository, 100_000, publicKey, privateKey, grantService as GrantService | undefined);
+    }
+
+    let fetchMock: ReturnType<typeof vi.fn>;
+    beforeEach(() => {
+        vi.useFakeTimers();
+        fetchMock = vi.fn();
+        vi.stubGlobal("fetch", fetchMock);
+    });
+    afterEach(() => {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+    });
+
+    test("fails without a network call when no held grant covers the call", async () => {
+        const chainFor = vi.fn(async () => undefined);
+
+        const result = await createInvoker({ chainFor }).invoke(resource, "forecast", parameters);
+
+        expect(chainFor).toHaveBeenCalledWith("https://remote.example", { resourcePath: "com.example", resourceName: "Weather", functionName: "forecast", parameters });
+        expect(result).toEqual({ value: null, error: { message: expect.stringContaining("requires a grant from https://remote.example") } });
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test("fails without a network call when the node has no grant service", async () => {
+        const result = await createInvoker(undefined).invoke(resource, "forecast", parameters);
+
+        expect(result.error).not.toBeNull();
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test("signs a new authorization per attempt and keeps the voucher", async () => {
+        fetchMock.mockResolvedValueOnce(new Response(null, { status: 503 })).mockResolvedValueOnce(new Response(JSON.stringify({ value: 42, error: null }), { status: 200 }));
+        let nonce = 0;
+        const authorize = vi.fn(() => ({ nonce: `nonce-${nonce++}` }) as unknown as InvocationAuthorization);
+
+        const invoker = createInvoker({ chainFor: async () => chain, authorize }, { costLamports: 10000, recipientAddress: "4HkmXgXCJ8tw1ih5VFHetRt4kWdo1VLBVmV7B5p6ctK2" });
+        const pending = invoker.invoke(resource, "forecast", parameters);
+        await vi.runAllTimersAsync();
+
+        await expect(pending).resolves.toEqual({ value: 42, error: null });
+        const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body));
+        expect(bodies.map(body => body.authorization.nonce)).toEqual(["nonce-0", "nonce-1"]);
+        expect(bodies[0].paymentVoucher).toEqual(bodies[1].paymentVoucher);
+        expect(authorize).toHaveBeenCalledWith(chain, { resourcePath: "com.example", resourceName: "Weather", functionName: "forecast", parameters });
     });
 });

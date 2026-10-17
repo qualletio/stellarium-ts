@@ -41,6 +41,15 @@ export function isFreshExpiry(expiry: string, maxLifetimeMs: number = MAX_SIGNAT
     return Number.isFinite(expiresAt) && expiresAt > now && expiresAt <= now + maxLifetimeMs;
 }
 
+/** True when `publicKey` is an Ed25519 SPKI DER key in base64url, the form nodes sign with. */
+export function isValidPublicKey(publicKey: string): boolean {
+    try {
+        return createPublicKey({ key: Buffer.from(publicKey, "base64url"), format: "der", type: "spki" }).asymmetricKeyType === "ed25519";
+    } catch {
+        return false;
+    }
+}
+
 /** verifyData that treats a malformed key or signature as an invalid signature instead of throwing. */
 export function safeVerifyData(data: Object, publicKey: string, signature: string): boolean {
     try {

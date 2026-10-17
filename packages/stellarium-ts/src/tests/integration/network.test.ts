@@ -7,7 +7,24 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { verifyData } from "../../crypto/utils.js";
 import { type PaymentVoucher, paymentVoucherPayload } from "../../resource/invoker.js";
 import { StellariumNode, type StellariumNodeOptions } from "../../server.js";
+import type { StellariumResource } from "../../resource/repository.js";
 import { COST, generateBase64KeyPair, RECIPIENT, temperatureSource, weatherResource } from "../helpers.js";
+
+/** A free function only callers with a grant from the provider may run. */
+function vaultResource(baseUrl: string): StellariumResource {
+    return {
+        id: 2,
+        baseUrl,
+        metadata: {},
+        path: "com.example",
+        name: "Vault",
+        functions: [{ name: "open", parameters: [{ name: "city", type: "string" }], returnType: "int32", exec: async () => 7, restricted: true }],
+    };
+}
+
+const vaultSource = 'request OpenVault {\n  const vault: com.example.Vault\n\n  return vault.open(city: "Oslo")\n}';
+const vault = { resourcePath: "com.example", resourceName: "Vault" };
+const HOUR = 3_600_000;
 
 function freePort(): Promise<number> {
     return new Promise((resolve, reject) => {
@@ -31,6 +48,7 @@ describe("two-node network", () => {
     let dir: string;
     let operatorUrl: string;
     let providerUrl: string;
+    let provider: StellariumNode;
 
     async function startNode(node: StellariumNode, options: StellariumNodeOptions & { port: number }) {
         const fastify = Fastify();
@@ -41,7 +59,8 @@ describe("two-node network", () => {
 
     async function startCaller(options: Partial<StellariumNodeOptions> = {}) {
         const port = await freePort();
-        const fastify = await startNode(new StellariumNode(), {
+        const node = new StellariumNode();
+        const fastify = await startNode(node, {
             port,
             startingPeer: providerUrl,
             ...callerKeys,
@@ -49,13 +68,13 @@ describe("two-node network", () => {
             databasePath: path.join(dir, "caller.db"),
             ...options,
         });
-        return { fastify, url: `http://127.0.0.1:${port}` };
+        return { node, fastify, url: `http://127.0.0.1:${port}` };
     }
 
-    const run = (url: string) => fetch(`${url}/v1/run`, {
+    const run = (url: string, source = temperatureSource) => fetch(`${url}/v1/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer caller-key" },
-        body: JSON.stringify({ source: temperatureSource }),
+        body: JSON.stringify({ source }),
     }).then(response => response.json() as Promise<any>);
 
     const getJson = (url: string) => fetch(url).then(response => response.json() as Promise<any>);
@@ -74,9 +93,17 @@ describe("two-node network", () => {
 
         const providerPort = await freePort();
         providerUrl = `http://127.0.0.1:${providerPort}`;
-        const provider = new StellariumNode();
+        provider = new StellariumNode();
         await provider.register(weatherResource(providerUrl));
-        await startNode(provider, { port: providerPort, ...generateBase64KeyPair(), operatorUrl, databasePath: ":memory:" });
+        await provider.register(vaultResource(providerUrl));
+        await startNode(provider, {
+            port: providerPort,
+            ...generateBase64KeyPair(),
+            operatorUrl,
+            databasePath: ":memory:",
+            apiKey: "provider-admin",
+            approveGrant: ({ details }) => details?.invite === "letmein" ? { lifetimeMs: HOUR } : undefined,
+        });
     });
 
     afterEach(async () => {
@@ -113,6 +140,83 @@ describe("two-node network", () => {
         const second = await startCaller();
 
         expect(await run(second.url)).toEqual({ returnValue: { value: 12, error: null } });
+    });
+
+    describe("restricted functions", () => {
+        test("the caller needs a grant from the provider, then calls with it", async () => {
+            const caller = await startCaller();
+
+            const refused = await run(caller.url, vaultSource);
+            expect(refused.returnValue.error.message).toContain(`requires a grant from ${providerUrl}`);
+
+            await caller.node.addGrant(await provider.issueGrant(callerKeys.publicKey, [vault], { lifetimeMs: HOUR }));
+
+            expect(await run(caller.url, vaultSource)).toEqual({ returnValue: { value: 7, error: null } });
+        });
+
+        test("the caller asks the provider for a grant, then calls with it", async () => {
+            const caller = await startCaller();
+
+            await expect(caller.node.requestGrant(providerUrl, [vault], { invite: "wrong" })).rejects.toThrow("Grant request refused");
+            await caller.node.requestGrant(providerUrl, [vault], { invite: "letmein" });
+
+            expect(await run(caller.url, vaultSource)).toEqual({ returnValue: { value: 7, error: null } });
+        });
+
+        test("the provider's admin blocks a caller over HTTP, then unblocks it", async () => {
+            const caller = await startCaller();
+            await caller.node.requestGrant(providerUrl, [vault], { invite: "letmein" });
+            const adminRequest = (method: string) => fetch(`${providerUrl}/v1/admin/blocked-callers/${callerKeys.publicKey}`, {
+                method,
+                // Fastify refuses a JSON content type with an empty body, so the DELETE sends neither.
+                headers: method === "PUT" ? { "Content-Type": "application/json", Authorization: "Bearer provider-admin" } : { Authorization: "Bearer provider-admin" },
+                body: method === "PUT" ? JSON.stringify({ reason: "abuse" }) : undefined,
+            });
+
+            expect((await adminRequest("PUT")).status).toBe(200);
+            const refused = await run(caller.url, vaultSource);
+            expect(refused.returnValue.error.message).toContain("Invalid authorization");
+            await expect(caller.node.requestGrant(providerUrl, [vault], { invite: "letmein" })).rejects.toThrow("refused");
+
+            expect((await adminRequest("DELETE")).status).toBe(200);
+            expect(await run(caller.url, vaultSource)).toEqual({ returnValue: { value: 7, error: null } });
+        });
+
+        test("grants passed at start are loaded, and revocation at the provider cuts them off", async () => {
+            const chain = await provider.issueGrant(callerKeys.publicKey, [vault], { lifetimeMs: HOUR });
+            const caller = await startCaller({ grants: [chain] });
+            expect(await run(caller.url, vaultSource)).toEqual({ returnValue: { value: 7, error: null } });
+
+            await provider.revokeGrant(chain[0].id);
+
+            const refused = await run(caller.url, vaultSource);
+            expect(refused.returnValue.error.message).toContain("Invalid authorization");
+        });
+
+        test("a third node calls through a grant the caller delegated to it", async () => {
+            const caller = await startCaller();
+            const [root] = await provider.issueGrant(callerKeys.publicKey, [{ resourcePath: "com.example.*" }], { lifetimeMs: HOUR });
+            await caller.node.addGrant([root]);
+
+            const userKeys = generateBase64KeyPair();
+            const user = await startCaller({ ...userKeys, databasePath: path.join(dir, "user.db") });
+            await user.node.addGrant(await caller.node.delegateGrant(root.id, userKeys.publicKey, [vault], { lifetimeMs: HOUR }));
+
+            expect(await run(user.url, vaultSource)).toEqual({ returnValue: { value: 7, error: null } });
+        });
+
+        test("the refresher renews a grant past half its lifetime", async () => {
+            const fetchSpy = vi.spyOn(globalThis, "fetch");
+            const chain = await provider.issueGrant(callerKeys.publicKey, [vault], { lifetimeMs: 400 });
+            const caller = await startCaller({ grants: [chain], grantRefreshIntervalMs: 50 });
+
+            await vi.waitFor(() => expect(fetchSpy.mock.calls.some(([url]) => String(url) === `${providerUrl}/v1/grants/renew`)).toBe(true), { timeout: 2000 });
+            fetchSpy.mockRestore();
+
+            // Well past the first copy's expiry, the renewed one still works.
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            expect(await run(caller.url, vaultSource)).toEqual({ returnValue: { value: 7, error: null } });
+        });
     });
 
     test("the caller refuses a call that costs more than its limit", async () => {

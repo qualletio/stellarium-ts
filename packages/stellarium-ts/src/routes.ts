@@ -1,12 +1,14 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import rateLimit from '@fastify/rate-limit';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { interpretParsed, parseScript } from 'requestscript';
 import { Peer } from './peer/repository.js';
 import { invocationHash, PaymentVoucher, paymentVoucherPayload } from './resource/invoker.js';
 import { StellariumResource, StellariumResourceFunction, StellariumResourceFunctionPaymentManifest } from './resource/repository.js';
 import type { Service } from './service.js';
 import { safeVerifyData } from './crypto/utils.js';
+import type { Grant, GrantRenewalRequest, GrantRequest } from './grant/grant.js';
+import { InvalidPublicKeyError } from './grant/service.js';
 
 export interface RateLimitConfig {
     max: number;
@@ -42,6 +44,8 @@ interface ResourceRunRequest {
     functionName: string;
     parameters: ResourceRequestFunctionCallParameter[];
     paymentVoucher?: PaymentVoucher;
+    /** An `InvocationAuthorization`, checked by `GrantService.verifyInvocation`. */
+    authorization?: unknown;
 }
 
 interface RunRequest {
@@ -77,6 +81,13 @@ const pageQuerySchema = {
     properties: {
         offset: { type: 'integer', minimum: 0, default: 0 },
         limit: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE, default: DEFAULT_PAGE_SIZE },
+    },
+} as const;
+
+const revokeQuerySchema = {
+    type: 'object',
+    properties: {
+        issuer: { type: 'string', minLength: 1 },
     },
 } as const;
 
@@ -123,6 +134,28 @@ const resourceRunRequestSchema = {
                 publicKey: { type: 'string' },
             },
         },
+        // Shape only: the grants inside are signed, so coercing them would change the signed bytes.
+        authorization: { type: 'object' },
+    },
+} as const;
+
+const grantRenewalRequestSchema = {
+    type: 'object',
+    required: ['grantId', 'publicKey', 'nonce', 'expiresAt', 'signature'],
+    properties: { grantId: nonEmptyString, publicKey: nonEmptyString, nonce: nonEmptyString, expiresAt: nonEmptyString, signature: nonEmptyString },
+} as const;
+
+// Capabilities and details are signed, so only their outer types are checked here.
+const grantRequestSchema = {
+    type: 'object',
+    required: ['publicKey', 'capabilities', 'nonce', 'expiresAt', 'signature'],
+    properties: {
+        publicKey: nonEmptyString,
+        capabilities: { type: 'array', minItems: 1 },
+        details: { type: ['object', 'null'] },
+        nonce: nonEmptyString,
+        expiresAt: nonEmptyString,
+        signature: nonEmptyString,
     },
 } as const;
 
@@ -163,6 +196,21 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
 
     // Rate limiting is opt-in per route via `config.rateLimit`.
     await fastify.register(rateLimit, { global: false });
+
+    /** Requires `Authorization: Bearer <API_KEY>`. Used by the routes only this node's operator may call. */
+    const requireApiKey = async (request: FastifyRequest, reply: FastifyReply) => {
+        // Check that the API Key matches the configured key
+        const authorizationHeader = request.headers['authorization'];
+        if (!authorizationHeader) {
+            return reply.status(401).send({ error: 'Authorization header is required' });
+        }
+        const apiKey = authorizationHeader.split(' ')[1];
+        // An unset API key must not match a header with no token.
+        const expectedApiKey = options.service.config.apiKey;
+        if (!expectedApiKey || !apiKey || !secretsEqual(apiKey, expectedApiKey)) {
+            return reply.status(401).send({ error: 'Invalid API Key' });
+        }
+    };
 
     // Start Meta Routes
 
@@ -210,6 +258,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
                         costLamports: fn.paymentManifest.costLamports,
                         recipientAddress: fn.paymentManifest.recipientAddress,
                     }) : undefined,
+                    restricted: fn.restricted || undefined,
                 })),
                 baseUrl: resource.baseUrl,
             })),
@@ -242,19 +291,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     // Start Run Routes
 
     // Authenticate before body validation, so unauthenticated callers learn nothing about the schema.
-    fastify.post('/run', { schema: { body: runRequestSchema }, preValidation: async (request, reply) => {
-        // Check that the API Key matches the configured key
-        const authorizationHeader = request.headers['authorization'];
-        if (!authorizationHeader) {
-            return reply.status(401).send({ error: 'Authorization header is required' });
-        }
-        const apiKey = authorizationHeader.split(' ')[1];
-        // An unset API key must not match a header with no token.
-        const expectedApiKey = options.service.config.apiKey;
-        if (!expectedApiKey || !apiKey || !secretsEqual(apiKey, expectedApiKey)) {
-            return reply.status(401).send({ error: 'Invalid API Key' });
-        }
-    } }, async (request, reply) => {
+    fastify.post('/run', { schema: { body: runRequestSchema }, preValidation: requireApiKey }, async (request, reply) => {
         const runRequest = request.body as RunRequest;
 
         let script: ReturnType<typeof parseScript>;
@@ -299,6 +336,28 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             return reply.status(400).send({ error: 'Function not found' });
         }
 
+        // Grant constraints and the function both read parameters by name, so each name must be
+        // declared and appear once. Otherwise a duplicate or extra parameter could pass a
+        // constraint check with one value and reach the function with another.
+        const declared = new Set(resourceFunction.parameters.map(parameter => parameter.name));
+        const names = resourceRequest.parameters.map(parameter => parameter.name);
+        if (new Set(names).size !== names.length || !names.every(name => declared.has(name))) {
+            return reply.status(400).send({ error: 'Parameters must be declared by the function and appear once each' });
+        }
+
+        // A restricted function is never run without a grant from this node. Checked before the
+        // voucher, so an unauthorized caller never gets near settlement.
+        if (resourceFunction.restricted) {
+            // Tells a caller without a usable grant where it can ask for one.
+            const grantEndpoint = options.service.grantService.acceptsRequests ? `${options.service.config.baseUrl}/v1/grants/request` : undefined;
+            if (!resourceRequest.authorization) {
+                return reply.status(403).send({ error: 'Authorization is required', grantEndpoint });
+            }
+            if (!await options.service.grantService.verifyInvocation(resourceRequest.authorization, resourceRequest)) {
+                return reply.status(403).send({ error: 'Invalid authorization', grantEndpoint });
+            }
+        }
+
         // Payment manifests are per function. A paid function is never run without a valid voucher.
         const paymentManifest = resourceFunction.paymentManifest;
         if (paymentManifest) {
@@ -307,6 +366,9 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             }
             if (!isValidPaymentVoucher(paymentVoucher, paymentManifest, resourceRequest)) {
                 return reply.status(400).send({ error: 'Invalid payment voucher' });
+            }
+            if (await options.service.grantService.isBlocked(paymentVoucher.publicKey)) {
+                return reply.status(403).send({ error: 'Caller is blocked' });
             }
         }
 
@@ -329,6 +391,93 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     });
 
     // End Run Routes
+
+    // Start Grant Routes
+
+    /** Issues a root grant to the request's signer, if the node's approval hook allows it. */
+    fastify.post('/grants/request', {
+        schema: { body: grantRequestSchema },
+        config: { rateLimit: options.rateLimit ?? { max: 100, timeWindow: '1 minute' } },
+    }, async (request, reply) => {
+        if (!options.service.grantService.acceptsRequests) {
+            return reply.status(403).send({ error: 'This node does not issue grants on request' });
+        }
+        let grants: Grant[] | undefined;
+        try {
+            grants = await options.service.grantService.handleRequest(request.body as GrantRequest);
+        } catch (error) {
+            // An approval hook that throws or returns an invalid approval is this node's fault, not the requester's.
+            fastify.log.error(error, 'Failed to decide grant request');
+            return reply.status(500).send({ error: 'Internal server error' });
+        }
+        if (!grants) {
+            return reply.status(403).send({ error: 'Grant request refused' });
+        }
+        return { grants };
+    });
+
+    /** Re-issues a grant this node issued to the grant's audience, with a new expiry. */
+    fastify.post('/grants/renew', {
+        schema: { body: grantRenewalRequestSchema },
+        config: { rateLimit: options.rateLimit ?? { max: 100, timeWindow: '1 minute' } },
+    }, async (request, reply) => {
+        const grants = await options.service.grantService.renew(request.body as GrantRenewalRequest);
+        if (!grants) {
+            return reply.status(403).send({ error: 'Grant renewal refused' });
+        }
+        return { grants };
+    });
+
+    // End Grant Routes
+
+    // Start Admin Routes
+    // Authenticated before validation, like /run, so unauthenticated callers learn nothing about the schema.
+
+    /**
+     * Revokes a grant: this node refuses it in any chain, with everything delegated from it, and
+     * stops renewing it. Without `?issuer=`, the grant is one this node issued. With it, the grant
+     * may be one delegated further down a chain, so it can be cut off too.
+     */
+    fastify.put('/admin/revoked-grants/:grantId', { preValidation: requireApiKey, schema: { querystring: revokeQuerySchema } }, async (request) => {
+        const { grantId } = request.params as { grantId: string };
+        const { issuer } = request.query as { issuer?: string };
+        await options.service.grantService.revoke(issuer === undefined ? grantId : { issuer, id: grantId });
+        return { success: true };
+    });
+
+    fastify.get('/admin/blocked-callers', { preValidation: requireApiKey, schema: { querystring: pageQuerySchema } }, async (request) => {
+        const { items: callers, nextOffset } = await getPage(request.query as PageQuery, (offset, limit) => options.service.grantService.getBlocked(offset, limit));
+        return { callers, nextOffset };
+    });
+
+    /** Blocks a caller key, with an optional `{ "reason" }` body. Unrestricted free functions stay open to it, since their callers are anonymous. */
+    fastify.put('/admin/blocked-callers/:publicKey', { preValidation: requireApiKey }, async (request, reply) => {
+        const { publicKey } = request.params as { publicKey: string };
+        // The body is optional, so it is checked here rather than by a schema that would require one.
+        const reason = (request.body as { reason?: unknown } | undefined)?.reason;
+        if (reason !== undefined && typeof reason !== 'string') {
+            return reply.status(400).send({ error: 'reason must be a string' });
+        }
+        try {
+            await options.service.grantService.block(publicKey, reason);
+        } catch (error) {
+            if (error instanceof InvalidPublicKeyError) {
+                return reply.status(400).send({ error: error.message });
+            }
+            throw error;
+        }
+        return { success: true };
+    });
+
+    fastify.delete('/admin/blocked-callers/:publicKey', { preValidation: requireApiKey }, async (request, reply) => {
+        const { publicKey } = request.params as { publicKey: string };
+        if (!await options.service.grantService.unblock(publicKey)) {
+            return reply.status(404).send({ error: 'Caller is not blocked' });
+        }
+        return { success: true };
+    });
+
+    // End Admin Routes
 };
 
 // ESM

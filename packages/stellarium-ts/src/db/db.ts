@@ -6,8 +6,9 @@ export const DEFAULT_DATABASE_PATH = './requestscript.db';
 /**
  * Bumped whenever the schema changes in a way `CREATE TABLE IF NOT EXISTS` can't apply.
  * Version 1 dropped `UNIQUE (base_url)` from `resource` and added uniqueness to the function tables.
+ * Version 2 added `resource_function.restricted`.
  */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 /** Opens (or creates) the node database and brings its schema up to date. Pass ':memory:' for tests. */
 export async function openDatabase(filename: string = DEFAULT_DATABASE_PATH): Promise<Database> {
@@ -62,6 +63,7 @@ export async function createTables(db: Database) {
             resource_id INTEGER NOT NULL,
             name TEXT NOT NULL,
             return_type TEXT NOT NULL,
+            restricted INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
 
@@ -94,6 +96,57 @@ export async function createTables(db: Database) {
             FOREIGN KEY (resource_function_id) REFERENCES resource_function(id),
 
             UNIQUE (resource_function_id)
+        );
+
+        -- Grants this node signed, kept so their audience can renew them.
+        -- A delegated grant's parent_grant_issuer and parent_grant_id name the held grant it narrows.
+        CREATE TABLE IF NOT EXISTS issued_grant (
+            id TEXT PRIMARY KEY,
+            audience TEXT NOT NULL,
+            capabilities TEXT NOT NULL,
+            parent_grant_issuer TEXT,
+            parent_grant_id TEXT,
+            lifetime_ms INTEGER NOT NULL,
+            renewable_until TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        -- Chains whose leaf grant names this node as its audience, keyed by the leaf's issuer and id.
+        -- Issuers choose their own ids, so an id alone doesn't identify a grant.
+        CREATE TABLE IF NOT EXISTS held_grant (
+            issuer TEXT NOT NULL,
+            id TEXT NOT NULL,
+            root_issuer_base_url TEXT NOT NULL,
+            chain TEXT NOT NULL,
+            issued_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+
+            PRIMARY KEY (issuer, id)
+        );
+        CREATE INDEX IF NOT EXISTS held_grant_root ON held_grant (root_issuer_base_url, expires_at);
+
+        -- Keyed like held grants, so revoking one issuer's grant leaves another's with the same id alone.
+        CREATE TABLE IF NOT EXISTS revoked_grant (
+            issuer TEXT NOT NULL,
+            grant_id TEXT NOT NULL,
+            revoked_at TEXT NOT NULL,
+
+            PRIMARY KEY (issuer, grant_id)
+        );
+
+        -- publicKey:nonce of accepted authorizations and grant requests, until they expire.
+        CREATE TABLE IF NOT EXISTS seen_nonce (
+            key TEXT PRIMARY KEY,
+            expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS seen_nonce_expires_at ON seen_nonce (expires_at);
+
+        -- Keys an admin blocked from calling this node or getting grants from it.
+        CREATE TABLE IF NOT EXISTS blocked_caller (
+            public_key TEXT PRIMARY KEY,
+            reason TEXT,
+            blocked_at TEXT NOT NULL
         );
     `);
 

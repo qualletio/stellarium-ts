@@ -12,6 +12,8 @@ export interface StellariumResourceFunctionPaymentManifest {
 export interface StellariumResourceFunction extends ResourceFunction {
     id?: number;
     paymentManifest?: StellariumResourceFunctionPaymentManifest;
+    /** Callers need a grant from the hosting node. Announced to peers so callers can tell. */
+    restricted?: boolean;
 }
 
 export interface StellariumResource extends Resource {
@@ -149,8 +151,8 @@ export class ResourceRepository {
         const createdAt = new Date().toISOString();
         for (const fn of functions) {
             const functionResult = await this.db.run(
-                'INSERT INTO resource_function (resource_id, name, return_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-                [resourceId, fn.name, fn.returnType, createdAt, createdAt]
+                'INSERT INTO resource_function (resource_id, name, return_type, restricted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+                [resourceId, fn.name, fn.returnType, fn.restricted === true ? 1 : 0, createdAt, createdAt]
             );
 
             const functionId = functionResult.lastID;
@@ -252,6 +254,7 @@ export class ResourceRepository {
             parameters: await this.getResourceParameters(fn.id),
             exec: async () => undefined,
             paymentManifest: await this.getResourceFunctionPaymentManifest(fn.id),
+            restricted: fn.restricted === 1 || undefined,
         };
     }
 
@@ -264,6 +267,7 @@ export class ResourceRepository {
             parameters: await this.getResourceParameters(f.id),
             exec: async () => undefined,
             paymentManifest: await this.getResourceFunctionPaymentManifest(f.id),
+            restricted: f.restricted === 1 || undefined,
         })));
     }
 

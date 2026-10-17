@@ -3,6 +3,9 @@ import type { Database } from "sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { signData } from "../crypto/utils.js";
 import { openDatabase } from "../db/db.js";
+import { type Grant, grantRenewalPayload, grantRequestPayload } from "../grant/grant.js";
+import { GrantRepository } from "../grant/repository.js";
+import { GrantService } from "../grant/service.js";
 import { type Peer, peerAnnouncementPayload } from "../peer/repository.js";
 import { CombinationResourceInvoker, type PaymentVoucher, paymentVoucherPayload } from "../resource/invoker.js";
 import { resourceAnnouncementPayload, type StellariumResource } from "../resource/repository.js";
@@ -72,6 +75,17 @@ describe("routes", () => {
             expect(response.json()).toEqual({ value: 12, error: null });
             await flushSettlement();
             expect(settlePayment).toHaveBeenCalledExactlyOnceWith({ voucher: paymentVoucher });
+        });
+
+        test("refuses a voucher from a blocked caller, even for an unrestricted function", async () => {
+            await service.grantService.block(caller.publicKey);
+
+            const response = await runResource({ paymentVoucher: voucherFor() });
+
+            expect(response.statusCode).toBe(403);
+            expect(response.json()).toEqual({ error: "Caller is blocked" });
+            await flushSettlement();
+            expect(settlePayment).not.toHaveBeenCalled();
         });
 
         test("accepts a voucher that pays more than the cost", async () => {
@@ -431,6 +445,267 @@ describe("routes", () => {
         ])("rejects %s", async (_, query) => {
             expect((await get(`/v1/peers?${query}`)).statusCode).toBe(400);
             expect((await get(`/v1/resources?${query}`)).statusCode).toBe(400);
+        });
+    });
+});
+
+describe("restricted functions", () => {
+    const caller = generateBase64KeyPair();
+    const callerInvoker = new CombinationResourceInvoker(undefined as never, 100_000, caller.publicKey, caller.privateKey);
+    const restricted: StellariumResource = {
+        id: 1,
+        baseUrl: "http://127.0.0.1:3002",
+        metadata: {},
+        path: "com.example",
+        name: "Vault",
+        functions: [
+            { name: "open", parameters: [{ name: "city", type: "string" }], returnType: "int32", exec: async () => 7, restricted: true },
+            { name: "premium", parameters: [{ name: "city", type: "string" }], returnType: "int32", exec: async () => 9, restricted: true, paymentManifest: { costLamports: COST, recipientAddress: RECIPIENT } },
+        ],
+    };
+    const call = (functionName: string) => ({ resourcePath: "com.example", resourceName: "Vault", functionName, parameters });
+
+    let db: Database;
+    let service: Service;
+    let callerGrants: GrantService;
+    let callerDb: Database;
+    let fastify: FastifyInstance;
+    let grant: Grant[];
+
+    beforeEach(async () => {
+        db = await openDatabase(":memory:");
+        service = createService(db, [restricted], testConfig());
+        vi.spyOn(service.operatorClient, "settlePayment").mockResolvedValue(undefined);
+        callerDb = await openDatabase(":memory:");
+        callerGrants = new GrantService(new GrantRepository(callerDb), { baseUrl: "http://caller", ...caller });
+        grant = await service.grantService.issue(caller.publicKey, [{ resourcePath: "com.example", resourceName: "Vault" }], { lifetimeMs: 3_600_000 });
+
+        fastify = Fastify();
+        await fastify.register(routes, { prefix: "/v1", service });
+        await fastify.ready();
+    });
+
+    afterEach(async () => {
+        await fastify.close();
+        await db.close();
+        await callerDb.close();
+        vi.restoreAllMocks();
+    });
+
+    const runResource = (body: Record<string, unknown>) => fastify.inject({ method: "POST", url: "/v1/run/resource", payload: body });
+
+    test("is announced as restricted", async () => {
+        const response = await fastify.inject({ method: "GET", url: "/v1/resources" });
+
+        expect(response.json().resources[0].functions).toEqual([
+            expect.objectContaining({ name: "open", restricted: true }),
+            expect.objectContaining({ name: "premium", restricted: true }),
+        ]);
+    });
+
+    test("requires an authorization, with no grant endpoint when the node takes no requests", async () => {
+        const response = await runResource(call("open"));
+
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toEqual({ error: "Authorization is required" });
+    });
+
+    test("refuses grant requests when the node has no approval hook", async () => {
+        const response = await fastify.inject({ method: "POST", url: "/v1/grants/request", payload: { publicKey: caller.publicKey, capabilities: [{ resourcePath: "*" }], nonce: "n", expiresAt: inMinutes(1), signature: "s" } });
+
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toEqual({ error: "This node does not issue grants on request" });
+    });
+
+    describe("with an approval hook", () => {
+        const vaultCapability = { resourcePath: "com.example", resourceName: "Vault" };
+
+        beforeEach(async () => {
+            await fastify.close();
+            await db.close();
+            db = await openDatabase(":memory:");
+            service = createService(db, [restricted], testConfig(), {
+                approveGrant: ({ details }) => details?.invite === "letmein" ? { lifetimeMs: 3_600_000 } : undefined,
+            });
+            fastify = Fastify();
+            await fastify.register(routes, { prefix: "/v1", service });
+            await fastify.ready();
+        });
+
+        function grantRequest(details: Record<string, unknown> | null) {
+            const unsigned = { publicKey: caller.publicKey, capabilities: [vaultCapability], details, nonce: crypto.randomUUID(), expiresAt: inMinutes(1) };
+            return { ...unsigned, signature: signData(grantRequestPayload(unsigned), caller.privateKey) };
+        }
+
+        test("points a caller without a usable grant at the request route", async () => {
+            const missing = await runResource(call("open"));
+            expect(missing.json()).toEqual({ error: "Authorization is required", grantEndpoint: "http://127.0.0.1:3002/v1/grants/request" });
+
+            const invalid = await runResource({ ...call("open"), authorization: { grants: [] } });
+            expect(invalid.json()).toEqual({ error: "Invalid authorization", grantEndpoint: "http://127.0.0.1:3002/v1/grants/request" });
+        });
+
+        test("issues an approved grant that then authorizes calls", async () => {
+            const response = await fastify.inject({ method: "POST", url: "/v1/grants/request", payload: grantRequest({ invite: "letmein" }) });
+
+            expect(response.statusCode).toBe(200);
+            const { grants } = response.json() as { grants: Grant[] };
+            expect(grants).toEqual([expect.objectContaining({ audience: caller.publicKey, capabilities: [vaultCapability] })]);
+
+            const run = await runResource({ ...call("open"), authorization: callerGrants.authorize(grants, call("open")) });
+            expect(run.json()).toEqual({ value: 7, error: null });
+        });
+
+        test("refuses a request the hook declines", async () => {
+            const response = await fastify.inject({ method: "POST", url: "/v1/grants/request", payload: grantRequest({ invite: "wrong" }) });
+
+            expect(response.statusCode).toBe(403);
+            expect(response.json()).toEqual({ error: "Grant request refused" });
+        });
+
+        test("answers 500 when the approval hook returns an invalid approval", async () => {
+            await fastify.close();
+            await db.close();
+            db = await openDatabase(":memory:");
+            service = createService(db, [restricted], testConfig(), { approveGrant: () => ({ lifetimeMs: -1 }) });
+            fastify = Fastify();
+            await fastify.register(routes, { prefix: "/v1", service });
+            await fastify.ready();
+
+            const response = await fastify.inject({ method: "POST", url: "/v1/grants/request", payload: grantRequest(null) });
+            expect(response.statusCode).toBe(500);
+            expect(response.json()).toEqual({ error: "Internal server error" });
+        });
+
+        test("rejects a request with missing fields or no capabilities", async () => {
+            const { capabilities: _, ...withoutCapabilities } = grantRequest(null);
+            expect((await fastify.inject({ method: "POST", url: "/v1/grants/request", payload: withoutCapabilities })).statusCode).toBe(400);
+            expect((await fastify.inject({ method: "POST", url: "/v1/grants/request", payload: { ...grantRequest(null), capabilities: [] } })).statusCode).toBe(400);
+        });
+    });
+
+    test("runs with a valid authorization and refuses it a second time", async () => {
+        const body = { ...call("open"), authorization: callerGrants.authorize(grant, call("open")) };
+
+        const first = await runResource(body);
+        expect(first.statusCode).toBe(200);
+        expect(first.json()).toEqual({ value: 7, error: null });
+
+        const replay = await runResource(body);
+        expect(replay.statusCode).toBe(403);
+        expect(replay.json()).toEqual({ error: "Invalid authorization" });
+    });
+
+    test("refuses an authorization signed for another call", async () => {
+        const response = await runResource({ ...call("open"), parameters: [{ name: "city", value: "Paris" }], authorization: callerGrants.authorize(grant, call("open")) });
+
+        expect(response.statusCode).toBe(403);
+    });
+
+    test("refuses duplicate or undeclared parameters before checking the grant", async () => {
+        const constrained = await service.grantService.issue(caller.publicKey, [{ resourcePath: "com.example", resourceName: "Vault", constraints: { city: "Oslo" } }], { lifetimeMs: 3_600_000 });
+        for (const extra of [[{ name: "city", value: "Oslo" }, { name: "city", value: "Paris" }], [{ name: "other", value: 1 }, { name: "city", value: "Oslo" }]]) {
+            const smuggled = { ...call("open"), parameters: extra };
+            const response = await runResource({ ...smuggled, authorization: callerGrants.authorize(constrained, smuggled) });
+            expect(response.statusCode).toBe(400);
+        }
+    });
+
+    test("refuses a malformed authorization", async () => {
+        const response = await runResource({ ...call("open"), authorization: { grants: "none" } });
+
+        expect(response.statusCode).toBe(403);
+    });
+
+    test("checks the authorization before the voucher, and needs both for a paid function", async () => {
+        const paymentVoucher = callerInvoker.createPaymentVoucher(RECIPIENT, COST, "com.example", "Vault", "premium", parameters);
+        const unauthorized = await runResource({ ...call("premium"), paymentVoucher });
+        expect(unauthorized.statusCode).toBe(403);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(service.operatorClient.settlePayment).not.toHaveBeenCalled();
+
+        const unpaid = await runResource({ ...call("premium"), authorization: callerGrants.authorize(grant, call("premium")) });
+        expect(unpaid.statusCode).toBe(402);
+
+        const paid = await runResource({ ...call("premium"), paymentVoucher, authorization: callerGrants.authorize(grant, call("premium")) });
+        expect(paid.statusCode).toBe(200);
+        expect(paid.json()).toEqual({ value: 9, error: null });
+    });
+
+    describe("admin routes", () => {
+        const admin = (method: "GET" | "PUT" | "DELETE", url: string, payload?: Record<string, unknown>, token = "secret") =>
+            fastify.inject({ method, url, payload, headers: { authorization: `Bearer ${token}` } });
+
+        test.each([
+            ["PUT", "/v1/admin/revoked-grants/some-id"],
+            ["GET", "/v1/admin/blocked-callers"],
+            ["PUT", `/v1/admin/blocked-callers/${caller.publicKey}`],
+            ["DELETE", `/v1/admin/blocked-callers/${caller.publicKey}`],
+        ] as const)("%s %s requires the API key", async (method, url) => {
+            expect((await fastify.inject({ method, url })).statusCode).toBe(401);
+            expect((await admin(method, url, undefined, "wrong")).statusCode).toBe(401);
+        });
+
+        test("revoking a grant refuses calls made with it", async () => {
+            const response = await admin("PUT", `/v1/admin/revoked-grants/${grant[0].id}`);
+            expect(response.json()).toEqual({ success: true });
+
+            const run = await runResource({ ...call("open"), authorization: callerGrants.authorize(grant, call("open")) });
+            expect(run.statusCode).toBe(403);
+        });
+
+        test("?issuer= revokes another issuer's grant, leaving this node's grant with the same id alone", async () => {
+            expect((await admin("PUT", `/v1/admin/revoked-grants/${grant[0].id}?issuer=${caller.publicKey}`)).json()).toEqual({ success: true });
+            expect((await runResource({ ...call("open"), authorization: callerGrants.authorize(grant, call("open")) })).statusCode).toBe(200);
+        });
+
+        test("blocking a caller refuses its calls until it is unblocked", async () => {
+            expect((await admin("PUT", `/v1/admin/blocked-callers/${caller.publicKey}`, { reason: "abuse" })).json()).toEqual({ success: true });
+            expect((await runResource({ ...call("open"), authorization: callerGrants.authorize(grant, call("open")) })).statusCode).toBe(403);
+
+            const listed = await admin("GET", "/v1/admin/blocked-callers");
+            expect(listed.json()).toEqual({ callers: [{ publicKey: caller.publicKey, reason: "abuse", blockedAt: expect.any(String) }], nextOffset: null });
+
+            expect((await admin("DELETE", `/v1/admin/blocked-callers/${caller.publicKey}`)).json()).toEqual({ success: true });
+            expect((await admin("DELETE", `/v1/admin/blocked-callers/${caller.publicKey}`)).statusCode).toBe(404);
+            expect((await runResource({ ...call("open"), authorization: callerGrants.authorize(grant, call("open")) })).statusCode).toBe(200);
+        });
+
+        test("blocks without a body, and refuses a bad key or reason", async () => {
+            expect((await admin("PUT", `/v1/admin/blocked-callers/${caller.publicKey}`)).statusCode).toBe(200);
+            expect((await admin("PUT", "/v1/admin/blocked-callers/not-a-key")).json()).toEqual({ error: "Invalid public key" });
+            expect((await admin("PUT", `/v1/admin/blocked-callers/${caller.publicKey}`, { reason: 5 })).json()).toEqual({ error: "reason must be a string" });
+        });
+    });
+
+    describe("POST /v1/grants/renew", () => {
+        function renewalRequest(grantId: string, keys = caller) {
+            const unsigned = { grantId, publicKey: keys.publicKey, nonce: crypto.randomUUID(), expiresAt: inMinutes(1) };
+            return { ...unsigned, signature: signData(grantRenewalPayload(unsigned), keys.privateKey) };
+        }
+
+        test("returns a fresh copy of the grant to its audience", async () => {
+            const response = await fastify.inject({ method: "POST", url: "/v1/grants/renew", payload: renewalRequest(grant[0].id) });
+
+            expect(response.statusCode).toBe(200);
+            const { grants } = response.json() as { grants: Grant[] };
+            expect(grants).toHaveLength(1);
+            expect(grants[0]).toMatchObject({ id: grant[0].id, audience: caller.publicKey, capabilities: grant[0].capabilities });
+        });
+
+        test("refuses another key, an unknown grant and a revoked grant", async () => {
+            const renew = (payload: unknown) => fastify.inject({ method: "POST", url: "/v1/grants/renew", payload: payload as Record<string, unknown> });
+
+            expect((await renew(renewalRequest(grant[0].id, generateBase64KeyPair()))).statusCode).toBe(403);
+            expect((await renew(renewalRequest("unknown"))).statusCode).toBe(403);
+            await service.grantService.revoke(grant[0].id);
+            expect((await renew(renewalRequest(grant[0].id))).statusCode).toBe(403);
+        });
+
+        test("rejects a body with missing fields", async () => {
+            const response = await fastify.inject({ method: "POST", url: "/v1/grants/renew", payload: { grantId: grant[0].id } });
+
+            expect(response.statusCode).toBe(400);
         });
     });
 });
