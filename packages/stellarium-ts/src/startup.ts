@@ -7,6 +7,9 @@ import { Service } from "./service.js";
 /** Per request to a peer during startup. */
 export const STARTUP_REQUEST_TIMEOUT_MS = 10_000;
 
+/** Peers and resources requested per page from the starting peer. It may return fewer. */
+export const STARTUP_PAGE_SIZE = 100;
+
 // 10 minutes
 const SIGNATURE_LIFETIME_MS = 1000 * 60 * 10;
 
@@ -20,7 +23,7 @@ export class StartupService {
         private readonly privateKey: string,
     ) {}
 
-    // If the peer list is empty, populate it using the peer start parameter.
+    // Learn peers and resources from the starting peer, then announce this node to every peer.
     async seedFromPeer(): Promise<void> {
         this.log.info(`Seeding from peer ${this.startingPeer}`);
 
@@ -42,6 +45,32 @@ export class StartupService {
         return await response.json() as T;
     }
 
+    /**
+     * Walks a paginated list on the starting peer, handing each page to `handlePage` before
+     * fetching the next, so the whole list is never held at once. Returns the item count.
+     */
+    private async forEachPageFromStartingPeer<T>(path: string, key: string, handlePage: (items: T[]) => Promise<void>): Promise<number> {
+        let offset = 0;
+        let count = 0;
+        while (true) {
+            const data = await this.getFromStartingPeer<Record<string, unknown>>(`${path}?offset=${offset}&limit=${STARTUP_PAGE_SIZE}`);
+            const items = data[key];
+            const nextOffset = data.nextOffset ?? null;
+            // The next offset must move forward, or a bad peer could keep startup looping forever.
+            if (!Array.isArray(items) || (nextOffset !== null && (!Number.isInteger(nextOffset) || (nextOffset as number) <= offset))) {
+                throw new Error('Invalid response from peer');
+            }
+
+            await handlePage(items as T[]);
+            count += items.length;
+
+            if (nextOffset === null) {
+                return count;
+            }
+            offset = nextOffset as number;
+        }
+    }
+
     private isSelf(peer: Peer): boolean {
         return peer.publicKey === this.publicKey || peer.baseUrl === this.baseUrl;
     }
@@ -49,41 +78,34 @@ export class StartupService {
     async populatePeers(): Promise<void> {
         this.log.info(`Populating peers from ${this.startingPeer}`);
 
-        const peerList = await this.service.peerRepository.getPeerList();
-        if (peerList.length > 0) {
-            return;
-        }
-
-        const data = await this.getFromStartingPeer<{ peers?: Peer[] }>('/peers');
-        if (!Array.isArray(data.peers)) {
-            throw new Error('Invalid response from peer');
-        }
+        // Known peers are skipped, so this is safe to repeat on every restart, and a run cut off
+        // partway through the pages is completed on the next one.
+        let count = 0;
+        const savePeers = async (peers: Peer[]) => {
+            for (const peer of peers.filter(peer => !this.isSelf(peer))) {
+                await this.service.peerRepository.create(peer);
+                count++;
+            }
+        };
 
         // Save the starting peer to the database.
-        const startingPeerData = await this.getFromStartingPeer<Peer>('/self');
+        await savePeers([await this.getFromStartingPeer<Peer>('/self')]);
+        await this.forEachPageFromStartingPeer('/peers', 'peers', savePeers);
 
-        const peers = [...data.peers, startingPeerData].filter(peer => !this.isSelf(peer));
-        for (const peer of peers) {
-            await this.service.peerRepository.create(peer);
-        }
-
-        this.log.info(`Populated ${peers.length} peers`);
+        this.log.info(`Populated ${count} peers`);
     }
 
     async populateResources(): Promise<void> {
         this.log.info(`Populating resources from ${this.startingPeer}`);
 
-        const data = await this.getFromStartingPeer<{ resources?: StellariumResource[] }>('/resources');
-        if (!Array.isArray(data.resources)) {
-            throw new Error('Invalid response from peer');
-        }
-
         // Known resources are skipped, so this is safe to repeat on every restart.
-        for (const resource of data.resources) {
-            await this.service.resourceRepository.learn(resource);
-        }
+        const count = await this.forEachPageFromStartingPeer<StellariumResource>('/resources', 'resources', async (resources) => {
+            for (const resource of resources) {
+                await this.service.resourceRepository.learn(resource);
+            }
+        });
 
-        this.log.info(`Learned up to ${data.resources.length} resources`);
+        this.log.info(`Learned up to ${count} resources`);
     }
 
     /** PUT to every peer, logging failures instead of throwing so one bad peer doesn't stop the rest. */

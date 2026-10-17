@@ -90,6 +90,17 @@ export class PeerRepository {
         }));
     }
 
+    /** One page of peers, in insertion order so offsets stay stable as peers are added. */
+    async getPeers(offset: number, limit: number): Promise<Peer[]> {
+        const results = await this.db.all<PeerRow[]>('SELECT * FROM peer ORDER BY id LIMIT ? OFFSET ?', [limit, offset]);
+
+        return results.map(result => ({
+            baseUrl: result.base_url,
+            name: result.name,
+            publicKey: result.public_key,
+        }));
+    }
+
     async getPeerByPublicKey(publicKey: string): Promise<StoredPeer | undefined> {
         const result = await this.db.get<PeerRow>('SELECT * FROM peer WHERE public_key = ?', [publicKey]);
         return result ? toPeer(result) : undefined;

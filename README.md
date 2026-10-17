@@ -117,8 +117,8 @@ The node stores peers and resources it learns from other nodes in `requestscript
 
 When `startingPeer` is set, the node waits until it is listening, then:
 
-1. `GET {startingPeer}/v1/peers` and `GET {startingPeer}/v1/self`. If this node has no peers yet, it stores the returned peers and the starting peer. An existing list is left as-is.
-2. `GET {startingPeer}/v1/resources`. Resources this node doesn't know yet are stored with the `baseUrl` that peer advertised. Known resources are left alone, so this is safe on every restart.
+1. `GET {startingPeer}/v1/self`, then every page of `GET {startingPeer}/v1/peers`. Peers this node doesn't know yet are stored, along with the starting peer. Known peers are left alone, so this is safe on every restart, and a run cut off partway through completes on the next one.
+2. Every page of `GET {startingPeer}/v1/resources`. Resources this node doesn't know yet are stored with the `baseUrl` that peer advertised. Known resources are left alone.
 3. Announces itself to every peer with `PUT /v1/peers`, signed over `{ baseUrl, name, publicKey, expiry }`.
 4. Broadcasts its own resources to every peer with `PUT /v1/all-resources`, signed over `{ resources, expiry }`.
 
@@ -136,12 +136,14 @@ Routes are mounted at `/v1`.
 | ------------------------ | -------------------------- | ----------------------------------------------------------------------------- |
 | `GET /v1/`               | —                          | Liveness check. Responds `{ "hello": "world" }`                               |
 | `GET /v1/self`           | —                          | This node: `{ "baseUrl", "publicKey", "name" }`                               |
-| `GET /v1/peers`          | —                          | Peers stored on this node: `{ "peers": [{ "baseUrl", "name", "publicKey" }] }` |
+| `GET /v1/peers`          | —                          | One page of peers stored on this node: `{ "peers": [{ "baseUrl", "name", "publicKey" }], "nextOffset" }` |
 | `PUT /v1/peers`          | Signed peer announcement   | Add or update a peer                                                          |
-| `GET /v1/resources`      | —                          | Resources registered here and resources learned from peers                    |
+| `GET /v1/resources`      | —                          | One page of resources registered here, then resources learned from peers: `{ "resources", "nextOffset" }` |
 | `PUT /v1/all-resources`  | Signed resource broadcast  | Store a peer's resources                                                      |
 | `POST /v1/run`           | `{ "source": "..." }`      | Run one `request` script. Requires `Authorization: Bearer <API_KEY>`          |
 | `POST /v1/run/resource`  | One function call          | Called by peers to run a function hosted here                                 |
+
+`GET /v1/peers` and `GET /v1/resources` are paginated with `?offset=` (default `0`) and `?limit=` (default `100`, at most `500`). `nextOffset` is the `offset` of the next page, or `null` on the last page.
 
 `GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, and functions (`name`, `returnType`, `parameters`, and `paymentManifest` for paid functions). Function implementations stay on the node that hosts them.
 

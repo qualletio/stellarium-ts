@@ -384,4 +384,53 @@ describe("routes", () => {
             expect(await service.resourceRepository.getResourceFunction("com.peer", "Forecast", "tomorrow")).toBeUndefined();
         });
     });
+
+    describe("pagination", () => {
+        const get = (url: string) => fastify.inject({ method: "GET", url });
+
+        beforeEach(async () => {
+            for (let i = 0; i < 5; i++) {
+                const baseUrl = `http://peer${i}.example`;
+                await service.peerRepository.create({ baseUrl, name: baseUrl, publicKey: `key-${i}` });
+                await service.resourceRepository.learn({ id: 0, baseUrl, metadata: {}, path: "com.peer", name: `Learned${i}`, functions: [] });
+            }
+        });
+
+        test("GET /v1/peers returns pages in insertion order", async () => {
+            const first = (await get("/v1/peers?limit=2")).json();
+            const last = (await get("/v1/peers?offset=4&limit=2")).json();
+
+            expect(first.peers.map((p: Peer) => p.publicKey)).toEqual(["key-0", "key-1"]);
+            expect(first.nextOffset).toBe(2);
+            expect(last.peers.map((p: Peer) => p.publicKey)).toEqual(["key-4"]);
+            expect(last.nextOffset).toBeNull();
+        });
+
+        test("GET /v1/resources lists hosted resources, then learned ones", async () => {
+            const first = (await get("/v1/resources?limit=2")).json();
+            const second = (await get(`/v1/resources?offset=${first.nextOffset}&limit=10`)).json();
+
+            expect(first.resources.map((r: StellariumResource) => r.name)).toEqual(["Weather", "Learned0"]);
+            expect(second.resources.map((r: StellariumResource) => r.name)).toEqual(["Learned1", "Learned2", "Learned3", "Learned4"]);
+            expect(second.nextOffset).toBeNull();
+        });
+
+        test("a page ending exactly at the last item has no next page", async () => {
+            expect((await get("/v1/peers?offset=3&limit=2")).json().nextOffset).toBeNull();
+        });
+
+        test("defaults to the first page", async () => {
+            expect((await get("/v1/peers")).json()).toMatchObject({ nextOffset: null, peers: expect.any(Array) });
+        });
+
+        test.each([
+            ["a limit above the maximum", "limit=501"],
+            ["a zero limit", "limit=0"],
+            ["a negative offset", "offset=-1"],
+            ["a non-numeric offset", "offset=abc"],
+        ])("rejects %s", async (_, query) => {
+            expect((await get(`/v1/peers?${query}`)).statusCode).toBe(400);
+            expect((await get(`/v1/resources?${query}`)).statusCode).toBe(400);
+        });
+    });
 });

@@ -64,6 +64,34 @@ const resourceRequestSchema = {
     properties: { publicKey: nonEmptyString, signature: nonEmptyString, expiry: nonEmptyString, resources: { type: 'array' } },
 } as const;
 
+export const DEFAULT_PAGE_SIZE = 100;
+export const MAX_PAGE_SIZE = 500;
+
+interface PageQuery {
+    offset: number;
+    limit: number;
+}
+
+const pageQuerySchema = {
+    type: 'object',
+    properties: {
+        offset: { type: 'integer', minimum: 0, default: 0 },
+        limit: { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE, default: DEFAULT_PAGE_SIZE },
+    },
+} as const;
+
+/**
+ * Fetches one extra item to tell whether another page follows. `nextOffset` is null on the last page.
+ */
+async function getPage<T>(query: PageQuery, fetchPage: (offset: number, limit: number) => Promise<T[]>): Promise<{ items: T[], nextOffset: number | null }> {
+    const { offset, limit } = query;
+    const items = await fetchPage(offset, limit + 1);
+    return {
+        items: items.slice(0, limit),
+        nextOffset: items.length > limit ? offset + limit : null,
+    };
+}
+
 const runRequestSchema = {
     type: 'object',
     required: ['source'],
@@ -149,9 +177,9 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         return { baseUrl, publicKey, name: baseUrl };
     });
 
-    fastify.get('/peers', async (request, reply) => {
-        const peers = await options.service.peerRepository.getPeerList();
-        return { peers };
+    fastify.get('/peers', { schema: { querystring: pageQuerySchema } }, async (request, reply) => {
+        const { items: peers, nextOffset } = await getPage(request.query as PageQuery, (offset, limit) => options.service.peerRepository.getPeers(offset, limit));
+        return { peers, nextOffset };
     });
 
     fastify.put('/peers', { schema: { body: peerRequestSchema } }, async (request, reply) => {
@@ -166,11 +194,10 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     });
 
     /**
-     * Returns the list of resources that are available on the server.
-     * Does not return resources that are external to the server.
+     * Returns one page of the resources hosted on this node, followed by the resources it learned from peers.
      */
-    fastify.get('/resources', async (request, reply) => {
-        const resources = await options.service.resourceRepository.getAllResources();
+    fastify.get('/resources', { schema: { querystring: pageQuerySchema } }, async (request, reply) => {
+        const { items: resources, nextOffset } = await getPage(request.query as PageQuery, (offset, limit) => options.service.resourceRepository.getResources(offset, limit));
         return {
             resources: resources.map((resource: StellariumResource) => ({
                 path: resource.path,
@@ -185,9 +212,9 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
                     }) : undefined,
                 })),
                 baseUrl: resource.baseUrl,
-
             })),
-        }
+            nextOffset,
+        };
     });
 
     fastify.put('/all-resources', { schema: { body: resourceRequestSchema } }, async (request, reply) => {

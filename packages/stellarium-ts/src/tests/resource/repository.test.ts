@@ -58,6 +58,26 @@ describe("ResourceRepository", () => {
         });
     });
 
+    describe("getResources", () => {
+        beforeEach(async () => {
+            for (const name of ["A", "B", "C"]) {
+                await repository.learn(resource(name, []));
+            }
+        });
+
+        const names = async (offset: number, limit: number) => (await repository.getResources(offset, limit)).map(r => r.name);
+
+        test("pages across hosted and learned resources", async () => {
+            expect(await names(0, 2)).toEqual(["Weather", "A"]);
+            expect(await names(2, 2)).toEqual(["B", "C"]);
+            expect(await names(4, 2)).toEqual([]);
+        });
+
+        test("pages within the hosted resources alone", async () => {
+            expect(await names(0, 1)).toEqual(["Weather"]);
+        });
+    });
+
     describe("getResource", () => {
         test("returns each function's own payment manifest", async () => {
             await repository.learn(resource("Forecast", [
