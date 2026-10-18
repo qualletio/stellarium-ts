@@ -250,10 +250,17 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             resources: resources.map((resource: StellariumResource) => ({
                 path: resource.path,
                 name: resource.name,
+                website: resource.website,
+                description: resource.description,
                 functions: resource.functions.map((fn: StellariumResourceFunction) => ({
                     name: fn.name,
                     returnType: fn.returnType,
-                    parameters: fn.parameters,
+                    description: fn.description,
+                    parameters: fn.parameters.map(parameter => ({
+                        name: parameter.name,
+                        type: parameter.type,
+                        description: parameter.description,
+                    })),
                     paymentManifest: fn.paymentManifest ? ({
                         costLamports: fn.paymentManifest.costLamports,
                         recipientAddress: fn.paymentManifest.recipientAddress,

@@ -9,8 +9,14 @@ export interface StellariumResourceFunctionPaymentManifest {
     recipientAddress: string;
 }
 
+export interface StellariumResourceFunctionParameter extends ResourceFunctionParameter {
+    description?: string;
+}
+
 export interface StellariumResourceFunction extends ResourceFunction {
     id?: number;
+    description?: string;
+    parameters: StellariumResourceFunctionParameter[];
     paymentManifest?: StellariumResourceFunctionPaymentManifest;
     /** Callers need a grant from the hosting node. Announced to peers so callers can tell. */
     restricted?: boolean;
@@ -19,6 +25,9 @@ export interface StellariumResourceFunction extends ResourceFunction {
 export interface StellariumResource extends Resource {
     id: number;
     baseUrl: string;
+    /** A URL where callers can learn more about the resource. */
+    website?: string;
+    description?: string;
     functions: StellariumResourceFunction[];
 }
 
@@ -38,6 +47,22 @@ interface ResourceRow {
     path: string;
     name: string;
     base_url: string;
+    website: string | null;
+    description: string | null;
+}
+
+/** Peers' resources aren't validated on receipt, so a description that isn't a string is stored as absent. */
+function optionalText(value: unknown): string | null {
+    return typeof value === 'string' ? value : null;
+}
+
+/** Only http(s) URLs are kept, since clients may render a resource's website as a link. */
+function optionalWebsite(value: unknown): string | null {
+    if (typeof value !== 'string' || !URL.canParse(value)) {
+        return null;
+    }
+    const { protocol } = new URL(value);
+    return protocol === 'http:' || protocol === 'https:' ? value : null;
 }
 
 const resourceKey = (resource: { path: string, name: string }) => `${resource.path}.${resource.name}`;
@@ -123,8 +148,8 @@ export class ResourceRepository {
 
                 await this.deleteFunctions(existing.id);
                 await this.db.run(
-                    'UPDATE resource SET base_url = ?, peer_id = ?, updated_at = ? WHERE id = ?',
-                    [resource.baseUrl, peer.id, new Date().toISOString(), existing.id]
+                    'UPDATE resource SET base_url = ?, website = ?, description = ?, peer_id = ?, updated_at = ? WHERE id = ?',
+                    [resource.baseUrl, optionalWebsite(resource.website), optionalText(resource.description), peer.id, new Date().toISOString(), existing.id]
                 );
                 await this.insertFunctions(existing.id, resource.functions);
             }
@@ -136,8 +161,8 @@ export class ResourceRepository {
     private async insert(resource: StellariumResource, peerId: number | null): Promise<void> {
         const createdAt = new Date().toISOString();
         const result = await this.db.run(
-            'INSERT INTO resource (path, name, base_url, peer_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
-            [resource.path, resource.name, resource.baseUrl, peerId, createdAt, createdAt]
+            'INSERT INTO resource (path, name, base_url, website, description, peer_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [resource.path, resource.name, resource.baseUrl, optionalWebsite(resource.website), optionalText(resource.description), peerId, createdAt, createdAt]
         );
 
         if (!result.changes || result.lastID === undefined) {
@@ -151,16 +176,16 @@ export class ResourceRepository {
         const createdAt = new Date().toISOString();
         for (const fn of functions) {
             const functionResult = await this.db.run(
-                'INSERT INTO resource_function (resource_id, name, return_type, restricted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
-                [resourceId, fn.name, fn.returnType, fn.restricted === true ? 1 : 0, createdAt, createdAt]
+                'INSERT INTO resource_function (resource_id, name, return_type, description, restricted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                [resourceId, fn.name, fn.returnType, optionalText(fn.description), fn.restricted === true ? 1 : 0, createdAt, createdAt]
             );
 
             const functionId = functionResult.lastID;
 
             for (const parameter of fn.parameters) {
                 await this.db.run(
-                    'INSERT INTO resource_function_parameter (resource_function_id, name, parameter_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-                    [functionId, parameter.name, parameter.type, createdAt, createdAt]
+                    'INSERT INTO resource_function_parameter (resource_function_id, name, parameter_type, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+                    [functionId, parameter.name, parameter.type, optionalText(parameter.description), createdAt, createdAt]
                 );
             }
 
@@ -231,6 +256,8 @@ export class ResourceRepository {
             path: r.path,
             name: r.name,
             baseUrl: r.base_url,
+            website: r.website ?? undefined,
+            description: r.description ?? undefined,
             metadata: { baseUrl: r.base_url },
             functions: await this.getResourceFunctions(r.id),
         })));
@@ -251,6 +278,7 @@ export class ResourceRepository {
             id: fn.id,
             name: fn.name,
             returnType: fn.return_type,
+            description: fn.description ?? undefined,
             parameters: await this.getResourceParameters(fn.id),
             exec: async () => undefined,
             paymentManifest: await this.getResourceFunctionPaymentManifest(fn.id),
@@ -264,6 +292,7 @@ export class ResourceRepository {
             id: f.id as number,
             name: f.name as string,
             returnType: f.return_type as string,
+            description: (f.description as string | null) ?? undefined,
             parameters: await this.getResourceParameters(f.id),
             exec: async () => undefined,
             paymentManifest: await this.getResourceFunctionPaymentManifest(f.id),
@@ -271,10 +300,11 @@ export class ResourceRepository {
         })));
     }
 
-    async getResourceParameters(resourceFunctionId: number): Promise<ResourceFunctionParameter[]> {
+    async getResourceParameters(resourceFunctionId: number): Promise<StellariumResourceFunctionParameter[]> {
         return (await this.db.all('SELECT * FROM resource_function_parameter WHERE resource_function_id = ? ORDER BY id', [resourceFunctionId])).map(p => ({
             name: p.name,
             type: p.parameter_type,
+            description: p.description ?? undefined,
         }));
     }
 

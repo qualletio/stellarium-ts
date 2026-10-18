@@ -42,6 +42,26 @@ describe("ResourceRepository", () => {
             expect((await repository.getResourceFunction("com.provider", "Vault", "open"))?.restricted).toBe(true);
         });
 
+        test("keeps the descriptions of resources, functions and parameters", async () => {
+            await repository.learn({
+                ...resource("Forecast", [
+                    { name: "tomorrow", description: "Tomorrow's forecast", parameters: [{ name: "city", type: "string", description: "City name" }] },
+                    { name: "today", parameters: [{ name: "city", type: "string" }] },
+                ]),
+                website: "https://forecast.example",
+                description: "Weather forecasts",
+            });
+
+            const [learned] = await repository.getExternalResources();
+            expect(learned.website).toBe("https://forecast.example");
+            expect(learned.description).toBe("Weather forecasts");
+            expect(learned.functions.map(fn => [fn.name, fn.description, fn.parameters[0].description])).toEqual([
+                ["today", undefined, undefined],
+                ["tomorrow", "Tomorrow's forecast", "City name"],
+            ]);
+            expect((await repository.getResourceFunction("com.provider", "Forecast", "tomorrow"))?.description).toBe("Tomorrow's forecast");
+        });
+
         test("is idempotent, so startup can run on every boot", async () => {
             const learned = resource("Forecast", [{ name: "tomorrow" }]);
 
@@ -139,6 +159,21 @@ describe("ResourceRepository", () => {
             expect(today?.parameters).toEqual([{ name: "city", type: "string" }]);
             expect(today?.paymentManifest).toMatchObject({ costLamports: 100 });
             expect(await repository.getResourceFunction("com.provider", "Forecast", "tomorrow")).toBeDefined();
+        });
+
+        test("drops descriptions that aren't strings and websites that aren't http(s) URLs", async () => {
+            const sent = {
+                ...resource("Forecast", [{ name: "today", description: 42, parameters: [{ name: "city", type: "string", description: { text: "City" } }] }] as unknown as Partial<StellariumResourceFunction>[]),
+                website: "javascript:alert(1)",
+                description: ["Weather forecasts"],
+            } as unknown as StellariumResource;
+            await save([sent, { ...resource("Radar", []), website: "https://radar.example", description: "Rain radar" }]);
+
+            const [forecast, radar] = await repository.getExternalResources();
+            expect([forecast.website, forecast.description]).toEqual([undefined, undefined]);
+            expect(forecast.functions[0].description).toBeUndefined();
+            expect(forecast.functions[0].parameters[0].description).toBeUndefined();
+            expect([radar.website, radar.description]).toEqual(["https://radar.example", "Rain radar"]);
         });
 
         test("removes functions and payment manifests the peer no longer advertises", async () => {

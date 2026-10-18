@@ -7,8 +7,9 @@ export const DEFAULT_DATABASE_PATH = './requestscript.db';
  * Bumped whenever the schema changes in a way `CREATE TABLE IF NOT EXISTS` can't apply.
  * Version 1 dropped `UNIQUE (base_url)` from `resource` and added uniqueness to the function tables.
  * Version 2 added `resource_function.restricted`.
+ * Version 3 added `resource.website` and the `description` columns of the resource tables.
  */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /** Opens (or creates) the node database and brings its schema up to date. Pass ':memory:' for tests. */
 export async function openDatabase(filename: string = DEFAULT_DATABASE_PATH): Promise<Database> {
@@ -50,6 +51,8 @@ export async function createTables(db: Database) {
             path TEXT NOT NULL,
             name TEXT NOT NULL,
             base_url TEXT NOT NULL,
+            website TEXT,
+            description TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
 
@@ -63,6 +66,7 @@ export async function createTables(db: Database) {
             resource_id INTEGER NOT NULL,
             name TEXT NOT NULL,
             return_type TEXT NOT NULL,
+            description TEXT,
             restricted INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -77,6 +81,7 @@ export async function createTables(db: Database) {
             resource_function_id INTEGER NOT NULL,
             name TEXT NOT NULL,
             parameter_type TEXT NOT NULL,
+            description TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
 

@@ -16,7 +16,7 @@ Join us in the `Discussions` tab, or our discord: https://discord.gg/WWTWKmYWv6.
 
 - Node.js 20+
 - [Fastify](https://fastify.dev/) 5, which you create and pass to the node
-- [RequestScript](https://www.npmjs.com/package/requestscript), which supplies the `Resource` type your node registers
+- [RequestScript](https://www.npmjs.com/package/requestscript), whose `Resource` type `StellariumResource` extends
 
 Install the node and the packages your application imports directly:
 
@@ -32,17 +32,22 @@ Call `register` before `start`. `start` creates the SQLite database, mounts the 
 
 ```typescript
 import Fastify from "fastify";
-import { StellariumNode } from "stellarium-ts";
-import type { Resource } from "requestscript";
+import { StellariumNode, type StellariumResource } from "stellarium-ts";
 
 const weather: StellariumResource = {
+  id: 1,
+  // Replaced by the node's own base URL when it announces its resources.
+  baseUrl: "http://localhost:3000",
   metadata: {},
   path: "com.example",
   name: "Weather",
+  website: "https://weather.example.com",
+  description: "Current weather conditions",
   functions: [
     {
       name: "temperature",
-      parameters: [{ name: "city", type: "string" }],
+      description: "Current temperature in degrees Celsius",
+      parameters: [{ name: "city", type: "string", description: "City name, such as Oslo" }],
       returnType: "int32",
       exec: async (args) => {
         const city = args.find((arg) => arg.name === "city")?.value;
@@ -151,7 +156,7 @@ Routes are mounted at `/v1`.
 
 `GET /v1/peers`, `GET /v1/resources` and `GET /v1/admin/blocked-callers` are paginated with `?offset=` (default `0`) and `?limit=` (default `100`, at most `500`). `nextOffset` is the `offset` of the next page, or `null` on the last page.
 
-`GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, and functions (`name`, `returnType`, `parameters`, `paymentManifest` for paid functions, and `restricted: true` for functions that need a grant). Function implementations stay on the node that hosts them.
+`GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, `website`, `description`, and functions (`name`, `returnType`, `description`, `parameters` with their `name`, `type` and `description`, `paymentManifest` for paid functions, and `restricted: true` for functions that need a grant). `website` and all descriptions are optional and appear only when the node registering the resource sets them. A node drops a description from a peer that isn't a string, and a `website` that isn't an `http` or `https` URL. Function implementations stay on the node that hosts them.
 
 `POST /v1/run` takes a JSON body whose `source` is the script. The declaration must be a `request`. A successful run responds `200` with `{ "returnValue": ... }`. Each resource call in the script evaluates to `{ "value", "error" }`, so a script can handle a failed call. A missing or wrong API key responds `401`. A script that doesn't parse, or is not a request, responds `400` with `{ "error": "Invalid script" }`. Any other failure responds `500` with `{ "error": "Internal server error" }`.
 
