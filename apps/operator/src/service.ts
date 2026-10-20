@@ -1,6 +1,6 @@
 import type { PublicKey, Signer } from '@solana/web3.js';
 import type { Database } from './db/database.js';
-import { type EscrowConnection, EscrowService } from './escrow/escrowService.js';
+import { type EscrowConnection, EscrowService, type SettlementPolicy } from './escrow/escrowService.js';
 import { PaymentService } from './paymentService.js';
 import { ReceiptRepository } from './repository.js';
 
@@ -9,10 +9,10 @@ export interface Service {
     paymentService: PaymentService;
 }
 
-export function createService(db: Database, escrowProgramId: PublicKey, authority: Signer, feeRecipient: PublicKey, mint: PublicKey, connection: EscrowConnection): Service {
+export function createService(db: Database, escrowProgramId: PublicKey, authority: Signer, feeRecipient: PublicKey, mint: PublicKey, connection: EscrowConnection, policy: SettlementPolicy): Service {
     const receipts = new ReceiptRepository(db);
     return {
-        escrowService: new EscrowService(receipts, escrowProgramId, authority, feeRecipient, mint, connection),
+        escrowService: new EscrowService(receipts, escrowProgramId, authority, feeRecipient, mint, connection, policy),
         paymentService: new PaymentService(receipts),
     };
 }

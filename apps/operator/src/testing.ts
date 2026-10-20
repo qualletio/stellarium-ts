@@ -124,4 +124,7 @@ export class FakeConnection implements EscrowConnection {
         ({ context: { slot: 4 }, value: signatures.map(signature => this.statuses.get(signature) ?? null) })) as unknown as EscrowConnection['getSignatureStatuses'];
 
     getBlockHeight: EscrowConnection['getBlockHeight'] = async () => this.blockHeight;
+
+    feeLamports: number | null = 5_000;
+    getFeeForMessage = (async () => ({ context: { slot: 1 }, value: this.feeLamports })) as unknown as EscrowConnection['getFeeForMessage'];
 }

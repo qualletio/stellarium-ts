@@ -14,7 +14,7 @@ describe('operator routes', () => {
         service = {
             escrowService: {
                 initiateEscrow: vi.fn().mockResolvedValue({ escrowAddress: 'escrow', status: 'confirmed' }),
-                settlePayment: vi.fn().mockResolvedValue({ escrowAddress: 'escrow', status: 'confirmed', signature: 'sig' }),
+                accruePayment: vi.fn().mockResolvedValue({ escrowAddress: 'escrow', status: 'accrued' }),
             },
             paymentService: { verifyPayment: vi.fn().mockResolvedValue(undefined) },
         };
@@ -30,19 +30,14 @@ describe('operator routes', () => {
     describe('POST /v1/payment', () => {
         const pay = (payload: unknown) => fastify.inject({ method: 'POST', url: '/v1/payment', payload: payload as object });
 
-        test('verifies, then settles', async () => {
+        test('verifies, then accrues with 202', async () => {
             const submission = signedVoucher();
             const response = await pay(submission);
 
-            expect(response.statusCode).toBe(200);
+            expect(response.statusCode).toBe(202);
+            expect(response.json()).toEqual({ escrowAddress: 'escrow', status: 'accrued' });
             expect(service.paymentService.verifyPayment).toHaveBeenCalledWith(submission);
-            expect(service.escrowService.settlePayment).toHaveBeenCalledWith(submission);
-        });
-
-        test('answers 202 for an unconfirmed settlement', async () => {
-            service.escrowService.settlePayment!.mockResolvedValue({ escrowAddress: 'escrow', status: 'unconfirmed', signature: 'sig' });
-
-            expect((await pay(signedVoucher())).statusCode).toBe(202);
+            expect(service.escrowService.accruePayment).toHaveBeenCalledWith(submission);
         });
 
         test.each([
@@ -60,17 +55,17 @@ describe('operator routes', () => {
         });
 
         test('keeps an OperationError status so the node does not retry it', async () => {
-            service.paymentService.verifyPayment!.mockRejectedValue(new OperationError(409, 'Receipt has already been settled'));
+            service.paymentService.verifyPayment!.mockRejectedValue(new OperationError(409, 'Voucher has already been accepted'));
 
             const response = await pay(signedVoucher());
 
             expect(response.statusCode).toBe(409);
-            expect(response.json()).toEqual({ error: 'Receipt has already been settled' });
-            expect(service.escrowService.settlePayment).not.toHaveBeenCalled();
+            expect(response.json()).toEqual({ error: 'Voucher has already been accepted' });
+            expect(service.escrowService.accruePayment).not.toHaveBeenCalled();
         });
 
         test('answers 500 for unexpected errors', async () => {
-            service.escrowService.settlePayment!.mockRejectedValue(new Error('RPC down'));
+            service.escrowService.accruePayment!.mockRejectedValue(new Error('RPC down'));
 
             const response = await pay(signedVoucher());
 

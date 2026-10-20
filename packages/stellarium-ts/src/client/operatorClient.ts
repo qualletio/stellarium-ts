@@ -18,7 +18,7 @@ export const SETTLE_PAYMENT_TIMEOUT_MS = 10_000;
 
 /**
  * Transient failures. Resending is safe even if an earlier attempt reached the operator: it stores a
- * unique receipt per (requestId, invocationId) before paying, so a repeat is rejected with 409.
+ * unique receipt per (requestId, invocationId), so a repeat is rejected with 409.
  * Rejections (400, 401, 404, 409, 422) are not retried because they won't change.
  */
 const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);

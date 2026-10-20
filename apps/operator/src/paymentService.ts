@@ -1,5 +1,4 @@
 import { createPublicKey, verify } from "node:crypto";
-import { RETRYABLE_RECEIPT_STATUSES } from "./db/schema.js";
 import { OperationError } from "./errors.js";
 import type { ReceiptRepository } from "./repository.js";
 import type { PaymentSubmission } from "./routes.js";
@@ -8,8 +7,8 @@ export class PaymentService {
     constructor(private readonly receipts: ReceiptRepository) {}
 
     /**
-     * Checks the voucher's signature and expiry, then that it hasn't been settled.
-     * The receipt claim in `EscrowService.settlePayment` is the authoritative duplicate check;
+     * Checks the voucher's signature and expiry, then that it hasn't been accepted.
+     * The receipt insert in `EscrowService.accruePayment` is the authoritative duplicate check;
      * this one rejects most repeats before any RPC calls.
      */
     async verifyPayment(submission: PaymentSubmission): Promise<void> {
@@ -48,8 +47,8 @@ export class PaymentService {
         }
 
         const receipt = await this.receipts.getByRequestIdAndInvocationId(requestId, invocationId);
-        if (receipt && !RETRYABLE_RECEIPT_STATUSES.includes(receipt.status)) {
-            throw new OperationError(409, 'Receipt has already been settled');
+        if (receipt) {
+            throw new OperationError(409, 'Voucher has already been accepted');
         }
     }
 }

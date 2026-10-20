@@ -26,7 +26,7 @@ The source is the authority here. Summary of the behavior this guide relies on:
 | Peer discovery | Announcements are signed over `{ baseUrl, name, publicKey, expiry }` and verified with the announced key. Resource broadcasts carry the sender's `publicKey`, and a peer may only publish its own resources. |
 | Provider verification | `/v1/run/resource` requires a voucher for a paid function and checks its invocation hash, amount, recipient, expiry and signature before running it. It settles only after a successful run. |
 | Operator authorization/errors | `POST /v1/escrow` requires `Authorization: Bearer <OPERATOR_API_TOKEN>`. Request bodies are schema-validated, and `OperationError`s keep their HTTP status. |
-| Payment durability | Migrations create `receipts` at startup. A receipt is claimed atomically before broadcast and moves through `pending` → `confirmed`, `unconfirmed`, `failed` or `expired`. A reconciliation loop checks the chain for uncertain receipts. A voucher can be settled again only after `failed` or `expired`. |
+| Payment durability | Migrations create `receipts` and `settlements` at startup. An accepted voucher becomes an accrued receipt (`202`, no transaction). A settlement loop pays a payer's accrued receipts to one recipient in a single withdrawal once the policy in the operator README is met; the local configuration's nominal `SOL_PRICE_USDC` makes one paid call enough. A settlement is claimed atomically before broadcast and moves through `pending` → `confirmed`, `unconfirmed`, `failed` or `expired`. Reconciliation checks the chain for uncertain settlements; failed and expired ones release their receipts to a later settlement. |
 
 Do not work around voucher failures by disabling verification or using a different
 wallet as the escrow user. Fix the key conversion and signed-payload agreement.
@@ -160,6 +160,8 @@ for (const [role, port] of [['caller', 3000], ['provider', 3002]]) {
 const values = { ...common,
   DATABASE_URL: 'postgresql://stellarium:local-only-password@127.0.0.1:5433/stellarium',
   OPERATOR_API_TOKEN: randomBytes(32).toString('hex'),
+  // Nominal: prices a settlement transaction at 1 micro-USDC, so a single paid call settles.
+  SOL_PRICE_USDC: '0.0001',
   PRIVATE_KEY: readFileSync('.keys/local-e2e/operator.json', 'utf8').trim() };
 writeFileSync('.keys/local-e2e/operator.env', Object.entries(values)
   .map(([key, value]) => `${key}=${value}`).join('\n') + '\n', { mode: 0o600, flag: 'wx' });
@@ -418,14 +420,16 @@ curl -sS -i http://127.0.0.1:3000/v1/run \
 ```
 
 Follow caller, provider, and operator logs. Wait separately for the provider's
-operator request to finish; the resource response precedes settlement.
-Do not mistake the resource result for payment completion.
+operator request to finish; the resource response precedes settlement. The operator
+accepts the voucher as an accrued receipt and pays it on its next settlement pass
+(every `SETTLE_INTERVAL_MS`, 30s by default), logging `Settled accrued receipts`.
+Do not mistake the resource result or the accepted voucher for payment completion.
 
-Read the receipt and preserve request ID, invocation ID and transaction signature:
+Read the receipt and its settlement, and preserve request ID, invocation ID and transaction signature:
 
 ```sh
 docker exec stellarium-local-e2e-postgres psql -U stellarium -d stellarium -c \
-  'SELECT id, "requestId", "invocationId", amount, "recipientAddress", "transactionSignature" FROM receipts ORDER BY id DESC LIMIT 5;'
+  'SELECT r.id, r."requestId", r."invocationId", r.amount, r."recipientAddress", s.status, s."transactionSignature" FROM receipts r LEFT JOIN settlements s ON s.id = r."settlementId" ORDER BY r.id DESC LIMIT 5;'
 ```
 
 To isolate the operator from discovery/provider failures, generate one voucher
@@ -456,14 +460,14 @@ This matches the operator body (no `manifest` field). The provider validates the
 voucher against its own manifest before running the function. Preserve parameter key order;
 the invocation hash and signature cover `JSON.stringify`, not canonical JSON. The direct test generates
 a new authorization each time it runs, so do not rerun it to retry an uncertain
-payment. Reuse the saved body and first reconcile its saved signature.
+payment. Reuse the saved body.
 
-Expected behavior: a confirmed result with a withdrawal signature, one
-`confirmed` receipt, and a 500-micro-USDC transfer.
+Expected behavior: a `202` with `status: "accrued"`, then, after the next settlement
+pass, one `confirmed` settlement holding the receipt and a 500-micro-USDC transfer.
 
 ## 9. Verify on the local chain
 
-Set `SIGNATURE` to the creation response signature or payment receipt signature:
+Set `SIGNATURE` to the creation response signature or the payment's settlement signature:
 
 ```sh
 export SIGNATURE=YOUR_TRANSACTION_SIGNATURE
@@ -585,7 +589,7 @@ The full-system happy path passes only when all of these hold:
 
 1. Fresh provider/caller SQLite databases start and discover the paid function.
 2. Caller gets `12` from the remote provider with a valid signed invocation.
-3. Operator persists a receipt tied to that request/invocation and a signature.
+3. Operator persists a receipt tied to that request/invocation, in a confirmed settlement with a signature.
 4. That signature exists on your local validator, succeeds, and invokes the
    configured program's withdrawal instruction.
 5. The escrow token account decreases by exactly 500 micro-USDC, the recipient's
@@ -605,8 +609,8 @@ replay tests. Inspect chain balances and signatures, not only HTTP status codes.
 | Insufficient escrow USDC balance | Rejected with 409, no withdrawal or receipt. |
 | Missing escrow | Rejected, no withdrawal. |
 | Same voucher twice / concurrent submissions | Exactly one on-chain payment; the repeat gets 409. |
-| Operator restart and retry same voucher | No second transfer; reconciliation resolves the saved signature to `confirmed`, `failed` or `expired`. |
-| RPC interruption around broadcast | Treat as uncertain, query the saved signature; do not mint a replacement voucher or rebuild a transfer automatically. |
+| Operator restart and retry same voucher | 409 and no second transfer; reconciliation resolves an in-flight settlement to `confirmed`, `failed` or `expired`. |
+| RPC interruption around broadcast | The settlement stays `unconfirmed` and its receipts are not paid again until reconciliation finds it `failed` or `expired`. Do not mint a replacement voucher. |
 | Resource execution fails | No settlement; provider reports the execution failure. |
 | Payment fails after resource succeeds | Explicit observable settlement failure; resource result alone must not mark the test passed. |
 
@@ -627,7 +631,8 @@ replay tests. Inspect chain balances and signatures, not only HTTP status codes.
 | Custom program error 5 | Operator `USDC_MINT` differs from the compiled mint. |
 | Token Program error during withdrawal | A recipient token account of another mint, or a frozen account. Read the simulation logs. |
 | `relation receipts does not exist` | The operator failed to apply migrations at startup; check its log and `DATABASE_URL`. |
-| Receipt stuck `unconfirmed` | Reconciliation runs every `RECONCILE_INTERVAL_MS` (30s) and waits two minutes after the last change. Rows without `lastValidBlockHeight` need manual review. |
+| Receipt never settled | Its payer and recipient total hasn't met the settlement policy (check `SOL_PRICE_USDC`), or the operator logs `Failed to settle accrued receipts` with the reason, such as an underfunded escrow. |
+| Settlement stuck `unconfirmed` | Reconciliation runs every `SETTLE_INTERVAL_MS` (30s) and waits two minutes after the last change. Rows without `lastValidBlockHeight` need manual review. |
 | `ECONNREFUSED` on 8899/8900 | Validator process, RPC/WS ports, and local URL. |
 | Operator doesn't see a settlement | `OPERATOR_URL` includes `/v1`; provider voucher verification succeeded; background errors surfaced. |
 | Signature not found | Check local RPC, wait for confirmation, check whether ledger was reset. A DB receipt is not chain proof. |

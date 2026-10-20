@@ -59,38 +59,29 @@ describe('PaymentService.verifyPayment', () => {
 
     test('checks the signature before revealing whether a receipt exists', async () => {
         const submission = signedVoucher();
-        await insertReceipt(submission, 'confirmed');
+        await insertReceipt(submission);
         submission.voucher.signature = signedVoucher().voucher.signature;
 
         expect(await rejection(service.verifyPayment(submission))).toMatchObject({ status: 401 });
     });
 
-    test.each(['pending', 'unconfirmed', 'confirmed'] as const)('rejects a voucher whose receipt is %s', async (status) => {
+    test('rejects a voucher that was already accepted', async () => {
         const submission = signedVoucher();
-        await insertReceipt(submission, status);
+        await insertReceipt(submission);
 
-        expect(await rejection(service.verifyPayment(submission))).toEqual({ status: 409, message: 'Receipt has already been settled' });
+        expect(await rejection(service.verifyPayment(submission))).toEqual({ status: 409, message: 'Voucher has already been accepted' });
     });
 
-    test.each(['failed', 'expired'] as const)('lets a voucher whose settlement %s be retried', async (status) => {
-        const submission = signedVoucher();
-        await insertReceipt(submission, status);
-
-        await expect(service.verifyPayment(submission)).resolves.toBeUndefined();
-    });
-
-    async function insertReceipt({ voucher }: ReturnType<typeof signedVoucher>, status: typeof receiptsTable.$inferInsert.status) {
+    async function insertReceipt({ voucher }: ReturnType<typeof signedVoucher>) {
         await db.insert(receiptsTable).values({
             requestId: voucher.requestId,
             invocationId: voucher.invocationId,
             amount: voucher.amount,
             recipientAddress: voucher.recipientAddress,
             voucherSignature: voucher.signature,
-            transactionSignature: crypto.randomUUID(),
             expiresAt: new Date(voucher.expiresAt),
             publicKey: voucher.publicKey,
             invocationHash: voucher.invocationHash,
-            status,
         });
     }
 });

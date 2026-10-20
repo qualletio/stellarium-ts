@@ -69,9 +69,9 @@ function secretsEqual(a: string, b: string): boolean {
     return timingSafeEqual(digest(a), digest(b));
 }
 
-/** An uncertain submission is accepted but not confirmed. */
+/** An uncertain or accrued submission is accepted but not confirmed. */
 function sendResult(reply: FastifyReply, result: OperationResult) {
-    return reply.status(result.status === 'unconfirmed' ? 202 : 200).send(result);
+    return reply.status(result.status === 'unconfirmed' || result.status === 'accrued' ? 202 : 200).send(result);
 }
 
 const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, { service, apiToken }) {
@@ -86,7 +86,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, { serv
             return reply.status(400).send({ error: (error as Error).message });
         }
         fastify.log.error(error);
-        return reply.status(500).send({ error: 'Failed to verify and settle payment', details: error instanceof Error ? error.message : undefined });
+        return reply.status(500).send({ error: 'Failed to verify and accept payment', details: error instanceof Error ? error.message : undefined });
     });
 
     async function requireApiToken(request: FastifyRequest, reply: FastifyReply) {
@@ -108,7 +108,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, { serv
     fastify.post<{ Body: PaymentSubmission }>('/payment', { schema: { body: paymentSchema } }, async (request, reply) => {
         // First verify the payment submission.
         await service.paymentService.verifyPayment(request.body);
-        return sendResult(reply, await service.escrowService.settlePayment(request.body));
+        return sendResult(reply, await service.escrowService.accruePayment(request.body));
     });
 };
 

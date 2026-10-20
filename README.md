@@ -182,6 +182,8 @@ A function with a `paymentManifest` (`costMicroUsdc`, `recipientAddress`) is pai
 
 A paid call without a voucher responds `402`; an invalid voucher responds `400`. After the function runs without an error, the node sends the voucher to the operator to settle. Vouchers sent to free functions are ignored.
 
+The operator doesn't pay each voucher on-chain, since a call can cost less than a Solana transaction. It records the voucher as owed, as long as the caller's escrow covers it on top of everything the caller already owes, and pays a caller's vouchers to one provider together in a single withdrawal. That happens once the 20% protocol fee on their total is at least ten times the estimated transaction fee. Until then the vouchers stay owed, however old they are, and later calls raise the total.
+
 ### Restricted functions and grants
 
 A function with `restricted: true` runs only for callers holding a **grant** from the hosting node. A grant is a signed statement that one key may call some functions until an expiry. Its holder can **delegate** a narrower grant to another key, and the caller sends the whole chain with each call. The hosting node checks the chain's signatures without looking up the caller. It refuses a restricted call without an authorization, or with an invalid one, with `403`. It checks this before the payment voucher.
@@ -350,6 +352,8 @@ for (const [role, port] of [['caller', 3000], ['provider', 3002]]) {
 const values = { ...common,
   DATABASE_URL: 'postgresql://stellarium:local-only-password@127.0.0.1:5433/stellarium',
   OPERATOR_API_TOKEN: randomBytes(32).toString('hex'),
+  // Nominal: prices a settlement transaction at 1 micro-USDC, so a single paid call settles.
+  SOL_PRICE_USDC: '0.0001',
   PRIVATE_KEY: readFileSync('.keys/local-e2e/operator.json', 'utf8').trim() };
 writeFileSync('.keys/local-e2e/operator.env', Object.entries(values)
   .map(([key, value]) => `${key}=${value}`).join('\n') + '\n', { mode: 0o600, flag: 'wx' });
@@ -484,7 +488,11 @@ USDC_MINT=
 PRIVATE_KEY=
 PORT=
 OPERATOR_API_TOKEN=SET_THIS_TO_ANYTHING
+SOL_PRICE_USDC=0.0001
 ```
+
+`SOL_PRICE_USDC` prices settlement transaction fees. The nominal local value lets a
+single paid call settle; use the real SOL price anywhere else.
 
 `PROTOCOL_FEE_RECIPIENT` and `USDC_MINT` must be the same addresses compiled into the
 escrow program. If the fee recipient doesn't match, withdrawals fail with custom
