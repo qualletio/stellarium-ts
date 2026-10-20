@@ -45,6 +45,10 @@ export const receiptsTable = pgTable("receipts", {
   expiresAt: timestamp().notNull(),
   publicKey: varchar({ length: 255 }).notNull(),
   invocationHash: varchar({ length: 255 }).notNull(),
+  // Inference vouchers only: the most the payer signed for, and the usage the provider reported. Null for fixed vouchers.
+  maxAmount: bigint({ mode: 'number' }),
+  inputTokens: bigint({ mode: 'number' }),
+  outputTokens: bigint({ mode: 'number' }),
   settlementId: integer().references(() => settlementsTable.id),
   createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
   updatedAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),

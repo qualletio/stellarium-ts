@@ -83,6 +83,7 @@ await node.start(fastify, {
 | `apiKey`            | `API_KEY`                           | Bearer token for `POST /v1/run`                          |
 | `operatorUrl`       | `OPERATOR_URL`                      | Operator to settle payments with                         |
 | `costLimitMicroUsdc` | `COST_LIMIT_MICRO_USDC`, then `10000` | Most this node pays for one remote call, in micro-USDC  |
+| `inferenceCostLimitMicroUsdc` | `INFERENCE_COST_LIMIT_MICRO_USDC`, then `costLimitMicroUsdc` | Most this node signs for in one remote inference call (its voucher's `maxAmount`) |
 | `databasePath`      | `./requestscript.db`                | SQLite file. `:memory:` keeps everything in memory       |
 
 `start` resolves once the node is listening and, with `startingPeer`, once it has joined the network. It rejects if it can't listen, if a required setting is missing, or if bootstrapping fails.
@@ -97,6 +98,7 @@ Importing `StellariumNode` loads [dotenv](https://github.com/motdotla/dotenv), s
 | `API_KEY`             | Bearer token for `POST /v1/run`. When unset, `/v1/run` rejects every request.                                                                                                                     |
 | `OPERATOR_URL`        | Operator base URL including `/v1`. Required when the node hosts paid functions.                                                                                                                   |
 | `COST_LIMIT_MICRO_USDC` | Most this node pays for one remote call, in micro-USDC.                                                                                                                                         |
+| `INFERENCE_COST_LIMIT_MICRO_USDC` | Most this node signs for in one remote inference call, in micro-USDC. Defaults to the cost limit.                                                                                  |
 
 Signing keys can be generated with the following script:
 
@@ -147,6 +149,7 @@ Routes are mounted at `/v1`.
 | `PUT /v1/all-resources`                       | Signed resource broadcast | Store a peer's resources                                                                                                       |
 | `POST /v1/run`                                | `{ "source": "..." }`     | Run one `request` script. Requires `Authorization: Bearer <API_KEY>`                                                           |
 | `POST /v1/run/resource`                       | One function call         | Called by peers to run a function hosted here                                                                                  |
+| `POST /v1/run/resource/estimate`              | One function call         | Called by peers to price a call to a paid inference function hosted here: `{ "inputTokens", "maxAmount" }`                     |
 | `POST /v1/grants/request`                     | Signed grant request      | Ask for a new grant, decided by the node's `approveGrant` hook: `{ "grants" }`                                                 |
 | `POST /v1/grants/renew`                       | Signed renewal request    | Re-issue a grant this node issued to its audience: `{ "grants" }`                                                              |
 | `PUT /v1/admin/revoked-grants/:grantId`       | —                         | Revoke a grant this node issued, or another issuer's grant with `?issuer=<key>`. Requires the API key                          |
@@ -156,7 +159,7 @@ Routes are mounted at `/v1`.
 
 `GET /v1/peers`, `GET /v1/resources` and `GET /v1/admin/blocked-callers` are paginated with `?offset=` (default `0`) and `?limit=` (default `100`, at most `500`). `nextOffset` is the `offset` of the next page, or `null` on the last page.
 
-`GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, `website`, `description`, and functions (`name`, `returnType`, `description`, `parameters` with their `name`, `type` and `description`, `paymentManifest` for paid functions, and `restricted: true` for functions that need a grant). `website` and all descriptions are optional and appear only when the node registering the resource sets them. A node drops a description from a peer that isn't a string, and a `website` that isn't an `http` or `https` URL. Function implementations stay on the node that hosts them.
+`GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, `website`, `description`, and functions (`name`, `returnType`, `description`, `parameters` with their `name`, `type` and `description`, `paymentManifest` for paid functions, `restricted: true` for functions that need a grant, and `kind: "inference"` for [inference functions](#inference-functions)). `website` and all descriptions are optional and appear only when the node registering the resource sets them. A node drops a description from a peer that isn't a string, and a `website` that isn't an `http` or `https` URL. Function implementations stay on the node that hosts them.
 
 `POST /v1/run` takes a JSON body whose `source` is the script. The declaration must be a `request`. A successful run responds `200` with `{ "returnValue": ... }`. Each resource call in the script evaluates to `{ "value", "error" }`, so a script can handle a failed call. A missing or wrong API key responds `401`. A script that doesn't parse, or is not a request, responds `400` with `{ "error": "Invalid script" }`. Any other failure responds `500` with `{ "error": "Internal server error" }`.
 
@@ -183,6 +186,40 @@ A function with a `paymentManifest` (`costMicroUsdc`, `recipientAddress`) is pai
 A paid call without a voucher responds `402`; an invalid voucher responds `400`. After the function runs without an error, the node sends the voucher to the operator to settle. Vouchers sent to free functions are ignored.
 
 The operator doesn't pay each voucher on-chain, since a call can cost less than a Solana transaction. It records the voucher as owed, as long as the caller's escrow covers it on top of everything the caller already owes, and pays a caller's vouchers to one provider together in a single withdrawal. That happens once the 20% protocol fee on their total is at least ten times the estimated transaction fee. Until then the vouchers stay owed, however old they are, and later calls raise the total.
+
+### Inference functions
+
+An inference function runs AI inference, so its cost depends on how many tokens a call uses. Declare one with `kind: "inference"`. It must take a `maxTokens: int32` parameter, the most output tokens the caller allows, and it may take any others. Its `exec` returns `{ value, usage: { inputTokens, outputTokens } }`. Scripts see only `value`.
+
+A paid inference function is priced per token rather than per call. Its `paymentManifest` has `inputCostMicroUsdcPerMillionTokens`, `outputCostMicroUsdcPerMillionTokens` and `recipientAddress`, and either rate may be `0`. It must also declare `estimateInputTokens`, which counts the input tokens a call will use. Like `exec`, the estimator runs only on the hosting node, so it can call a token-counting API such as Anthropic's. `start` throws if an inference function is declared without these.
+
+```typescript
+{
+  name: "complete",
+  kind: "inference",
+  parameters: [{ name: "prompt", type: "string" }, { name: "maxTokens", type: "int32" }],
+  returnType: "string",
+  estimateInputTokens: async (args) => countTokens(prompt(args)),
+  exec: async (args) => {
+    const { text, inputTokens, outputTokens } = await runModel(prompt(args), maxTokens(args));
+    return { value: text, usage: { inputTokens, outputTokens } };
+  },
+  paymentManifest: {
+    inputCostMicroUsdcPerMillionTokens: 3_000_000,   // $3 per million input tokens
+    outputCostMicroUsdcPerMillionTokens: 15_000_000, // $15 per million output tokens
+    recipientAddress: "<provider wallet>",
+  },
+}
+```
+
+A call's charge is `ceil((inputTokens × inputRate + outputTokens × outputRate) / 1,000,000)` micro-USDC. Both nodes and the operator are protected from bad estimates:
+
+1. The caller posts the call to the provider's `POST /v1/run/resource/estimate`. The provider runs its estimator and answers `{ inputTokens, maxAmount }`, where `maxAmount` is the charge for those input tokens plus `maxTokens` output tokens.
+2. The caller checks that `maxAmount` follows from the advertised rates and is within its `inferenceCostLimitMicroUsdc`. It then signs an inference voucher (`kind: "inference"`) for `maxAmount`, both rates and `maxTokens`.
+3. The provider checks the voucher as it would a fixed one, plus that its rates match the manifest and its `maxTokens` matches the call. It runs the estimator again and refuses with `402` and `requiredMaxAmount` if the voucher doesn't cover it, so inference never runs unpaid.
+4. After the call, the provider sends the voucher and the reported usage to the operator, with output tokens capped at `maxTokens`. The operator charges the usage at the signed rates, never more than `maxAmount`, and settles it like any other voucher. A call that charges nothing isn't settled.
+
+An inference function without a `paymentManifest` is free. It still needs `maxTokens`, but no estimator.
 
 ### Restricted functions and grants
 

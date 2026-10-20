@@ -9,7 +9,7 @@ import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
 import type { Database } from './db/database.js';
 import type { EscrowConnection } from './escrow/escrowService.js';
-import type { PaymentSubmission } from './routes.js';
+import type { FixedPaymentSubmission, InferencePaymentSubmission } from './routes.js';
 import { ESCROW_ACCOUNT_SIZE, getEscrowAddress, getEscrowTokenAddress } from './solana/escrow.js';
 import { solanaUserFromSpki } from './solana/userAddress.js';
 
@@ -37,7 +37,7 @@ export const RECIPIENT = Keypair.generate().publicKey;
 export const MINT = Keypair.generate().publicKey;
 
 /** A voucher signed the way stellarium-ts's paymentVoucherPayload does. */
-export function signedVoucher(keys = generateNodeKeys(), overrides: Partial<Omit<PaymentSubmission['voucher'], 'signature'>> = {}): PaymentSubmission {
+export function signedVoucher(keys = generateNodeKeys(), overrides: Partial<Omit<FixedPaymentSubmission['voucher'], 'signature' | 'kind'>> = {}): FixedPaymentSubmission {
     const unsigned = {
         requestId: crypto.randomUUID(),
         invocationId: crypto.randomUUID(),
@@ -52,6 +52,38 @@ export function signedVoucher(keys = generateNodeKeys(), overrides: Partial<Omit
     const payload = Buffer.from(JSON.stringify({ requestId, invocationId, amount, recipientAddress, expiresAt, invocationHash, publicKey }));
     const signature = sign(null, payload, { key: Buffer.from(keys.privateKey, 'base64url'), format: 'der', type: 'pkcs8' }).toString('base64url');
     return { voucher: { ...unsigned, signature } };
+}
+
+/** An inference voucher signed the way stellarium-ts's inferenceVoucherPayload does, with the usage a provider reports. */
+export function signedInferenceVoucher(
+    keys = generateNodeKeys(),
+    overrides: Partial<Omit<InferencePaymentSubmission['voucher'], 'signature' | 'kind'>> = {},
+    usage: InferencePaymentSubmission['usage'] = { inputTokens: 1_000, outputTokens: 500 },
+): InferencePaymentSubmission {
+    const unsigned = {
+        kind: 'inference' as const,
+        requestId: crypto.randomUUID(),
+        invocationId: crypto.randomUUID(),
+        maxAmount: 20_000,
+        inputCostMicroUsdcPerMillionTokens: 3_000_000,
+        outputCostMicroUsdcPerMillionTokens: 15_000_000,
+        maxTokens: 1_000,
+        recipientAddress: RECIPIENT.toBase58(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        invocationHash: 'hash',
+        publicKey: keys.publicKey,
+        ...overrides,
+    };
+    const {
+        kind, requestId, invocationId, maxAmount, inputCostMicroUsdcPerMillionTokens, outputCostMicroUsdcPerMillionTokens,
+        maxTokens, recipientAddress, expiresAt, invocationHash, publicKey,
+    } = unsigned;
+    const payload = Buffer.from(JSON.stringify({
+        kind, requestId, invocationId, maxAmount, inputCostMicroUsdcPerMillionTokens, outputCostMicroUsdcPerMillionTokens,
+        maxTokens, recipientAddress, expiresAt, invocationHash, publicKey,
+    }));
+    const signature = sign(null, payload, { key: Buffer.from(keys.privateKey, 'base64url'), format: 'der', type: 'pkcs8' }).toString('base64url');
+    return { voucher: { ...unsigned, signature }, usage };
 }
 
 /** Escrow account data as the program writes it: discriminator, user, authority, bump. */

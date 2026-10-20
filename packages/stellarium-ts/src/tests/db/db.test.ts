@@ -20,7 +20,7 @@ describe("openDatabase", () => {
         await (await openDatabase(filename)).close();
         const db = await openDatabase(filename);
 
-        expect(await db.get("PRAGMA user_version")).toEqual({ user_version: 4 });
+        expect(await db.get("PRAGMA user_version")).toEqual({ user_version: 5 });
         await db.close();
     });
 
@@ -69,5 +69,24 @@ describe("openDatabase", () => {
         const reopened = await openDatabase(filename);
         expect(await reopened.all("SELECT id FROM held_grant")).toEqual([{ id: "g" }]);
         await reopened.close();
+    });
+
+    test("rebuilds a version 4 manifest table so inference functions can omit cost_micro_usdc", async () => {
+        const filename = path.join(dir, "v4.db");
+        const old = await open({ filename, driver: sqlite3.Database });
+        await old.exec(`
+            CREATE TABLE resource_function_payment_manifest (id INTEGER PRIMARY KEY AUTOINCREMENT, resource_function_id INTEGER NOT NULL,
+                cost_micro_usdc INTEGER NOT NULL, recipient_address TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE (resource_function_id));
+            PRAGMA user_version = 4;
+        `);
+        await old.close();
+
+        const db = await openDatabase(filename);
+        const functionColumns = await db.all<{ name: string }[]>("PRAGMA table_info(resource_function)");
+        expect(functionColumns.map(column => column.name)).toContain("kind");
+        await db.run(`INSERT INTO resource_function_payment_manifest (resource_function_id, input_cost_micro_usdc_per_million_tokens,
+            output_cost_micro_usdc_per_million_tokens, recipient_address, created_at, updated_at) VALUES (1, 3, 15, 'r', 'now', 'now')`);
+        await db.close();
     });
 });

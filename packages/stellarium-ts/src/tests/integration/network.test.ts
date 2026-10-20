@@ -8,7 +8,7 @@ import { verifyData } from "../../crypto/utils.js";
 import { type PaymentVoucher, paymentVoucherPayload } from "../../resource/invoker.js";
 import { StellariumNode, type StellariumNodeOptions } from "../../server.js";
 import type { StellariumResource } from "../../resource/repository.js";
-import { COST, generateBase64KeyPair, RECIPIENT, temperatureSource, weatherResource } from "../helpers.js";
+import { COST, generateBase64KeyPair, INFERENCE_RATES, modelResource, RECIPIENT, temperatureSource, weatherResource } from "../helpers.js";
 
 /** A free function only callers with a grant from the provider may run. */
 function vaultResource(baseUrl: string): StellariumResource {
@@ -25,6 +25,7 @@ function vaultResource(baseUrl: string): StellariumResource {
 const vaultSource = 'request OpenVault {\n  const vault: com.example.Vault\n\n  return vault.open(city: "Oslo")\n}';
 const vault = { resourcePath: "com.example", resourceName: "Vault" };
 const HOUR = 3_600_000;
+const completeSource = 'request Complete {\n  const model: com.example.Model\n\n  return model.complete(prompt: "Hello world!", maxTokens: 10)\n}';
 
 function freePort(): Promise<number> {
     return new Promise((resolve, reject) => {
@@ -45,6 +46,7 @@ function freePort(): Promise<number> {
 describe("two-node network", { timeout: 15_000 }, () => {
     const servers: FastifyInstance[] = [];
     const settlements: PaymentVoucher[] = [];
+    const submissions: unknown[] = [];
     const callerKeys = generateBase64KeyPair();
     let dir: string;
     let operatorUrl: string;
@@ -83,11 +85,13 @@ describe("two-node network", { timeout: 15_000 }, () => {
     beforeEach(async () => {
         dir = await mkdtemp(path.join(tmpdir(), "stellarium-network-"));
         settlements.length = 0;
+        submissions.length = 0;
 
         const operator = Fastify();
         servers.push(operator);
         operator.post("/v1/payment", async (request) => {
             settlements.push((request.body as { voucher: PaymentVoucher }).voucher);
+            submissions.push(request.body);
             return { status: "confirmed" };
         });
         operatorUrl = `${await operator.listen({ port: 0, host: "127.0.0.1" })}/v1`;
@@ -97,6 +101,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
         provider = new StellariumNode();
         await provider.register(weatherResource(providerUrl));
         await provider.register(vaultResource(providerUrl));
+        await provider.register(modelResource(providerUrl));
         await startNode(provider, {
             port: providerPort,
             ...generateBase64KeyPair(),
@@ -228,5 +233,30 @@ describe("two-node network", { timeout: 15_000 }, () => {
         expect(result.returnValue.value).toBeNull();
         expect(result.returnValue.error.message).toContain("exceeds the cost limit");
         expect(settlements).toEqual([]);
+    });
+
+    describe("inference functions", () => {
+        test("the caller prices a call with the provider's estimate, pays for it, and the provider settles its usage", async () => {
+            const caller = await startCaller();
+
+            const result = await run(caller.url, completeSource);
+
+            expect(result).toEqual({ returnValue: { value: "echo: Hello world!", error: null } });
+            await vi.waitFor(() => expect(submissions).toHaveLength(1));
+            // 3 input tokens at $3/M plus 10 output tokens at $15/M, rounded up.
+            expect(submissions[0]).toMatchObject({
+                voucher: { kind: "inference", maxAmount: 159, maxTokens: 10, ...INFERENCE_RATES, recipientAddress: RECIPIENT, publicKey: callerKeys.publicKey },
+                usage: { inputTokens: 3, outputTokens: 10 },
+            });
+        });
+
+        test("the caller refuses a call whose maxAmount is over its inference cost limit", async () => {
+            const caller = await startCaller({ inferenceCostLimitMicroUsdc: 158 });
+
+            const result = await run(caller.url, completeSource);
+
+            expect(result.returnValue.error.message).toContain("exceeds the inference cost limit");
+            expect(submissions).toEqual([]);
+        });
     });
 });

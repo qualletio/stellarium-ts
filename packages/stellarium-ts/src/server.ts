@@ -4,6 +4,7 @@ import { DEFAULT_DATABASE_PATH, openDatabase } from './db/db.js';
 import type { Capability, Grant } from './grant/grant.js';
 import type { GrantKey } from './grant/repository.js';
 import type { ApproveGrant, GrantOptions } from './grant/service.js';
+import { validateInferenceFunction } from './resource/inference.js';
 import { StellariumResource } from './resource/repository.js';
 import routes, { RateLimitConfig } from './routes.js';
 import { createService, type NodeConfig, type Service } from './service.js';
@@ -30,6 +31,11 @@ export interface StellariumNodeOptions {
     operatorUrl?: string;
     /** Most this node pays for one remote call. Defaults to `COST_LIMIT_MICRO_USDC`, then 10,000 ($0.01). */
     costLimitMicroUsdc?: number;
+    /**
+     * Most this node signs for in one remote inference call (the voucher's `maxAmount`).
+     * Defaults to `INFERENCE_COST_LIMIT_MICRO_USDC`, then to the resolved `costLimitMicroUsdc`.
+     */
+    inferenceCostLimitMicroUsdc?: number;
     /** SQLite file. Defaults to `./requestscript.db`; use ':memory:' for tests. */
     databasePath?: string;
     /**
@@ -62,6 +68,13 @@ export function resolveConfig(options: StellariumNodeOptions, resources: Stellar
     if (!Number.isSafeInteger(costLimit) || costLimit < 0) {
         throw new Error('costLimitMicroUsdc must be a nonnegative integer');
     }
+    const inferenceCostLimit = options.inferenceCostLimitMicroUsdc ?? (process.env.INFERENCE_COST_LIMIT_MICRO_USDC ? Number(process.env.INFERENCE_COST_LIMIT_MICRO_USDC) : costLimit);
+    if (!Number.isSafeInteger(inferenceCostLimit) || inferenceCostLimit < 0) {
+        throw new Error('inferenceCostLimitMicroUsdc must be a nonnegative integer');
+    }
+    for (const resource of resources) {
+        resource.functions.forEach(validateInferenceFunction);
+    }
     return {
         baseUrl: required('BASE_URL', options.baseUrl ?? process.env.BASE_URL),
         publicKey: required('SIGNING_PUBLIC_KEY', options.publicKey ?? process.env.SIGNING_PUBLIC_KEY),
@@ -72,6 +85,7 @@ export function resolveConfig(options: StellariumNodeOptions, resources: Stellar
             ? required('OPERATOR_URL', options.operatorUrl ?? process.env.OPERATOR_URL)
             : options.operatorUrl ?? process.env.OPERATOR_URL,
         costLimitMicroUsdc: costLimit,
+        inferenceCostLimitMicroUsdc: inferenceCostLimit,
     };
 }
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { DEFAULT_COST_LIMIT_MICRO_USDC, resolveConfig } from "../server.js";
-import { weatherResource } from "./helpers.js";
+import { modelResource, weatherResource } from "./helpers.js";
 
 describe("resolveConfig", () => {
     const keys = { baseUrl: "http://node.example", publicKey: "public", privateKey: "private" };
@@ -46,5 +46,39 @@ describe("resolveConfig", () => {
 
         expect(resolveConfig(keys, []).operatorUrl).toBeUndefined();
         expect(() => resolveConfig(keys, [weatherResource()])).toThrow("OPERATOR_URL is required");
+    });
+
+    test("defaults the inference cost limit to the cost limit, and reads its own option or environment variable", () => {
+        vi.stubEnv("INFERENCE_COST_LIMIT_MICRO_USDC", undefined);
+        expect(resolveConfig({ ...keys, costLimitMicroUsdc: 700 }).inferenceCostLimitMicroUsdc).toBe(700);
+
+        vi.stubEnv("INFERENCE_COST_LIMIT_MICRO_USDC", "900");
+        expect(resolveConfig({ ...keys, costLimitMicroUsdc: 700 }).inferenceCostLimitMicroUsdc).toBe(900);
+        expect(resolveConfig({ ...keys, inferenceCostLimitMicroUsdc: 1_000 }).inferenceCostLimitMicroUsdc).toBe(1_000);
+        expect(() => resolveConfig({ ...keys, inferenceCostLimitMicroUsdc: -1 })).toThrow("inferenceCostLimitMicroUsdc");
+    });
+
+    test("accepts well-declared inference functions", () => {
+        expect(() => resolveConfig({ ...keys, operatorUrl: "http://operator.example" }, [modelResource()])).not.toThrow();
+    });
+
+    test.each([
+        ["without a maxTokens parameter", { parameters: [{ name: "prompt", type: "string" }] }, "maxTokens: int32"],
+        ["whose maxTokens isn't an int32", { parameters: [{ name: "maxTokens", type: "int64" }] }, "maxTokens: int32"],
+        ["that is paid but has no estimator", { estimateInputTokens: undefined }, "estimateInputTokens"],
+        ["priced with a flat cost", { paymentManifest: { costMicroUsdc: 5, recipientAddress: "r" } }, "per million tokens"],
+        ["with a negative rate", { paymentManifest: { inputCostMicroUsdcPerMillionTokens: -1, outputCostMicroUsdcPerMillionTokens: 0, recipientAddress: "r" } }, "per million tokens"],
+    ])("rejects an inference function %s", (_, overrides, message) => {
+        const model = modelResource();
+        model.functions = [{ ...model.functions[0]!, ...overrides }];
+
+        expect(() => resolveConfig({ ...keys, operatorUrl: "http://operator.example" }, [model])).toThrow(message);
+    });
+
+    test("rejects per-token pricing on a function not declared as inference", () => {
+        const model = modelResource();
+        model.functions = [{ ...model.functions[0]!, kind: undefined }];
+
+        expect(() => resolveConfig({ ...keys, operatorUrl: "http://operator.example" }, [model])).toThrow("kind 'inference'");
     });
 });

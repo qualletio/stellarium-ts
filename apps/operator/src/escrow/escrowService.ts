@@ -3,6 +3,7 @@ import type { AccountInfo, Signer } from "@solana/web3.js";
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import { OperationError } from "../errors.js";
 import type { AccruedGroup, ReceiptRepository } from "../repository.js";
+import { inferenceAmount, isInferenceSubmission } from "../inference.js";
 import type { PaymentSubmission } from "../routes.js";
 import { encodeBase58 } from "../solana/base58.js";
 import { getEscrowBudget } from "../solana/escrow-budget.js";
@@ -161,7 +162,11 @@ export class EscrowService {
      */
     async accruePayment(submission: PaymentSubmission): Promise<OperationResult> {
         const { voucher } = submission;
-        const { requestId, invocationId, amount, recipientAddress, signature: voucherSignature, expiresAt, invocationHash, publicKey } = voucher;
+        const { requestId, invocationId, recipientAddress, signature: voucherSignature, expiresAt, invocationHash, publicKey } = voucher;
+        // An inference voucher is charged for the reported usage, never more than the maxAmount it signed.
+        const inference = isInferenceSubmission(submission) ? submission : undefined;
+        const amount = isInferenceSubmission(submission) ? inferenceAmount(submission) : submission.voucher.amount;
+        if (amount < 1) throw new OperationError(422, 'Voucher charges nothing');
         let user: PublicKey, recipient: PublicKey;
         try {
             user = solanaUserFromSpki(voucher.publicKey);
@@ -196,6 +201,9 @@ export class EscrowService {
             expiresAt: new Date(expiresAt),
             publicKey,
             invocationHash,
+            maxAmount: inference?.voucher.maxAmount ?? null,
+            inputTokens: inference?.usage.inputTokens ?? null,
+            outputTokens: inference?.usage.outputTokens ?? null,
         }, budget.availableBudgetMicroUsdc, confirmedSince);
         if (result === 'duplicate') throw new OperationError(409, 'Voucher has already been accepted');
         if (result === 'insufficient') throw new OperationError(409, 'Insufficient escrow balance');

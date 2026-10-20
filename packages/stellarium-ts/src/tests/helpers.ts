@@ -23,6 +23,7 @@ export function testConfig(overrides: Partial<NodeConfig> = {}): NodeConfig {
         apiKey: "secret",
         operatorUrl: "http://operator.invalid/v1",
         costLimitMicroUsdc: 100_000,
+        inferenceCostLimitMicroUsdc: 100_000,
         ...overrides,
     };
 }
@@ -49,6 +50,40 @@ export function weatherResource(baseUrl = "http://127.0.0.1:3002"): StellariumRe
                 returnType: "int32",
                 exec: async () => 80,
             },
+        ],
+    };
+}
+
+export const INFERENCE_RATES = { inputCostMicroUsdcPerMillionTokens: 3_000_000, outputCostMicroUsdcPerMillionTokens: 15_000_000 };
+
+/**
+ * A fixture provider's model: paid inference `complete`, which counts one token per four prompt characters
+ * and answers with `maxTokens` tokens, a restricted paid copy `completePrivate`, and free inference `draft`.
+ */
+export function modelResource(baseUrl = "http://127.0.0.1:3002"): StellariumResource {
+    const prompt = (args: { name: string, value: unknown }[]) => String(args.find((arg) => arg.name === "prompt")?.value ?? "");
+    const complete = {
+        name: "complete",
+        kind: "inference" as const,
+        parameters: [{ name: "prompt", type: "string" }, { name: "maxTokens", type: "int32" }],
+        returnType: "string",
+        estimateInputTokens: async (args: { name: string, value: unknown }[]) => Math.ceil(prompt(args).length / 4),
+        exec: async (args: { name: string, value: unknown }[]) => ({
+            value: `echo: ${prompt(args)}`,
+            usage: { inputTokens: Math.ceil(prompt(args).length / 4), outputTokens: Number(args.find((arg) => arg.name === "maxTokens")?.value) },
+        }),
+        paymentManifest: { ...INFERENCE_RATES, recipientAddress: RECIPIENT },
+    };
+    return {
+        id: 2,
+        baseUrl,
+        metadata: {},
+        path: "com.example",
+        name: "Model",
+        functions: [
+            complete,
+            { ...complete, name: "completePrivate", restricted: true },
+            { ...complete, name: "draft", paymentManifest: undefined, estimateInputTokens: undefined },
         ],
     };
 }

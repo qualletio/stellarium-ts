@@ -3,7 +3,8 @@ import rateLimit from '@fastify/rate-limit';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { interpretParsed, parseScript } from 'requestscript';
 import { Peer } from './peer/repository.js';
-import { invocationHash, PaymentVoucher, paymentVoucherPayload } from './resource/invoker.js';
+import { type InferencePaymentVoucher, inferenceVoucherPayload, invocationHash, isInferenceVoucher, PaymentVoucher, paymentVoucherPayload } from './resource/invoker.js';
+import { inferenceCharge, type InferenceUsage, isInferenceFunction, isInferenceManifest, parseMaxTokens } from './resource/inference.js';
 import { StellariumResource, StellariumResourceFunction, StellariumResourceFunctionPaymentManifest } from './resource/repository.js';
 import type { Service } from './service.js';
 import { safeVerifyData } from './crypto/utils.js';
@@ -38,14 +39,17 @@ interface ResourceRequestFunctionCallParameter {
     value: unknown;
 }
 
-interface ResourceRunRequest {
+interface ResourceCallRequest {
     resourcePath: string;
     resourceName: string;
     functionName: string;
     parameters: ResourceRequestFunctionCallParameter[];
-    paymentVoucher?: PaymentVoucher;
     /** An `InvocationAuthorization`, checked by `GrantService.verifyInvocation`. */
     authorization?: unknown;
+}
+
+interface ResourceRunRequest extends ResourceCallRequest {
+    paymentVoucher?: PaymentVoucher | InferencePaymentVoucher;
 }
 
 interface RunRequest {
@@ -109,34 +113,66 @@ const runRequestSchema = {
     properties: { source: { type: 'string' } },
 } as const;
 
+const resourceCallProperties = {
+    resourcePath: { type: 'string' },
+    resourceName: { type: 'string' },
+    functionName: { type: 'string' },
+    parameters: {
+        type: 'array',
+        items: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } },
+    },
+    // Shape only: the grants inside are signed, so coercing them would change the signed bytes.
+    authorization: { type: 'object' },
+} as const;
+
+const fixedVoucherSchema = {
+    type: 'object',
+    required: ['requestId', 'invocationId', 'amount', 'recipientAddress', 'signature', 'expiresAt', 'invocationHash', 'publicKey'],
+    properties: {
+        requestId: { type: 'string' },
+        invocationId: { type: 'string' },
+        amount: { type: 'integer' },
+        recipientAddress: { type: 'string' },
+        signature: { type: 'string' },
+        expiresAt: { type: 'string' },
+        invocationHash: { type: 'string' },
+        publicKey: { type: 'string' },
+    },
+} as const;
+
+const inferenceVoucherSchema = {
+    type: 'object',
+    required: ['kind', 'requestId', 'invocationId', 'maxAmount', 'inputCostMicroUsdcPerMillionTokens', 'outputCostMicroUsdcPerMillionTokens', 'maxTokens', 'recipientAddress', 'signature', 'expiresAt', 'invocationHash', 'publicKey'],
+    properties: {
+        kind: { const: 'inference' },
+        requestId: { type: 'string' },
+        invocationId: { type: 'string' },
+        maxAmount: { type: 'integer', minimum: 0 },
+        inputCostMicroUsdcPerMillionTokens: { type: 'integer', minimum: 0 },
+        outputCostMicroUsdcPerMillionTokens: { type: 'integer', minimum: 0 },
+        maxTokens: { type: 'integer', minimum: 1 },
+        recipientAddress: { type: 'string' },
+        signature: { type: 'string' },
+        expiresAt: { type: 'string' },
+        invocationHash: { type: 'string' },
+        publicKey: { type: 'string' },
+    },
+} as const;
+
 const resourceRunRequestSchema = {
     type: 'object',
     required: ['resourcePath', 'resourceName', 'functionName', 'parameters'],
     properties: {
-        resourcePath: { type: 'string' },
-        resourceName: { type: 'string' },
-        functionName: { type: 'string' },
-        parameters: {
-            type: 'array',
-            items: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } },
-        },
-        paymentVoucher: {
-            type: 'object',
-            required: ['requestId', 'invocationId', 'amount', 'recipientAddress', 'signature', 'expiresAt', 'invocationHash', 'publicKey'],
-            properties: {
-                requestId: { type: 'string' },
-                invocationId: { type: 'string' },
-                amount: { type: 'integer' },
-                recipientAddress: { type: 'string' },
-                signature: { type: 'string' },
-                expiresAt: { type: 'string' },
-                invocationHash: { type: 'string' },
-                publicKey: { type: 'string' },
-            },
-        },
-        // Shape only: the grants inside are signed, so coercing them would change the signed bytes.
-        authorization: { type: 'object' },
+        ...resourceCallProperties,
+        // An inference voucher has `kind` and no `amount`, so at most one shape matches.
+        paymentVoucher: { oneOf: [fixedVoucherSchema, inferenceVoucherSchema] },
     },
+} as const;
+
+const resourceEstimateRequestSchema = {
+    type: 'object',
+    required: ['resourcePath', 'resourceName', 'functionName', 'parameters'],
+    properties: resourceCallProperties,
 } as const;
 
 const grantRenewalRequestSchema = {
@@ -167,14 +203,13 @@ function secretsEqual(a: string, b: string): boolean {
 
 /**
  * A voucher is valid when it is bound to this exact call, signed by its public key, unexpired,
- * and pays at least the function's cost to the function's recipient.
+ * and pays the function's recipient. A fixed voucher must pay at least the function's cost. An inference
+ * voucher must be for an inference function, carry its rates, and sign the call's `maxTokens`.
+ * Whether its `maxAmount` covers the call is checked separately, against the function's estimator.
  */
-function isValidPaymentVoucher(voucher: PaymentVoucher, manifest: StellariumResourceFunctionPaymentManifest, request: ResourceRunRequest): boolean {
+function isValidPaymentVoucher(voucher: PaymentVoucher | InferencePaymentVoucher, resourceFunction: StellariumResourceFunction, manifest: StellariumResourceFunctionPaymentManifest, request: ResourceRunRequest): boolean {
     const expectedHash = invocationHash(request.resourcePath, request.resourceName, request.functionName, request.parameters);
     if (voucher.invocationHash !== expectedHash) {
-        return false;
-    }
-    if (voucher.amount < manifest.costMicroUsdc) {
         return false;
     }
     if (voucher.recipientAddress !== manifest.recipientAddress) {
@@ -184,7 +219,46 @@ function isValidPaymentVoucher(voucher: PaymentVoucher, manifest: StellariumReso
     if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
         return false;
     }
+    if (isInferenceVoucher(voucher)) {
+        if (!isInferenceFunction(resourceFunction) || !isInferenceManifest(manifest)) {
+            return false;
+        }
+        if (voucher.inputCostMicroUsdcPerMillionTokens !== manifest.inputCostMicroUsdcPerMillionTokens
+            || voucher.outputCostMicroUsdcPerMillionTokens !== manifest.outputCostMicroUsdcPerMillionTokens) {
+            return false;
+        }
+        if (voucher.maxTokens !== parseMaxTokens(request.parameters)) {
+            return false;
+        }
+        return safeVerifyData(inferenceVoucherPayload(voucher), voucher.publicKey, voucher.signature);
+    }
+    if (isInferenceFunction(resourceFunction) || isInferenceManifest(manifest)) {
+        return false;
+    }
+    if (voucher.amount < manifest.costMicroUsdc) {
+        return false;
+    }
     return safeVerifyData(paymentVoucherPayload(voucher), voucher.publicKey, voucher.signature);
+}
+
+/** The function's own input-token estimate, or undefined if its estimator failed or returned something other than a count. */
+async function estimateInputTokens(resourceFunction: StellariumResourceFunction, request: ResourceCallRequest): Promise<number | undefined> {
+    try {
+        const inputTokens = await resourceFunction.estimateInputTokens?.(request.parameters);
+        return Number.isSafeInteger(inputTokens) && inputTokens! >= 0 ? inputTokens : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/** What the operator will accrue for `usage`: its charge at the voucher's rates, capped at `maxAmount`. */
+function cappedInferenceCharge(voucher: InferencePaymentVoucher, usage: InferenceUsage): number {
+    try {
+        return Math.min(inferenceCharge(voucher, usage.inputTokens, usage.outputTokens), voucher.maxAmount);
+    } catch {
+        // The charge isn't a safe integer, so it is over any maxAmount.
+        return voucher.maxAmount;
+    }
 }
 
 /**
@@ -261,11 +335,16 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
                         type: parameter.type,
                         description: parameter.description,
                     })),
-                    paymentManifest: fn.paymentManifest ? ({
+                    paymentManifest: !fn.paymentManifest ? undefined : isInferenceManifest(fn.paymentManifest) ? {
+                        inputCostMicroUsdcPerMillionTokens: fn.paymentManifest.inputCostMicroUsdcPerMillionTokens,
+                        outputCostMicroUsdcPerMillionTokens: fn.paymentManifest.outputCostMicroUsdcPerMillionTokens,
+                        recipientAddress: fn.paymentManifest.recipientAddress,
+                    } : {
                         costMicroUsdc: fn.paymentManifest.costMicroUsdc,
                         recipientAddress: fn.paymentManifest.recipientAddress,
-                    }) : undefined,
+                    },
                     restricted: fn.restricted || undefined,
+                    kind: isInferenceFunction(fn) ? 'inference' : undefined,
                 })),
                 baseUrl: resource.baseUrl,
             })),
@@ -326,21 +405,21 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         }
     });
 
-    fastify.post('/run/resource', {
-        schema: { body: resourceRunRequestSchema },
-        config: { rateLimit: options.rateLimit ?? { max: 100, timeWindow: '1 minute' } },
-    }, async (request, reply) => {
-        const resourceRequest = request.body as ResourceRunRequest;
-        const paymentVoucher = resourceRequest.paymentVoucher;
-
+    /**
+     * Finds the local function a call names and checks its parameters and, for a restricted function,
+     * its authorization. Sends the refusal and returns undefined if a check fails.
+     */
+    async function checkCall(resourceRequest: ResourceCallRequest, reply: FastifyReply): Promise<{ resource: StellariumResource, resourceFunction: StellariumResourceFunction } | undefined> {
         const resource = await options.service.resourceRepository.getInternalResource(resourceRequest.resourcePath, resourceRequest.resourceName);
         if (!resource) {
-            return reply.status(400).send({ error: 'Resource not found' });
+            reply.status(400).send({ error: 'Resource not found' });
+            return undefined;
         }
 
         const resourceFunction = resource.functions.find(fn => fn.name === resourceRequest.functionName);
         if (!resourceFunction) {
-            return reply.status(400).send({ error: 'Function not found' });
+            reply.status(400).send({ error: 'Function not found' });
+            return undefined;
         }
 
         // Grant constraints and the function both read parameters by name, so each name must be
@@ -349,7 +428,8 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         const declared = new Set(resourceFunction.parameters.map(parameter => parameter.name));
         const names = resourceRequest.parameters.map(parameter => parameter.name);
         if (new Set(names).size !== names.length || !names.every(name => declared.has(name))) {
-            return reply.status(400).send({ error: 'Parameters must be declared by the function and appear once each' });
+            reply.status(400).send({ error: 'Parameters must be declared by the function and appear once each' });
+            return undefined;
         }
 
         // A restricted function is never run without a grant from this node. Checked before the
@@ -358,12 +438,61 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             // Tells a caller without a usable grant where it can ask for one.
             const grantEndpoint = options.service.grantService.acceptsRequests ? `${options.service.config.baseUrl}/v1/grants/request` : undefined;
             if (!resourceRequest.authorization) {
-                return reply.status(403).send({ error: 'Authorization is required', grantEndpoint });
+                reply.status(403).send({ error: 'Authorization is required', grantEndpoint });
+                return undefined;
             }
             if (!await options.service.grantService.verifyInvocation(resourceRequest.authorization, resourceRequest)) {
-                return reply.status(403).send({ error: 'Invalid authorization', grantEndpoint });
+                reply.status(403).send({ error: 'Invalid authorization', grantEndpoint });
+                return undefined;
             }
         }
+
+        return { resource, resourceFunction };
+    }
+
+    /**
+     * Prices a call to a paid inference function before the caller signs its voucher: the function's
+     * estimate of the input tokens, and `maxAmount`, the charge for those plus `maxTokens` output tokens.
+     * Runs the provider's estimator, so a restricted function needs authorization here too.
+     */
+    fastify.post('/run/resource/estimate', {
+        schema: { body: resourceEstimateRequestSchema },
+        config: { rateLimit: options.rateLimit ?? { max: 100, timeWindow: '1 minute' } },
+    }, async (request, reply) => {
+        const resourceRequest = request.body as ResourceCallRequest;
+        const call = await checkCall(resourceRequest, reply);
+        if (!call) {
+            return reply;
+        }
+
+        const { resourceFunction } = call;
+        const manifest = resourceFunction.paymentManifest;
+        if (!isInferenceFunction(resourceFunction) || !isInferenceManifest(manifest)) {
+            return reply.status(400).send({ error: 'Function is not a paid inference function' });
+        }
+        const maxTokens = parseMaxTokens(resourceRequest.parameters);
+        if (maxTokens === undefined) {
+            return reply.status(400).send({ error: 'maxTokens must be a positive int32' });
+        }
+        const inputTokens = await estimateInputTokens(resourceFunction, resourceRequest);
+        if (inputTokens === undefined) {
+            return reply.status(500).send({ error: 'Failed to estimate input tokens' });
+        }
+        return { inputTokens, maxAmount: inferenceCharge(manifest, inputTokens, maxTokens) };
+    });
+
+    fastify.post('/run/resource', {
+        schema: { body: resourceRunRequestSchema },
+        config: { rateLimit: options.rateLimit ?? { max: 100, timeWindow: '1 minute' } },
+    }, async (request, reply) => {
+        const resourceRequest = request.body as ResourceRunRequest;
+        const paymentVoucher = resourceRequest.paymentVoucher;
+
+        const call = await checkCall(resourceRequest, reply);
+        if (!call) {
+            return reply;
+        }
+        const { resource, resourceFunction } = call;
 
         // Payment manifests are per function. A paid function is never run without a valid voucher.
         const paymentManifest = resourceFunction.paymentManifest;
@@ -371,23 +500,50 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             if (!paymentVoucher) {
                 return reply.status(402).send({ error: 'Payment voucher is required' });
             }
-            if (!isValidPaymentVoucher(paymentVoucher, paymentManifest, resourceRequest)) {
+            if (!isValidPaymentVoucher(paymentVoucher, resourceFunction, paymentManifest, resourceRequest)) {
                 return reply.status(400).send({ error: 'Invalid payment voucher' });
             }
             if (await options.service.grantService.isBlocked(paymentVoucher.publicKey)) {
                 return reply.status(403).send({ error: 'Caller is blocked' });
             }
+            // Re-estimated here, so inference never runs on a voucher that can't cover the expected cost.
+            if (isInferenceVoucher(paymentVoucher)) {
+                const inputTokens = await estimateInputTokens(resourceFunction, resourceRequest);
+                if (inputTokens === undefined) {
+                    return reply.status(500).send({ error: 'Failed to estimate input tokens' });
+                }
+                const requiredMaxAmount = inferenceCharge(paymentVoucher, inputTokens, paymentVoucher.maxTokens);
+                if (paymentVoucher.maxAmount < requiredMaxAmount) {
+                    return reply.status(402).send({ error: `Payment voucher maxAmount ${paymentVoucher.maxAmount} is below the estimated ${requiredMaxAmount} micro-USDC`, requiredMaxAmount });
+                }
+            }
         }
 
-        const result = await options.service.resourceInvoker.invoke(resource, resourceRequest.functionName, resourceRequest.parameters);
+        const result = await options.service.resourceInvoker.invoke(resource, resourceRequest.functionName, resourceRequest.parameters) as { value: unknown, error: { message: string } | null, usage?: InferenceUsage };
+
+        let settlement: Parameters<typeof options.service.operatorClient.settlePayment>[0] | undefined;
+        if (paymentManifest && paymentVoucher && !result.error) {
+            if (!isInferenceVoucher(paymentVoucher)) {
+                settlement = { voucher: paymentVoucher };
+            } else if (result.usage) {
+                // The function may report more output than it was allowed; the caller only signed for maxTokens.
+                const usage = { inputTokens: result.usage.inputTokens, outputTokens: Math.min(result.usage.outputTokens, paymentVoucher.maxTokens) };
+                result.usage = usage;
+                // A free call has nothing to settle, and the operator refuses an empty receipt.
+                if (cappedInferenceCharge(paymentVoucher, usage) > 0) {
+                    settlement = { voucher: paymentVoucher, usage };
+                }
+            }
+        }
 
         // Settle only verified vouchers, and only after a successful invoke. A voucher sent to a free function is ignored.
         // Run this on a separate thread to avoid blocking the main thread.
-        if (paymentManifest && paymentVoucher && !result.error) {
+        if (settlement) {
+            const payment = settlement;
             setTimeout(async () => {
                 // Nothing awaits this callback, so an uncaught error here would be an unhandled rejection.
                 try {
-                    await options.service.operatorClient.settlePayment({ voucher: paymentVoucher });
+                    await options.service.operatorClient.settlePayment(payment);
                 } catch (error) {
                     fastify.log.error(error, 'Failed to settle payment');
                 }

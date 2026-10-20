@@ -1,7 +1,8 @@
 import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { verifyData } from "../../crypto/utils.js";
-import { CombinationResourceInvoker, EXTERNAL_INVOKE_MAX_RETRIES, invocationHash, paymentVoucherPayload } from "../../resource/invoker.js";
+import { CombinationResourceInvoker, EXTERNAL_INVOKE_MAX_RETRIES, inferenceVoucherPayload, invocationHash, paymentVoucherPayload } from "../../resource/invoker.js";
+import { inferenceCharge } from "../../resource/inference.js";
 import type { ResourceRepository } from "../../resource/repository.js";
 import type { Resource } from "requestscript";
 import type { Grant, InvocationAuthorization } from "../../grant/grant.js";
@@ -194,5 +195,112 @@ describe("restricted functions", () => {
         expect(bodies.map(body => body.authorization.nonce)).toEqual(["nonce-0", "nonce-1"]);
         expect(bodies[0].paymentVoucher).toEqual(bodies[1].paymentVoucher);
         expect(authorize).toHaveBeenCalledWith(chain, { resourcePath: "com.example", resourceName: "Weather", functionName: "forecast", parameters });
+    });
+});
+
+describe("inference functions", () => {
+    const RECIPIENT = "4HkmXgXCJ8tw1ih5VFHetRt4kWdo1VLBVmV7B5p6ctK2";
+    const resource = { path: "com.example", name: "Model", metadata: { baseUrl: "https://remote.example" }, functions: [] } as unknown as Resource;
+    const parameters = [{ name: "prompt", value: "Hello" }, { name: "maxTokens", value: 1000 }];
+    const manifest = { inputCostMicroUsdcPerMillionTokens: 3_000_000, outputCostMicroUsdcPerMillionTokens: 15_000_000, recipientAddress: RECIPIENT };
+    // 2,000 input tokens and 1,000 output tokens: 6,000 + 15,000.
+    const MAX_AMOUNT = 21_000;
+
+    function createInvoker(inferenceCostLimit = 100_000, fn: Record<string, unknown> = { kind: "inference", paymentManifest: manifest }) {
+        const { publicKey, privateKey } = generateBase64KeyPair();
+        const repository = { getResourceFunction: async () => fn } as unknown as ResourceRepository;
+        return { invoker: new CombinationResourceInvoker(repository, 100_000, publicKey, privateKey, undefined, inferenceCostLimit), publicKey };
+    }
+
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+
+    let fetchMock: ReturnType<typeof vi.fn>;
+    beforeEach(() => {
+        fetchMock = vi.fn();
+        vi.stubGlobal("fetch", fetchMock);
+    });
+    afterEach(() => {
+        vi.unstubAllGlobals();
+    });
+
+    test("inferenceCharge rounds up per million tokens", () => {
+        expect(inferenceCharge(manifest, 2_000, 1_000)).toBe(21_000);
+        expect(inferenceCharge({ inputCostMicroUsdcPerMillionTokens: 150_000, outputCostMicroUsdcPerMillionTokens: 0 }, 1, 1_000_000)).toBe(1);
+        expect(inferenceCharge({ inputCostMicroUsdcPerMillionTokens: 0, outputCostMicroUsdcPerMillionTokens: 0 }, 5, 5)).toBe(0);
+        expect(() => inferenceCharge({ inputCostMicroUsdcPerMillionTokens: Number.MAX_SAFE_INTEGER, outputCostMicroUsdcPerMillionTokens: 0 }, Number.MAX_SAFE_INTEGER, 0)).toThrow();
+    });
+
+    test("asks the provider for an estimate, then signs a voucher for its maxAmount at the advertised rates", async () => {
+        fetchMock.mockResolvedValueOnce(json({ inputTokens: 2_000, maxAmount: MAX_AMOUNT })).mockResolvedValueOnce(json({ value: "Hi", error: null, usage: { inputTokens: 1_500, outputTokens: 10 } }));
+        const { invoker, publicKey } = createInvoker();
+
+        const result = await invoker.invoke(resource, "complete", parameters);
+
+        expect(result).toEqual({ value: "Hi", error: null });
+        const [[estimateUrl, estimateInit], [runUrl, runInit]] = fetchMock.mock.calls;
+        expect(estimateUrl).toBe("https://remote.example/v1/run/resource/estimate");
+        expect(JSON.parse(estimateInit.body)).toEqual({ resourcePath: "com.example", resourceName: "Model", functionName: "complete", parameters });
+        expect(runUrl).toBe("https://remote.example/v1/run/resource");
+        const voucher = JSON.parse(runInit.body).paymentVoucher;
+        expect(voucher).toMatchObject({ kind: "inference", maxAmount: MAX_AMOUNT, maxTokens: 1000, ...manifest, publicKey });
+        expect(voucher.amount).toBeUndefined();
+        expect(Object.keys(inferenceVoucherPayload(voucher))).toEqual(["kind", "requestId", "invocationId", "maxAmount", "inputCostMicroUsdcPerMillionTokens", "outputCostMicroUsdcPerMillionTokens", "maxTokens", "recipientAddress", "expiresAt", "invocationHash", "publicKey"]);
+        expect(verifyData(inferenceVoucherPayload(voucher), publicKey, voucher.signature)).toBe(true);
+        expect(Date.parse(voucher.expiresAt) - Date.now()).toBeGreaterThan(1000 * 60 * 5);
+    });
+
+    test("refuses an estimate whose maxAmount doesn't follow from the advertised rates", async () => {
+        fetchMock.mockResolvedValueOnce(json({ inputTokens: 2_000, maxAmount: MAX_AMOUNT + 1 }));
+
+        const result = await createInvoker().invoker.invoke(resource, "complete", parameters);
+
+        expect(result.error?.message).toContain("doesn't match its advertised rates");
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    test("refuses a maxAmount above the inference cost limit before signing", async () => {
+        fetchMock.mockResolvedValueOnce(json({ inputTokens: 2_000, maxAmount: MAX_AMOUNT }));
+
+        await expect(createInvoker(MAX_AMOUNT - 1).invoker.invoke(resource, "complete", parameters)).rejects.toThrow("inference cost limit");
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    test("fails before any network call without a positive int32 maxTokens", async () => {
+        const { invoker } = createInvoker();
+
+        for (const value of [undefined, 0, -1, 1.5, "10", 2 ** 31]) {
+            const call = value === undefined ? [parameters[0]!] : [parameters[0]!, { name: "maxTokens", value }];
+            const result = await invoker.invoke(resource, "complete", call);
+            expect(result.error?.message).toContain("maxTokens");
+        }
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test("surfaces a failed estimate without signing a voucher", async () => {
+        fetchMock.mockResolvedValueOnce(json({ error: "Function is not a paid inference function" }, 400));
+
+        const result = await createInvoker().invoker.invoke(resource, "complete", parameters);
+
+        expect(result.error?.message).toContain("Function is not a paid inference function");
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    test("refuses per-token pricing on a function not declared as inference", async () => {
+        const result = await createInvoker(100_000, { paymentManifest: manifest }).invoker.invoke(resource, "complete", parameters);
+
+        expect(result.error?.message).toContain("isn't an inference function");
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test("returns a local inference function's value with its usage", async () => {
+        const local = {
+            path: "com.example", name: "Model", metadata: {},
+            functions: [{ name: "complete", kind: "inference", parameters: [], returnType: "string", exec: async () => ({ value: "Hi", usage: { inputTokens: 3, outputTokens: 1 } }) }],
+        } as unknown as Resource;
+        const broken = { ...local, functions: [{ ...local.functions[0]!, exec: async () => "Hi" }] } as unknown as Resource;
+        const { invoker } = createInvoker();
+
+        expect(await invoker.invoke(local, "complete", parameters)).toEqual({ value: "Hi", error: null, usage: { inputTokens: 3, outputTokens: 1 } });
+        expect((await invoker.invoke(broken, "complete", parameters)).error?.message).toContain("must return { value, usage");
     });
 });

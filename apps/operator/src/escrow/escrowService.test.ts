@@ -5,7 +5,7 @@ import type { Database } from '../db/database.js';
 import { receiptsTable, settlementsTable } from '../db/schema.js';
 import { OperationError } from '../errors.js';
 import { ReceiptRepository } from '../repository.js';
-import { createTestDatabase, FakeConnection, generateNodeKeys, MINT, RECIPIENT, signedVoucher, tokenAccount } from '../testing.js';
+import { createTestDatabase, FakeConnection, generateNodeKeys, MINT, RECIPIENT, signedInferenceVoucher, signedVoucher, tokenAccount } from '../testing.js';
 import { EscrowService, RECONCILE_MIN_AGE_MS, type SettlementPolicy } from './escrowService.js';
 
 describe('EscrowService', () => {
@@ -86,6 +86,37 @@ describe('EscrowService', () => {
             prepare();
 
             await rejectsWithStatus(service.accruePayment(signedVoucher(keys)), 422);
+        });
+
+        test('charges an inference voucher for the reported usage at its signed rates, and records the usage', async () => {
+            // 1,000 input tokens at $3/M plus 500 output tokens at $15/M.
+            await service.accruePayment(signedInferenceVoucher(keys));
+
+            expect(await receipts()).toMatchObject([{ amount: 10_500, maxAmount: 20_000, inputTokens: 1_000, outputTokens: 500, settlementId: null }]);
+        });
+
+        test('caps an inference charge at the voucher\'s maxAmount', async () => {
+            await service.accruePayment(signedInferenceVoucher(keys, { maxAmount: 5_000 }));
+
+            expect((await receipts())[0]?.amount).toBe(5_000);
+        });
+
+        test('rounds an inference charge up to the next micro-USDC', async () => {
+            await service.accruePayment(signedInferenceVoucher(keys, {}, { inputTokens: 1, outputTokens: 0 }));
+
+            expect((await receipts())[0]?.amount).toBe(3);
+        });
+
+        test('422s on an inference voucher that charges nothing', async () => {
+            await rejectsWithStatus(service.accruePayment(signedInferenceVoucher(keys, {}, { inputTokens: 0, outputTokens: 0 })), 422);
+            expect(await receipts()).toEqual([]);
+        });
+
+        test('checks the computed inference charge against the escrow balance', async () => {
+            const rates = { inputCostMicroUsdcPerMillionTokens: 1_000_000, outputCostMicroUsdcPerMillionTokens: 0, maxAmount: 2_000_000 };
+
+            await rejectsWithStatus(service.accruePayment(signedInferenceVoucher(keys, rates, { inputTokens: 1_000_001, outputTokens: 0 })), 409);
+            await service.accruePayment(signedInferenceVoucher(keys, rates, { inputTokens: 1_000_000, outputTokens: 0 }));
         });
 
         test('stores amounts above the 32-bit integer range', async () => {

@@ -5,7 +5,7 @@ import { receiptsTable } from './db/schema.js';
 import { OperationError } from './errors.js';
 import { PaymentService } from './paymentService.js';
 import { ReceiptRepository } from './repository.js';
-import { createTestDatabase, generateNodeKeys, RECIPIENT, signedVoucher } from './testing.js';
+import { createTestDatabase, generateNodeKeys, RECIPIENT, signedInferenceVoucher, signedVoucher } from './testing.js';
 
 describe('PaymentService.verifyPayment', () => {
     let db: Database;
@@ -35,6 +35,29 @@ describe('PaymentService.verifyPayment', () => {
 
         await expect(service.verifyPayment({ voucher })).resolves.toBeUndefined();
         expect(voucher.invocationHash).toBe(invocationHash('com.example', 'Weather', 'temperature', parameters));
+    });
+
+    test('accepts an inference voucher created by the stellarium-ts node', async () => {
+        const keys = generateNodeKeys();
+        const invoker = new CombinationResourceInvoker(undefined as never, 100_000, keys.publicKey, keys.privateKey);
+        const parameters = [{ name: 'prompt', value: 'Hi' }, { name: 'maxTokens', value: 100 }];
+        const rates = { inputCostMicroUsdcPerMillionTokens: 3_000_000, outputCostMicroUsdcPerMillionTokens: 15_000_000, recipientAddress: RECIPIENT.toBase58() };
+        const voucher = invoker.createInferenceVoucher(rates, 1_503, 100, 'com.example', 'Model', 'complete', parameters);
+
+        await expect(service.verifyPayment({ voucher, usage: { inputTokens: 1, outputTokens: 100 } })).resolves.toBeUndefined();
+    });
+
+    test('rejects an inference voucher with an altered maxAmount', async () => {
+        const submission = signedInferenceVoucher();
+        submission.voucher.maxAmount += 1;
+
+        expect(await rejection(service.verifyPayment(submission))).toEqual({ status: 401, message: 'Invalid voucher signature' });
+    });
+
+    test('rejects reported output beyond the voucher\'s maxTokens', async () => {
+        const submission = signedInferenceVoucher(undefined, { maxTokens: 100 }, { inputTokens: 10, outputTokens: 101 });
+
+        expect(await rejection(service.verifyPayment(submission))).toMatchObject({ status: 400 });
     });
 
     test('rejects a voucher with an altered field', async () => {

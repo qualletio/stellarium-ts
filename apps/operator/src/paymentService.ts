@@ -1,25 +1,39 @@
 import { createPublicKey, verify } from "node:crypto";
 import { OperationError } from "./errors.js";
 import type { ReceiptRepository } from "./repository.js";
+import { isInferenceSubmission } from "./inference.js";
 import type { PaymentSubmission } from "./routes.js";
 
 export class PaymentService {
     constructor(private readonly receipts: ReceiptRepository) {}
 
     /**
-     * Checks the voucher's signature and expiry, then that it hasn't been accepted.
+     * Checks the voucher's signature and expiry, then that it hasn't been accepted. For an inference
+     * voucher, also that the reported output fits in the `maxTokens` the caller signed.
      * The receipt insert in `EscrowService.accruePayment` is the authoritative duplicate check;
      * this one rejects most repeats before any RPC calls.
      */
     async verifyPayment(submission: PaymentSubmission): Promise<void> {
-        const { voucher } = submission;
-        const { requestId, invocationId, amount, recipientAddress, signature: voucherSignature, expiresAt, invocationHash, publicKey } = voucher;
+        const { requestId, invocationId, signature: voucherSignature, expiresAt, publicKey } = submission.voucher;
 
-        // Same payload (paymentVoucherPayload) and SPKI key that signData used to create the voucher.
-        const payload = JSON.stringify({
-            requestId, invocationId, amount, recipientAddress,
-            expiresAt, invocationHash, publicKey,
-        });
+        // Same payload (paymentVoucherPayload or inferenceVoucherPayload) and SPKI key that signData used to create the voucher.
+        let payload: string;
+        if (isInferenceSubmission(submission)) {
+            const {
+                kind, requestId, invocationId, maxAmount, inputCostMicroUsdcPerMillionTokens, outputCostMicroUsdcPerMillionTokens,
+                maxTokens, recipientAddress, expiresAt, invocationHash, publicKey,
+            } = submission.voucher;
+            payload = JSON.stringify({
+                kind, requestId, invocationId, maxAmount, inputCostMicroUsdcPerMillionTokens, outputCostMicroUsdcPerMillionTokens,
+                maxTokens, recipientAddress, expiresAt, invocationHash, publicKey,
+            });
+        } else {
+            const { requestId, invocationId, amount, recipientAddress, expiresAt, invocationHash, publicKey } = submission.voucher;
+            payload = JSON.stringify({
+                requestId, invocationId, amount, recipientAddress,
+                expiresAt, invocationHash, publicKey,
+            });
+        }
         let key;
         try {
             key = createPublicKey({
@@ -44,6 +58,10 @@ export class PaymentService {
         const expiry = Date.parse(expiresAt);
         if (!Number.isFinite(expiry) || expiry < Date.now()) {
             throw new OperationError(401, 'Voucher has expired');
+        }
+
+        if (isInferenceSubmission(submission) && submission.usage.outputTokens > submission.voucher.maxTokens) {
+            throw new OperationError(400, 'Reported output tokens exceed the voucher\'s maxTokens');
         }
 
         const receipt = await this.receipts.getByRequestIdAndInvocationId(requestId, invocationId);

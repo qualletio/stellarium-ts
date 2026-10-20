@@ -22,6 +22,8 @@ export interface NodeConfig {
     operatorUrl?: string;
     /** Most this node will pay for one remote call. */
     costLimitMicroUsdc: number;
+    /** Most this node will sign for in one remote inference call. */
+    inferenceCostLimitMicroUsdc: number;
 }
 
 export interface Service {
@@ -46,7 +48,7 @@ export function createService(db: Database, resources: StellariumResource[], con
 
     const grantService = new GrantService(new GrantRepository(db), config, options.approveGrant);
 
-    const resourceInvoker = new CombinationResourceInvoker(resourceRepository, config.costLimitMicroUsdc, config.publicKey, config.privateKey, grantService);
+    const resourceInvoker = new CombinationResourceInvoker(resourceRepository, config.costLimitMicroUsdc, config.publicKey, config.privateKey, grantService, config.inferenceCostLimitMicroUsdc);
 
     const operatorClient = new OperatorClient(config.operatorUrl);
 

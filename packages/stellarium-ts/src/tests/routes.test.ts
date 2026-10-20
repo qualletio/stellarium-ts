@@ -7,11 +7,11 @@ import { type Grant, grantRenewalPayload, grantRequestPayload } from "../grant/g
 import { GrantRepository } from "../grant/repository.js";
 import { GrantService } from "../grant/service.js";
 import { type Peer, peerAnnouncementPayload } from "../peer/repository.js";
-import { CombinationResourceInvoker, type PaymentVoucher, paymentVoucherPayload } from "../resource/invoker.js";
+import { CombinationResourceInvoker, type InferencePaymentVoucher, inferenceVoucherPayload, type PaymentVoucher, paymentVoucherPayload } from "../resource/invoker.js";
 import { resourceAnnouncementPayload, type StellariumResource } from "../resource/repository.js";
 import routes from "../routes.js";
 import { createService, type NodeConfig, type Service } from "../service.js";
-import { COST, generateBase64KeyPair, RECIPIENT, temperatureSource, testConfig, weatherResource } from "./helpers.js";
+import { COST, generateBase64KeyPair, INFERENCE_RATES, modelResource, RECIPIENT, temperatureSource, testConfig, weatherResource } from "./helpers.js";
 
 const parameters = [{ name: "city", value: "Oslo" }];
 const inMinutes = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
@@ -707,5 +707,182 @@ describe("restricted functions", () => {
 
             expect(response.statusCode).toBe(400);
         });
+    });
+});
+
+describe("inference functions", () => {
+    const weather = weatherResource();
+    const model = modelResource();
+    const caller = generateBase64KeyPair();
+    const callerInvoker = new CombinationResourceInvoker(undefined as never, 100_000, caller.publicKey, caller.privateKey);
+    // "Hello world!" is 3 input tokens by the fixture's estimator. 3 at $3/M plus 1,000 at $15/M, rounded up.
+    const parameters = [{ name: "prompt", value: "Hello world!" }, { name: "maxTokens", value: 1000 }];
+    const MAX_AMOUNT = 15_009;
+    const manifest = { ...INFERENCE_RATES, recipientAddress: RECIPIENT };
+
+    let db: Database;
+    let service: Service;
+    let fastify: FastifyInstance;
+    let settlePayment: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(async () => {
+        db = await openDatabase(":memory:");
+        service = createService(db, [weather, model], testConfig());
+        settlePayment = vi.spyOn(service.operatorClient, "settlePayment").mockResolvedValue(undefined);
+        fastify = Fastify();
+        await fastify.register(routes, { prefix: "/v1", service });
+        await fastify.ready();
+    });
+
+    afterEach(async () => {
+        await fastify.close();
+        await db.close();
+        vi.restoreAllMocks();
+    });
+
+    const flushSettlement = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+    function voucherFor(functionName = "complete", overrides: Partial<Omit<InferencePaymentVoucher, "signature">> = {}): InferencePaymentVoucher {
+        const voucher = callerInvoker.createInferenceVoucher(manifest, MAX_AMOUNT, 1000, model.path, model.name, functionName, parameters);
+        const resigned = { ...voucher, ...overrides };
+        return { ...resigned, signature: signData(inferenceVoucherPayload(resigned), caller.privateKey) };
+    }
+
+    function call(url: string, body: Record<string, unknown> = {}) {
+        return fastify.inject({
+            method: "POST",
+            url,
+            payload: { resourcePath: model.path, resourceName: model.name, functionName: "complete", parameters, ...body },
+        });
+    }
+
+    describe("POST /v1/run/resource/estimate", () => {
+        test("returns the estimator's input tokens and the maxAmount they imply", async () => {
+            const response = await call("/v1/run/resource/estimate");
+
+            expect(response.statusCode).toBe(200);
+            expect(response.json()).toEqual({ inputTokens: 3, maxAmount: MAX_AMOUNT });
+        });
+
+        test.each([
+            ["a free inference function", { functionName: "draft" }],
+            ["a fixed function", { resourceName: weather.name, functionName: "temperature", parameters: [{ name: "city", value: "Oslo" }] }],
+        ])("refuses %s", async (_, body) => {
+            const response = await call("/v1/run/resource/estimate", body);
+
+            expect(response.statusCode).toBe(400);
+            expect(response.json()).toEqual({ error: "Function is not a paid inference function" });
+        });
+
+        test("refuses a call without a positive maxTokens", async () => {
+            const response = await call("/v1/run/resource/estimate", { parameters: [{ name: "prompt", value: "Hi" }, { name: "maxTokens", value: 0 }] });
+
+            expect(response.statusCode).toBe(400);
+        });
+
+        test("requires authorization for a restricted function, before running the estimator", async () => {
+            const estimator = vi.spyOn(model.functions[1]!, "estimateInputTokens");
+
+            const response = await call("/v1/run/resource/estimate", { functionName: "completePrivate" });
+
+            expect(response.statusCode).toBe(403);
+            expect(estimator).not.toHaveBeenCalled();
+        });
+
+        test("answers 500 when the estimator throws", async () => {
+            vi.spyOn(model.functions[0]!, "estimateInputTokens").mockRejectedValue(new Error("token counter is down"));
+
+            const response = await call("/v1/run/resource/estimate");
+
+            expect(response.statusCode).toBe(500);
+        });
+    });
+
+    describe("POST /v1/run/resource", () => {
+        test("runs with a voucher covering the estimate and settles the reported usage", async () => {
+            const paymentVoucher = voucherFor();
+            const response = await call("/v1/run/resource", { paymentVoucher });
+
+            expect(response.statusCode).toBe(200);
+            expect(response.json()).toEqual({ value: "echo: Hello world!", error: null, usage: { inputTokens: 3, outputTokens: 1000 } });
+            await flushSettlement();
+            expect(settlePayment).toHaveBeenCalledExactlyOnceWith({ voucher: paymentVoucher, usage: { inputTokens: 3, outputTokens: 1000 } });
+        });
+
+        test("refuses a voucher below the estimator's requirement without running inference", async () => {
+            const exec = vi.spyOn(model.functions[0]!, "exec");
+
+            const response = await call("/v1/run/resource", { paymentVoucher: voucherFor("complete", { maxAmount: MAX_AMOUNT - 1 }) });
+
+            expect(response.statusCode).toBe(402);
+            expect(response.json()).toMatchObject({ requiredMaxAmount: MAX_AMOUNT });
+            expect(exec).not.toHaveBeenCalled();
+            await flushSettlement();
+            expect(settlePayment).not.toHaveBeenCalled();
+        });
+
+        test.each([
+            ["a different input rate", { inputCostMicroUsdcPerMillionTokens: 1 }],
+            ["a different output rate", { outputCostMicroUsdcPerMillionTokens: 1 }],
+            ["a maxTokens other than the call's", { maxTokens: 999 }],
+            ["a different recipient", { recipientAddress: "11111111111111111111111111111111" }],
+        ])("rejects a voucher with %s", async (_, overrides) => {
+            const response = await call("/v1/run/resource", { paymentVoucher: voucherFor("complete", overrides) });
+
+            expect(response.statusCode).toBe(400);
+            expect(response.json()).toEqual({ error: "Invalid payment voucher" });
+        });
+
+        test("rejects a fixed voucher for an inference function, and an inference voucher for a fixed function", async () => {
+            const fixed = callerInvoker.createPaymentVoucher(RECIPIENT, MAX_AMOUNT, model.path, model.name, "complete", parameters);
+            expect((await call("/v1/run/resource", { paymentVoucher: fixed })).statusCode).toBe(400);
+
+            const weatherParameters = [{ name: "city", value: "Oslo" }];
+            const inference = callerInvoker.createInferenceVoucher(manifest, MAX_AMOUNT, 1000, weather.path, weather.name, "temperature", weatherParameters);
+            const response = await call("/v1/run/resource", { resourceName: weather.name, functionName: "temperature", parameters: weatherParameters, paymentVoucher: inference });
+            expect(response.statusCode).toBe(400);
+        });
+
+        test("caps reported output at maxTokens", async () => {
+            vi.spyOn(model.functions[0]!, "exec").mockResolvedValue({ value: "long", usage: { inputTokens: 3, outputTokens: 5000 } });
+            const paymentVoucher = voucherFor();
+
+            const response = await call("/v1/run/resource", { paymentVoucher });
+
+            expect(response.json().usage).toEqual({ inputTokens: 3, outputTokens: 1000 });
+            await flushSettlement();
+            expect(settlePayment).toHaveBeenCalledExactlyOnceWith({ voucher: paymentVoucher, usage: { inputTokens: 3, outputTokens: 1000 } });
+        });
+
+        test("does not settle a call that charges nothing", async () => {
+            vi.spyOn(model.functions[0]!, "exec").mockResolvedValue({ value: "", usage: { inputTokens: 0, outputTokens: 0 } });
+
+            const response = await call("/v1/run/resource", { paymentVoucher: voucherFor() });
+
+            expect(response.statusCode).toBe(200);
+            await flushSettlement();
+            expect(settlePayment).not.toHaveBeenCalled();
+        });
+
+        test("does not settle when the function doesn't report usage", async () => {
+            vi.spyOn(model.functions[0]!, "exec").mockResolvedValue("no usage");
+
+            const response = await call("/v1/run/resource", { paymentVoucher: voucherFor() });
+
+            expect(response.json().error.message).toContain("must return { value, usage");
+            await flushSettlement();
+            expect(settlePayment).not.toHaveBeenCalled();
+        });
+    });
+
+    test("GET /v1/resources announces the kind and per-token pricing", async () => {
+        const response = await fastify.inject({ method: "GET", url: "/v1/resources" });
+
+        const functions = response.json().resources.find((resource: { name: string }) => resource.name === "Model").functions;
+        expect(functions[0]).toMatchObject({ name: "complete", kind: "inference", paymentManifest: manifest });
+        expect(functions[2]).toMatchObject({ name: "draft", kind: "inference" });
+        expect(functions[2].paymentManifest).toBeUndefined();
+        const temperature = response.json().resources.find((resource: { name: string }) => resource.name === "Weather").functions[0];
+        expect(temperature.kind).toBeUndefined();
     });
 });

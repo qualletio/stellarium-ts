@@ -1,4 +1,8 @@
-export interface PaymentSubmission {
+// Wire formats match PaymentVoucher and InferencePaymentVoucher in resource/invoker.ts,
+// and PaymentSubmission in apps/operator/src/routes.ts.
+export type PaymentSubmission = FixedPaymentSubmission | InferencePaymentSubmission;
+
+export interface FixedPaymentSubmission {
     voucher: {
         requestId: string; 
         invocationId: string; 
@@ -8,6 +12,28 @@ export interface PaymentSubmission {
         expiresAt: string; 
         invocationHash: string;
         publicKey: string;
+    }
+}
+
+/** The provider reports the call's usage; the operator charges it at the voucher's rates, up to `maxAmount`. */
+export interface InferencePaymentSubmission {
+    voucher: {
+        kind: 'inference';
+        requestId: string;
+        invocationId: string;
+        maxAmount: number;
+        inputCostMicroUsdcPerMillionTokens: number;
+        outputCostMicroUsdcPerMillionTokens: number;
+        maxTokens: number;
+        recipientAddress: string;
+        signature: string;
+        expiresAt: string;
+        invocationHash: string;
+        publicKey: string;
+    }
+    usage: {
+        inputTokens: number;
+        outputTokens: number;
     }
 }
 

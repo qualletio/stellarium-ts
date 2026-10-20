@@ -1,13 +1,28 @@
 import { isFreshExpiry, safeVerifyData } from "../crypto/utils.js";
-import { Resource, ResourceFunction, ResourceFunctionParameter } from "requestscript";
+import { Resource, ResourceFunction, ResourceFunctionCallParameter, ResourceFunctionParameter } from "requestscript";
 import { Database } from "sqlite";
 import type { StoredPeer } from "../peer/repository.js";
+import { isInferenceManifest } from "./inference.js";
 
-export interface StellariumResourceFunctionPaymentManifest {
+/** A flat price per call. */
+export interface StellariumFixedPaymentManifest {
     id?: number;
     costMicroUsdc: number;
     recipientAddress: string;
 }
+
+/** Per-token pricing for an inference function. Either rate may be 0. */
+export interface StellariumInferencePaymentManifest {
+    id?: number;
+    inputCostMicroUsdcPerMillionTokens: number;
+    outputCostMicroUsdcPerMillionTokens: number;
+    recipientAddress: string;
+}
+
+export type StellariumResourceFunctionPaymentManifest = StellariumFixedPaymentManifest | StellariumInferencePaymentManifest;
+
+/** Fixed functions return one value. Inference functions run AI inference and are priced per token. */
+export type StellariumResourceFunctionKind = 'fixed' | 'inference';
 
 export interface StellariumResourceFunctionParameter extends ResourceFunctionParameter {
     description?: string;
@@ -20,6 +35,13 @@ export interface StellariumResourceFunction extends ResourceFunction {
     paymentManifest?: StellariumResourceFunctionPaymentManifest;
     /** Callers need a grant from the hosting node. Announced to peers so callers can tell. */
     restricted?: boolean;
+    /** Absent means 'fixed'. An inference function takes a `maxTokens: int32` parameter and its `exec` returns `{ value, usage }`. */
+    kind?: StellariumResourceFunctionKind;
+    /**
+     * Input tokens a call will use, for pricing its voucher before inference runs. Required on paid inference
+     * functions. It runs only on the hosting node and, like `exec`, is never announced.
+     */
+    estimateInputTokens?: (args: ResourceFunctionCallParameter[]) => Promise<number>;
 }
 
 export interface StellariumResource extends Resource {
@@ -176,8 +198,8 @@ export class ResourceRepository {
         const createdAt = new Date().toISOString();
         for (const fn of functions) {
             const functionResult = await this.db.run(
-                'INSERT INTO resource_function (resource_id, name, return_type, description, restricted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [resourceId, fn.name, fn.returnType, optionalText(fn.description), fn.restricted === true ? 1 : 0, createdAt, createdAt]
+                'INSERT INTO resource_function (resource_id, name, return_type, description, restricted, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                [resourceId, fn.name, fn.returnType, optionalText(fn.description), fn.restricted === true ? 1 : 0, fn.kind === 'inference' ? 'inference' : 'fixed', createdAt, createdAt]
             );
 
             const functionId = functionResult.lastID;
@@ -189,10 +211,20 @@ export class ResourceRepository {
                 );
             }
 
-            if (fn.paymentManifest) {
+            const manifest = fn.paymentManifest;
+            if (manifest) {
+                const inference = isInferenceManifest(manifest);
                 await this.db.run(
-                    'INSERT INTO resource_function_payment_manifest (resource_function_id, cost_micro_usdc, recipient_address, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-                    [functionId, fn.paymentManifest.costMicroUsdc, fn.paymentManifest.recipientAddress, createdAt, createdAt]
+                    'INSERT INTO resource_function_payment_manifest (resource_function_id, cost_micro_usdc, input_cost_micro_usdc_per_million_tokens, output_cost_micro_usdc_per_million_tokens, recipient_address, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    [
+                        functionId,
+                        inference ? null : manifest.costMicroUsdc,
+                        inference ? manifest.inputCostMicroUsdcPerMillionTokens : null,
+                        inference ? manifest.outputCostMicroUsdcPerMillionTokens : null,
+                        manifest.recipientAddress,
+                        createdAt,
+                        createdAt,
+                    ]
                 );
             }
         }
@@ -283,6 +315,7 @@ export class ResourceRepository {
             exec: async () => undefined,
             paymentManifest: await this.getResourceFunctionPaymentManifest(fn.id),
             restricted: fn.restricted === 1 || undefined,
+            kind: fn.kind === 'inference' ? 'inference' : undefined,
         };
     }
 
@@ -297,6 +330,7 @@ export class ResourceRepository {
             exec: async () => undefined,
             paymentManifest: await this.getResourceFunctionPaymentManifest(f.id),
             restricted: f.restricted === 1 || undefined,
+            kind: f.kind === 'inference' ? 'inference' as const : undefined,
         })));
     }
 
@@ -312,6 +346,14 @@ export class ResourceRepository {
         const result = await this.db.get('SELECT * FROM resource_function_payment_manifest WHERE resource_function_id = ?', [resourceFunctionId]);
         if (!result) {
             return undefined;
+        }
+        if (result.cost_micro_usdc === null) {
+            return {
+                id: result.id,
+                inputCostMicroUsdcPerMillionTokens: result.input_cost_micro_usdc_per_million_tokens as number,
+                outputCostMicroUsdcPerMillionTokens: result.output_cost_micro_usdc_per_million_tokens as number,
+                recipientAddress: result.recipient_address as string,
+            };
         }
         return {
             id: result.id,

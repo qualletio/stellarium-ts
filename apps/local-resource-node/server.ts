@@ -27,8 +27,40 @@ const weather: StellariumResource = {
   ],
 };
 
+const prompt = (args: { name: string; value: unknown }[]) => String(args.find((arg) => arg.name === "prompt")?.value ?? "");
+// A stand-in for a model: about four characters per token, as a real estimator might count.
+const countTokens = (text: string) => Math.ceil(text.length / 4);
+
+const echo: StellariumResource = {
+  id: 2,
+  baseUrl: process.env.BASE_URL ?? `http://127.0.0.1:${port}`,
+  metadata: {},
+  path: "com.example",
+  name: "Echo",
+  functions: [
+    {
+      name: "complete",
+      kind: "inference",
+      parameters: [{ name: "prompt", type: "string" }, { name: "maxTokens", type: "int32" }],
+      returnType: "string",
+      estimateInputTokens: async (args) => countTokens(prompt(args)),
+      exec: async (args) => {
+        const maxTokens = Number(args.find((arg) => arg.name === "maxTokens")?.value);
+        const value = `echo: ${prompt(args)}`.slice(0, maxTokens * 4);
+        return { value, usage: { inputTokens: countTokens(prompt(args)), outputTokens: countTokens(value) } };
+      },
+      paymentManifest: {
+        inputCostMicroUsdcPerMillionTokens: 3_000_000,
+        outputCostMicroUsdcPerMillionTokens: 15_000_000,
+        recipientAddress: process.env.RECIPIENT_ADDRESS ?? process.env.RECEIPIENT_ADDRESS!,
+      },
+    },
+  ],
+};
+
 const node = new StellariumNode();
 await node.register(weather);
+await node.register(echo);
 
 const fastify = Fastify({ logger: true });
 await node.start(fastify, {

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { OperationError } from './errors.js';
 import routes from './routes.js';
 import type { Service } from './service.js';
-import { signedVoucher } from './testing.js';
+import { signedInferenceVoucher, signedVoucher } from './testing.js';
 
 describe('operator routes', () => {
     let fastify: FastifyInstance;
@@ -47,6 +47,29 @@ describe('operator routes', () => {
             ['a negative amount', signedVoucher(undefined, { amount: -5 })],
             ['a fractional amount', signedVoucher(undefined, { amount: 1.5 })],
             ['an amount beyond the safe integer range', signedVoucher(undefined, { amount: 2 ** 60 })],
+        ])('rejects %s with 400 before reaching the service', async (_, payload) => {
+            const response = await pay(payload);
+
+            expect(response.statusCode).toBe(400);
+            expect(service.paymentService.verifyPayment).not.toHaveBeenCalled();
+        });
+
+        test('accepts an inference voucher with its usage', async () => {
+            const submission = signedInferenceVoucher();
+            const response = await pay(submission);
+
+            expect(response.statusCode).toBe(202);
+            expect(service.escrowService.accruePayment).toHaveBeenCalledWith(submission);
+        });
+
+        test.each([
+            ['an inference voucher without usage', { voucher: signedInferenceVoucher().voucher }],
+            ['fractional usage', signedInferenceVoucher(undefined, {}, { inputTokens: 1.5, outputTokens: 1 })],
+            ['negative usage', signedInferenceVoucher(undefined, {}, { inputTokens: 1, outputTokens: -1 })],
+            ['a negative rate', signedInferenceVoucher(undefined, { inputCostMicroUsdcPerMillionTokens: -1 })],
+            ['a zero maxAmount', signedInferenceVoucher(undefined, { maxAmount: 0 })],
+            ['an unknown kind', (() => { const submission = signedInferenceVoucher(); return { ...submission, voucher: { ...submission.voucher, kind: 'other' } }; })()],
+            ['a fixed voucher with a kind', (() => { const submission = signedVoucher(); return { voucher: { ...submission.voucher, kind: 'inference' } }; })()],
         ])('rejects %s with 400 before reaching the service', async (_, payload) => {
             const response = await pay(payload);
 

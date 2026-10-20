@@ -62,6 +62,22 @@ describe("ResourceRepository", () => {
             expect((await repository.getResourceFunction("com.provider", "Forecast", "tomorrow"))?.description).toBe("Tomorrow's forecast");
         });
 
+        test("keeps inference functions' kind and per-token pricing", async () => {
+            const pricing = { inputCostMicroUsdcPerMillionTokens: 3_000_000, outputCostMicroUsdcPerMillionTokens: 0, recipientAddress: RECIPIENT };
+            await repository.learn(resource("Model", [
+                { name: "complete", kind: "inference", parameters: [{ name: "maxTokens", type: "int32" }], paymentManifest: pricing },
+                { name: "count", paymentManifest: { costMicroUsdc: 5, recipientAddress: RECIPIENT } },
+            ]));
+
+            const complete = await repository.getResourceFunction("com.provider", "Model", "complete");
+            expect(complete).toMatchObject({ kind: "inference", paymentManifest: pricing });
+            const count = await repository.getResourceFunction("com.provider", "Model", "count");
+            expect(count?.kind).toBeUndefined();
+            expect(count?.paymentManifest).toEqual({ id: expect.any(Number), costMicroUsdc: 5, recipientAddress: RECIPIENT });
+            const functions = (await repository.getResource("com.provider.Model"))?.functions as StellariumResourceFunction[];
+            expect(functions.find(fn => fn.name === "complete")).toMatchObject({ kind: "inference", paymentManifest: pricing });
+        });
+
         test("is idempotent, so startup can run on every boot", async () => {
             const learned = resource("Forecast", [{ name: "tomorrow" }]);
 
