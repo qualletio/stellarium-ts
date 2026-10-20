@@ -1,10 +1,11 @@
 // Adapter for the operator's existing web3.js dependency. Builds instructions;
 // signing and transaction submission stay with the caller's wallet.
+import { ASSOCIATED_TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { PublicKey, SystemProgram, TransactionInstruction } from '@solana/web3.js';
 import type { AccountInfo } from '@solana/web3.js';
 
 const ESCROW_SEED = Buffer.from('escrow');
-const DISCRIMINATOR = Buffer.from('ESCROW01');
+const DISCRIMINATOR = Buffer.from('ESCROW02');
 export const ESCROW_ACCOUNT_SIZE = 73;
 
 export function getEscrowAddress(programId: PublicKey, authority: PublicKey, user: PublicKey): PublicKey {
@@ -13,17 +14,25 @@ export function getEscrowAddress(programId: PublicKey, authority: PublicKey, use
     )[0];
 }
 
-/** Authority must equal the program's configured ESCROW_AUTHORITY. */
+/** The escrow's USDC token account: the escrow PDA's associated token account. Users deposit here. */
+export function getEscrowTokenAddress(programId: PublicKey, authority: PublicKey, user: PublicKey, mint: PublicKey): PublicKey {
+    return getAssociatedTokenAddressSync(mint, getEscrowAddress(programId, authority, user), true);
+}
+
+/** Authority must equal the program's configured ESCROW_AUTHORITY, and mint its USDC_MINT. */
 export function createEscrowInstruction(input: {
     programId: PublicKey;
     authority: PublicKey;
     user: PublicKey;
+    mint: PublicKey;
     payer?: PublicKey;
-}): { escrowAddress: PublicKey; instruction: TransactionInstruction } {
-    const { programId, authority, user, payer = authority } = input;
+}): { escrowAddress: PublicKey; escrowTokenAddress: PublicKey; instruction: TransactionInstruction } {
+    const { programId, authority, user, mint, payer = authority } = input;
     const escrowAddress = getEscrowAddress(programId, authority, user);
+    const escrowTokenAddress = getAssociatedTokenAddressSync(mint, escrowAddress, true);
     return {
         escrowAddress,
+        escrowTokenAddress,
         instruction: new TransactionInstruction({
             programId,
             keys: [
@@ -31,7 +40,11 @@ export function createEscrowInstruction(input: {
                 { pubkey: user, isSigner: false, isWritable: false },
                 { pubkey: authority, isSigner: true, isWritable: false },
                 { pubkey: escrowAddress, isSigner: false, isWritable: true },
+                { pubkey: escrowTokenAddress, isSigner: false, isWritable: true },
+                { pubkey: mint, isSigner: false, isWritable: false },
                 { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+                { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+                { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
             ],
             data: Buffer.from([0]),
         }),
@@ -42,18 +55,19 @@ export function createEscrowInstruction(input: {
 export const PROTOCOL_FEE_BPS = 2_000n;
 
 /** Protocol fee the program takes from a withdrawal, rounded down. */
-export function protocolFeeLamports(amountLamports: bigint): bigint {
-    return amountLamports * PROTOCOL_FEE_BPS / 10_000n;
+export function protocolFee(amountMicroUsdc: bigint): bigint {
+    return amountMicroUsdc * PROTOCOL_FEE_BPS / 10_000n;
 }
 
 // TODO: Make this a reasonable max value for the platform to protect against abuse.
 const AMOUNT_WITHDRAW_MAX = 18_446_744_073_709_551_615n;
 
 /**
- * Build a SOL withdrawal authorized by the configured controlling wallet.
- * The escrow is debited `amountLamports`; `feeRecipient` (the program's
- * PROTOCOL_FEE_RECIPIENT) receives protocolFeeLamports(amountLamports) and
- * `recipient` the rest, unless the recipient is the fee recipient.
+ * Build a USDC withdrawal authorized by the configured controlling wallet.
+ * The escrow token account is debited `amountMicroUsdc`; the associated token account of
+ * `feeRecipient` (the program's PROTOCOL_FEE_RECIPIENT) receives protocolFee(amountMicroUsdc)
+ * and the associated token account of `recipient` the rest, unless the recipient is the fee recipient.
+ * Both destination token accounts must exist: see createAssociatedTokenAccountIdempotentInstruction.
  */
 export function createWithdrawEscrowInstruction(input: {
     programId: PublicKey;
@@ -61,29 +75,40 @@ export function createWithdrawEscrowInstruction(input: {
     user: PublicKey;
     recipient: PublicKey;
     feeRecipient: PublicKey;
-    amountLamports: bigint;
-}): { escrowAddress: PublicKey; instruction: TransactionInstruction } {
-    const { programId, authority, user, recipient, feeRecipient, amountLamports } = input;
-    if (typeof amountLamports !== 'bigint' || amountLamports <= 0n ||
-        amountLamports > AMOUNT_WITHDRAW_MAX) {
-        throw new RangeError('amountLamports must be a positive bigint in the u64 range');
+    mint: PublicKey;
+    amountMicroUsdc: bigint;
+}): { escrowAddress: PublicKey; escrowTokenAddress: PublicKey; recipientTokenAddress: PublicKey; feeTokenAddress: PublicKey; instruction: TransactionInstruction } {
+    const { programId, authority, user, recipient, feeRecipient, mint, amountMicroUsdc } = input;
+    if (typeof amountMicroUsdc !== 'bigint' || amountMicroUsdc <= 0n ||
+        amountMicroUsdc > AMOUNT_WITHDRAW_MAX) {
+        throw new RangeError('amountMicroUsdc must be a positive bigint in the u64 range');
     }
     const escrowAddress = getEscrowAddress(programId, authority, user);
     if (recipient.equals(escrowAddress) || feeRecipient.equals(escrowAddress)) {
         throw new Error('Withdrawal recipient and fee recipient must differ from the escrow');
     }
+    const escrowTokenAddress = getAssociatedTokenAddressSync(mint, escrowAddress, true);
+    // Recipients may be PDAs, so allow off-curve owners.
+    const recipientTokenAddress = getAssociatedTokenAddressSync(mint, recipient, true);
+    const feeTokenAddress = getAssociatedTokenAddressSync(mint, feeRecipient, true);
     const data = Buffer.alloc(9);
     data[0] = 1;
-    data.writeBigUInt64LE(amountLamports, 1);
+    data.writeBigUInt64LE(amountMicroUsdc, 1);
     return {
         escrowAddress,
+        escrowTokenAddress,
+        recipientTokenAddress,
+        feeTokenAddress,
         instruction: new TransactionInstruction({
             programId,
             keys: [
                 { pubkey: authority, isSigner: true, isWritable: false },
-                { pubkey: escrowAddress, isSigner: false, isWritable: true },
-                { pubkey: recipient, isSigner: false, isWritable: true },
-                { pubkey: feeRecipient, isSigner: false, isWritable: true },
+                { pubkey: escrowAddress, isSigner: false, isWritable: false },
+                { pubkey: escrowTokenAddress, isSigner: false, isWritable: true },
+                { pubkey: recipientTokenAddress, isSigner: false, isWritable: true },
+                { pubkey: feeTokenAddress, isSigner: false, isWritable: true },
+                { pubkey: mint, isSigner: false, isWritable: false },
+                { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
             ],
             data,
         }),

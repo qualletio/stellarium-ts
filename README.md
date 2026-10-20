@@ -57,7 +57,7 @@ const weather: StellariumResource = {
   ],
 };
 
-const node = new StellariumNode();
+co......nst node = new StellariumNode();
 await node.register(weather);
 
 const fastify = Fastify({ logger: true });
@@ -71,32 +71,32 @@ await node.start(fastify, {
 
 `StellariumNodeOptions`:
 
-| Option              | Default                               | Purpose                                                                 |
-| ------------------- | ------------------------------------- | ----------------------------------------------------------------------- |
-| `port`              | `3000`                                | Port Fastify listens on                                                 |
-| `host`              | `0.0.0.0`                             | Interface Fastify listens on                                            |
-| `startingPeer`      | none                                  | Origin of a peer to bootstrap from, with no `/v1` suffix                |
-| `rateLimit`         | 100 per minute                        | Per-IP limit on `POST /v1/run/resource`                                 |
-| `baseUrl`           | `BASE_URL`                            | URL peers use to reach this node                                        |
-| `publicKey`         | `SIGNING_PUBLIC_KEY`                  | This node's signing public key                                          |
-| `privateKey`        | `SIGNING_PRIVATE_KEY`                 | This node's signing private key                                         |
-| `apiKey`            | `API_KEY`                             | Bearer token for `POST /v1/run`                                         |
-| `operatorUrl`       | `OPERATOR_URL`                        | Operator to settle payments with                                        |
-| `costLimitLamports` | `COST_LIMIT_LAMPORTS`, then `10000`   | Most this node pays for one remote call                                 |
-| `databasePath`      | `./requestscript.db`                  | SQLite file. `:memory:` keeps everything in memory                      |
+| Option              | Default                             | Purpose                                                  |
+| ------------------- | ----------------------------------- | -------------------------------------------------------- |
+| `port`              | `3000`                              | Port Fastify listens on                                  |
+| `host`              | `0.0.0.0`                           | Interface Fastify listens on                             |
+| `startingPeer`      | none                                | Origin of a peer to bootstrap from, with no `/v1` suffix |
+| `rateLimit`         | 100 per minute                      | Per-IP limit on `POST /v1/run/resource`                  |
+| `baseUrl`           | `BASE_URL`                          | URL peers use to reach this node                         |
+| `publicKey`         | `SIGNING_PUBLIC_KEY`                | This node's signing public key                           |
+| `privateKey`        | `SIGNING_PRIVATE_KEY`               | This node's signing private key                          |
+| `apiKey`            | `API_KEY`                           | Bearer token for `POST /v1/run`                          |
+| `operatorUrl`       | `OPERATOR_URL`                      | Operator to settle payments with                         |
+| `costLimitMicroUsdc` | `COST_LIMIT_MICRO_USDC`, then `10000` | Most this node pays for one remote call, in micro-USDC  |
+| `databasePath`      | `./requestscript.db`                | SQLite file. `:memory:` keeps everything in memory       |
 
 `start` resolves once the node is listening and, with `startingPeer`, once it has joined the network. It rejects if it can't listen, if a required setting is missing, or if bootstrapping fails.
 
 Importing `StellariumNode` loads [dotenv](https://github.com/motdotla/dotenv), so a `.env` file in the working directory is applied automatically. Options take precedence over these variables.
 
-| Variable              | Purpose                                                                                                                                                                         |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Variable              | Purpose                                                                                                                                                                                           |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BASE_URL`            | Required. Public URL prefix stored on resources this node hosts. Peers call `{BASE_URL}/v1/run/resource`. Set it to this node's origin, for example `http://127.0.0.1:3000`. Do not include `/v1` |
-| `SIGNING_PRIVATE_KEY` | Required. The base64url encoded ED25519 private key used to sign data for publishing to peers and payment vouchers.                                                            |
-| `SIGNING_PUBLIC_KEY`  | Required. The base64url ED25519 public key used to verify data for publishing to peers. Must be paired with the private key.                                                   |
-| `API_KEY`             | Bearer token for `POST /v1/run`. When unset, `/v1/run` rejects every request.                                                                                                   |
-| `OPERATOR_URL`        | Operator base URL including `/v1`. Required when the node hosts paid functions.                                                                                                 |
-| `COST_LIMIT_LAMPORTS` | Most this node pays for one remote call.                                                                                                                                        |
+| `SIGNING_PRIVATE_KEY` | Required. The base64url encoded ED25519 private key used to sign data for publishing to peers and payment vouchers.                                                                               |
+| `SIGNING_PUBLIC_KEY`  | Required. The base64url ED25519 public key used to verify data for publishing to peers. Must be paired with the private key.                                                                      |
+| `API_KEY`             | Bearer token for `POST /v1/run`. When unset, `/v1/run` rejects every request.                                                                                                                     |
+| `OPERATOR_URL`        | Operator base URL including `/v1`. Required when the node hosts paid functions.                                                                                                                   |
+| `COST_LIMIT_MICRO_USDC` | Most this node pays for one remote call, in micro-USDC.                                                                                                                                         |
 
 Signing keys can be generated with the following script:
 
@@ -137,22 +137,22 @@ A script that names a resource registered on this process runs `exec` locally. A
 
 Routes are mounted at `/v1`.
 
-| Method and path          | Body                       | Purpose                                                                       |
-| ------------------------ | -------------------------- | ----------------------------------------------------------------------------- |
-| `GET /v1/`               | —                          | Liveness check. Responds `{ "hello": "world" }`                               |
-| `GET /v1/self`           | —                          | This node: `{ "baseUrl", "publicKey", "name" }`                               |
-| `GET /v1/peers`          | —                          | One page of peers stored on this node: `{ "peers": [{ "baseUrl", "name", "publicKey" }], "nextOffset" }` |
-| `PUT /v1/peers`          | Signed peer announcement   | Add or update a peer                                                          |
-| `GET /v1/resources`      | —                          | One page of resources registered here, then resources learned from peers: `{ "resources", "nextOffset" }` |
-| `PUT /v1/all-resources`  | Signed resource broadcast  | Store a peer's resources                                                      |
-| `POST /v1/run`           | `{ "source": "..." }`      | Run one `request` script. Requires `Authorization: Bearer <API_KEY>`          |
-| `POST /v1/run/resource`  | One function call          | Called by peers to run a function hosted here                                 |
-| `POST /v1/grants/request`| Signed grant request       | Ask for a new grant, decided by the node's `approveGrant` hook: `{ "grants" }` |
-| `POST /v1/grants/renew`  | Signed renewal request     | Re-issue a grant this node issued to its audience: `{ "grants" }`             |
-| `PUT /v1/admin/revoked-grants/:grantId` | — | Revoke a grant this node issued, or another issuer's grant with `?issuer=<key>`. Requires the API key |
-| `GET /v1/admin/blocked-callers` | —                   | One page of blocked caller keys: `{ "callers": [{ "publicKey", "reason", "blockedAt" }], "nextOffset" }`. Requires the API key |
-| `PUT /v1/admin/blocked-callers/:publicKey` | Optional `{ "reason" }` | Block a caller key. Requires the API key                          |
-| `DELETE /v1/admin/blocked-callers/:publicKey` | —     | Unblock a caller key (`404` if not blocked). Requires the API key             |
+| Method and path                               | Body                      | Purpose                                                                                                                        |
+| --------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /v1/`                                    | —                         | Liveness check. Responds `{ "hello": "world" }`                                                                                |
+| `GET /v1/self`                                | —                         | This node: `{ "baseUrl", "publicKey", "name" }`                                                                                |
+| `GET /v1/peers`                               | —                         | One page of peers stored on this node: `{ "peers": [{ "baseUrl", "name", "publicKey" }], "nextOffset" }`                       |
+| `PUT /v1/peers`                               | Signed peer announcement  | Add or update a peer                                                                                                           |
+| `GET /v1/resources`                           | —                         | One page of resources registered here, then resources learned from peers: `{ "resources", "nextOffset" }`                      |
+| `PUT /v1/all-resources`                       | Signed resource broadcast | Store a peer's resources                                                                                                       |
+| `POST /v1/run`                                | `{ "source": "..." }`     | Run one `request` script. Requires `Authorization: Bearer <API_KEY>`                                                           |
+| `POST /v1/run/resource`                       | One function call         | Called by peers to run a function hosted here                                                                                  |
+| `POST /v1/grants/request`                     | Signed grant request      | Ask for a new grant, decided by the node's `approveGrant` hook: `{ "grants" }`                                                 |
+| `POST /v1/grants/renew`                       | Signed renewal request    | Re-issue a grant this node issued to its audience: `{ "grants" }`                                                              |
+| `PUT /v1/admin/revoked-grants/:grantId`       | —                         | Revoke a grant this node issued, or another issuer's grant with `?issuer=<key>`. Requires the API key                          |
+| `GET /v1/admin/blocked-callers`               | —                         | One page of blocked caller keys: `{ "callers": [{ "publicKey", "reason", "blockedAt" }], "nextOffset" }`. Requires the API key |
+| `PUT /v1/admin/blocked-callers/:publicKey`    | Optional `{ "reason" }`   | Block a caller key. Requires the API key                                                                                       |
+| `DELETE /v1/admin/blocked-callers/:publicKey` | —                         | Unblock a caller key (`404` if not blocked). Requires the API key                                                              |
 
 `GET /v1/peers`, `GET /v1/resources` and `GET /v1/admin/blocked-callers` are paginated with `?offset=` (default `0`) and `?limit=` (default `100`, at most `500`). `nextOffset` is the `offset` of the next page, or `null` on the last page.
 
@@ -173,10 +173,10 @@ curl -X POST http://127.0.0.1:3000/v1/run \
 
 ### Payments
 
-A function with a `paymentManifest` (`costLamports`, `recipientAddress`) is paid. A caller attaches a `paymentVoucher` signed with its key, as long as the cost is within its `costLimitLamports`. The hosting node runs the function only if the voucher:
+A function with a `paymentManifest` (`costMicroUsdc`, `recipientAddress`) is paid. Payments are in USDC, and every amount is an integer number of micro-USDC (1 USDC = 1,000,000), so `costMicroUsdc: 10000` is $0.01. `recipientAddress` is the provider's Solana wallet, and it must already have a USDC associated token account: the operator pays into that account and won't create it. Until it exists, settlement fails with `422` after the call has run, so create it before hosting paid functions (`spl-token create-account <USDC_MINT> --owner <recipientAddress>`). A caller attaches a `paymentVoucher` signed with its key, as long as the cost is within its `costLimitMicroUsdc`. The hosting node runs the function only if the voucher:
 
 - is bound to this exact call (resource, function and parameters),
-- pays at least `costLamports` to `recipientAddress`,
+- pays at least `costMicroUsdc` to `recipientAddress`,
 - has not expired, and
 - has a valid signature.
 
@@ -188,13 +188,29 @@ A function with `restricted: true` runs only for callers holding a **grant** fro
 
 ```ts
 // On the provider: grant a caller access to every function of com.example.Weather for a day.
-const chain = await provider.issueGrant(callerPublicKey, [{ resourcePath: 'com.example', resourceName: 'Weather' }], { lifetimeMs: 24 * 60 * 60 * 1000 });
+const chain = await provider.issueGrant(
+  callerPublicKey,
+  [{ resourcePath: "com.example", resourceName: "Weather" }],
+  { lifetimeMs: 24 * 60 * 60 * 1000 },
+);
 
 // On the caller: store it, or pass it at start with `grants: [chain]`.
 await caller.addGrant(chain);
 
 // The caller may hand a narrower grant on, for example one function and one parameter value.
-const delegated = await caller.delegateGrant(chain[0].id, otherPublicKey, [{ resourcePath: 'com.example', resourceName: 'Weather', functionName: 'temperature', constraints: { city: 'Oslo' } }], { lifetimeMs: 60 * 60 * 1000 });
+const delegated = await caller.delegateGrant(
+  chain[0].id,
+  otherPublicKey,
+  [
+    {
+      resourcePath: "com.example",
+      resourceName: "Weather",
+      functionName: "temperature",
+      constraints: { city: "Oslo" },
+    },
+  ],
+  { lifetimeMs: 60 * 60 * 1000 },
+);
 
 // Refuse the grant, and everything delegated from it, in calls to the provider.
 await provider.revokeGrant(chain[0].id);
@@ -204,12 +220,18 @@ A provider can also let callers ask for grants. Its `approveGrant` hook decides 
 
 ```ts
 await provider.start(fastify, {
-    approveGrant: ({ publicKey, capabilities, details }) =>
-        details?.invite === process.env.INVITE_CODE ? { lifetimeMs: 24 * 60 * 60 * 1000 } : undefined,
+  approveGrant: ({ publicKey, capabilities, details }) =>
+    details?.invite === process.env.INVITE_CODE
+      ? { lifetimeMs: 24 * 60 * 60 * 1000 }
+      : undefined,
 });
 
 // On the caller. Throws if refused; otherwise stores the grant, which is then renewed like any other.
-await caller.requestGrant('https://provider.example', [{ resourcePath: 'com.example', resourceName: 'Weather' }], { invite: 'letmein' });
+await caller.requestGrant(
+  "https://provider.example",
+  [{ resourcePath: "com.example", resourceName: "Weather" }],
+  { invite: "letmein" },
+);
 ```
 
 #### Revoking grants and blocking callers
@@ -230,6 +252,7 @@ curl -X DELETE "http://127.0.0.1:3000/v1/admin/blocked-callers/$CALLER_KEY" -H "
 ```
 
 A blocked key is refused wherever the node can identify a caller:
+
 - in restricted calls, at any position in the grant chain, so blocking a delegator also cuts off the grants it handed on
 - in grant renewals and grant requests
 - in paid calls, where the voucher carries the payer's key (`403 Caller is blocked`).
@@ -294,6 +317,7 @@ solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/opera
 solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/program.json
 solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/recipient.json
 solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/protocol-fee.json
+solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/usdc-mint.json
 
 node --input-type=module <<'JS'
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
@@ -309,6 +333,7 @@ const common = {
   AUTHORITY_ADDRESS: address('operator'),
   RECIPIENT_ADDRESS: address('recipient'),
   PROTOCOL_FEE_RECIPIENT: address('protocol-fee'),
+  USDC_MINT: address('usdc-mint'),
 };
 for (const [role, port] of [['caller', 3000], ['provider', 3002]]) {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -339,27 +364,37 @@ solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/calle
 ```
 
 Configure the escrow program. The operator key is the escrow authority: it signs
-escrow setup and withdrawals and is the program's upgrade authority. Each escrow
-withdrawal pays 20% of the amount to the protocol fee wallet and the remaining
-80% to the resource provider. Print both addresses:
+escrow setup and withdrawals and is the program's upgrade authority. Escrows hold
+USDC: locally, a test mint you create stands in for it. Each escrow withdrawal pays
+20% of the amount to the protocol fee wallet and the remaining 80% to the resource
+provider. Print the three addresses:
 
 ```sh
 solana-keygen pubkey .keys/local-e2e/operator.json
 solana-keygen pubkey .keys/local-e2e/protocol-fee.json
+solana-keygen pubkey .keys/local-e2e/usdc-mint.json
 ```
 
-In `programs/escrow_program/src/lib.rs`, set both constants to those addresses:
+In `programs/escrow_program/src/lib.rs`, set the constants to those addresses:
 
 ```rust
 pub const ESCROW_AUTHORITY: Option<Pubkey> =
     Some(solana_program::pubkey!("YOUR_OPERATOR_ADDRESS"));
 pub const PROTOCOL_FEE_RECIPIENT: Option<Pubkey> =
     Some(solana_program::pubkey!("YOUR_PROTOCOL_FEE_ADDRESS"));
+pub const USDC_MINT: Option<Pubkey> =
+    Some(solana_program::pubkey!("YOUR_USDC_MINT_ADDRESS"));
 ```
+
+On devnet or mainnet, set `USDC_MINT` to the real USDC mint
+(`4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` on devnet,
+`EPjFWdd5AufqSSqeM2qZzJpgyyhwJaZgw7tFFtbs2Mn` on mainnet).
 
 If `ESCROW_AUTHORITY` is unset, setup and withdrawals fail with custom program
 error `0`; if it is a different wallet than the operator, they fail with error `1`.
-If `PROTOCOL_FEE_RECIPIENT` is unset, withdrawals fail with error `2`.
+If `PROTOCOL_FEE_RECIPIENT` is unset, withdrawals fail with error `2`. If
+`USDC_MINT` is unset they fail with error `4`, and with error `5` when the operator
+uses another mint.
 
 Build the Escrow program:
 
@@ -368,15 +403,12 @@ cargo build-sbf --manifest-path programs/escrow_program/Cargo.toml \
   --sbf-out-dir programs/escrow_program/target/deploy
 ```
 
-Fund the wallets. The operator pays for the program deploy and escrow setup. The
-recipient and protocol fee wallets are prefunded so small payments don't fail the
-rent check on a new account:
+Fund the wallets with SOL for transaction fees. The operator pays for the program
+deploy, escrow setup, and the protocol fee wallet's USDC token account:
 
 ```sh
 solana airdrop 100 "$(solana-keygen pubkey .keys/local-e2e/operator.json)"
 solana airdrop 5 "$(solana-keygen pubkey .keys/local-e2e/caller.json)"
-solana airdrop 1 "$(solana-keygen pubkey .keys/local-e2e/recipient.json)"
-solana airdrop 1 "$(solana-keygen pubkey .keys/local-e2e/protocol-fee.json)"
 ```
 
 Deploy the Escrow program with the operator as fee payer and upgrade authority:
@@ -392,6 +424,31 @@ solana program show "$(solana-keygen pubkey .keys/local-e2e/program.json)"
 
 The program ID is the address of `.keys/local-e2e/program.json`. Its upgrade
 authority should be the operator address.
+
+Create the test USDC mint (6 decimals, like USDC) and mint 100 of it to the caller wallet:
+
+```sh
+spl-token create-token --decimals 6 \
+  --fee-payer .keys/local-e2e/operator.json \
+  --mint-authority "$(solana-keygen pubkey .keys/local-e2e/operator.json)" \
+  .keys/local-e2e/usdc-mint.json
+USDC_MINT="$(solana-keygen pubkey .keys/local-e2e/usdc-mint.json)"
+CALLER="$(solana-keygen pubkey .keys/local-e2e/caller.json)"
+spl-token create-account "$USDC_MINT" --owner "$CALLER" \
+  --fee-payer .keys/local-e2e/operator.json
+spl-token mint "$USDC_MINT" 100 --recipient-owner "$CALLER" \
+  --mint-authority .keys/local-e2e/operator.json \
+  --fee-payer .keys/local-e2e/operator.json
+```
+
+Create the provider recipient's USDC token account. The operator only pays into an
+existing one; without it, every settlement fails with `422`:
+
+```sh
+spl-token create-account "$USDC_MINT" \
+  --owner "$(solana-keygen pubkey .keys/local-e2e/recipient.json)" \
+  --fee-payer .keys/local-e2e/operator.json
+```
 
 Create a `.env` file in each app directory. The generated files in
 `.keys/local-e2e/` (`operator.env`, `caller.env`, `provider.env`) hold the
@@ -423,13 +480,15 @@ API_KEY=SET_THIS_TO_ANYTHING
 ```
 ESCROW_PROGRAM_ID=
 PROTOCOL_FEE_RECIPIENT=
+USDC_MINT=
 PRIVATE_KEY=
 PORT=
 OPERATOR_API_TOKEN=SET_THIS_TO_ANYTHING
 ```
 
-`PROTOCOL_FEE_RECIPIENT` must be the same address compiled into the escrow program.
-If it doesn't match, withdrawals fail with custom program error `3`.
+`PROTOCOL_FEE_RECIPIENT` and `USDC_MINT` must be the same addresses compiled into the
+escrow program. If the fee recipient doesn't match, withdrawals fail with custom
+program error `3`.
 
 Start the services:
 
@@ -451,11 +510,13 @@ request body:
 }
 ```
 
-Copy the escrow address value:
+Copy the escrow token address value. The escrow PDA owns this USDC token
+account, and deposits go to it:
 
 ```json
 {
   "escrowAddress": "ESCROW_ADDRESS",
+  "escrowTokenAddress": "ESCROW_TOKEN_ADDRESS",
   "signature": "SIGNATURE",
   "blockhash": "BLOCKHASH",
   "lastValidBlockHeight": 1111,
@@ -463,14 +524,14 @@ Copy the escrow address value:
 }
 ```
 
-Fund the escrow address:
+Fund the escrow with 1 USDC:
 
 ```sh
-ESCROW_ADDRESS=YOUR_ESCROW_ADDRESS
-solana transfer "$ESCROW_ADDRESS" 0.1 \
-  --from .keys/local-e2e/caller.json \
-  --fee-payer .keys/local-e2e/caller.json \
-  --allow-unfunded-recipient
+ESCROW_TOKEN_ADDRESS=YOUR_ESCROW_TOKEN_ADDRESS
+spl-token transfer "$USDC_MINT" 1 "$ESCROW_TOKEN_ADDRESS" \
+  --owner .keys/local-e2e/caller.json \
+  --fee-payer .keys/local-e2e/caller.json
+spl-token balance --address "$ESCROW_TOKEN_ADDRESS"
 ```
 
 Run a request. If it fails, check each `.env` file, then rerun `docker compose up -d --build`.

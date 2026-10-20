@@ -5,7 +5,7 @@ import type { StoredPeer } from "../peer/repository.js";
 
 export interface StellariumResourceFunctionPaymentManifest {
     id?: number;
-    costLamports: number;
+    costMicroUsdc: number;
     recipientAddress: string;
 }
 
@@ -191,8 +191,8 @@ export class ResourceRepository {
 
             if (fn.paymentManifest) {
                 await this.db.run(
-                    'INSERT INTO resource_function_payment_manifest (resource_function_id, cost_lamports, recipient_address, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-                    [functionId, fn.paymentManifest.costLamports, fn.paymentManifest.recipientAddress, createdAt, createdAt]
+                    'INSERT INTO resource_function_payment_manifest (resource_function_id, cost_micro_usdc, recipient_address, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+                    [functionId, fn.paymentManifest.costMicroUsdc, fn.paymentManifest.recipientAddress, createdAt, createdAt]
                 );
             }
         }
@@ -315,7 +315,7 @@ export class ResourceRepository {
         }
         return {
             id: result.id,
-            costLamports: result.cost_lamports as number,
+            costMicroUsdc: result.cost_micro_usdc as number,
             recipientAddress: result.recipient_address as string,
         };
     }

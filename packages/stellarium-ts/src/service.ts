@@ -21,7 +21,7 @@ export interface NodeConfig {
     /** Operator base URL, including `/v1`. Required when the node hosts paid functions. */
     operatorUrl?: string;
     /** Most this node will pay for one remote call. */
-    costLimitLamports: number;
+    costLimitMicroUsdc: number;
 }
 
 export interface Service {
@@ -46,7 +46,7 @@ export function createService(db: Database, resources: StellariumResource[], con
 
     const grantService = new GrantService(new GrantRepository(db), config, options.approveGrant);
 
-    const resourceInvoker = new CombinationResourceInvoker(resourceRepository, config.costLimitLamports, config.publicKey, config.privateKey, grantService);
+    const resourceInvoker = new CombinationResourceInvoker(resourceRepository, config.costLimitMicroUsdc, config.publicKey, config.privateKey, grantService);
 
     const operatorClient = new OperatorClient(config.operatorUrl);
 

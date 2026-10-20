@@ -3,7 +3,7 @@
 For a local setup with PostgreSQL, a Solana validator, and on-chain verification,
 see the [local end-to-end runbook](../../docs/local-e2e.md).
 
-The operator creates Solana escrow accounts and submits authority-controlled SOL
+The operator creates Solana escrow accounts and submits authority-controlled USDC
 withdrawals. Its configured signer is the escrow authority and transaction fee
 payer. The deployed escrow program must have the same public key configured in
 `ESCROW_AUTHORITY`.
@@ -14,6 +14,8 @@ payer. The deployed escrow program must have the same public key configured in
 - `ESCROW_PROGRAM_ID`: deployed escrow program address (also used for withdrawals).
 - `PROTOCOL_FEE_RECIPIENT`: wallet receiving the 20% protocol fee on each
   withdrawal. Must equal the program's compiled `PROTOCOL_FEE_RECIPIENT`.
+- `USDC_MINT`: the USDC mint escrows hold. Must equal the program's compiled
+  `USDC_MINT`.
 - `PRIVATE_KEY`: JSON-encoded Solana secret key byte array for the authority.
   Configure it privately; never include it in requests or logs.
 - `OPERATOR_API_TOKEN`: bearer token for `POST /v1/escrow`. When unset, escrow
@@ -36,8 +38,10 @@ Requires `Authorization: Bearer <OPERATOR_API_TOKEN>`.
 { "user": "USER_SOLANA_PUBLIC_KEY" }
 ```
 
-Creates the deterministic escrow for this user and the configured authority. The
-operator sponsors rent and fees, which is why creation requires the token.
+Creates the deterministic escrow for this user and the configured authority, along
+with the escrow's USDC associated token account. The response's
+`escrowTokenAddress` is where the user deposits USDC. The operator sponsors rent
+and fees, which is why creation requires the token.
 
 ```json
 {
@@ -76,7 +80,7 @@ Resource providers submit the `PaymentVoucher` that the caller attached to the c
 
 No token is needed: the voucher's signature authorizes the transfer. The signature
 covers every field except `signature`, in the order above, as `JSON.stringify`
-output (not canonical JSON). `amount` is a positive safe integer of lamports.
+output (not canonical JSON). `amount` is a positive safe integer of micro-USDC (1 USDC = 1,000,000).
 Checking that the amount and recipient match the function's price is the
 provider's job, done before it runs the function.
 
@@ -85,8 +89,13 @@ key**, converted to a Solana base58 address. Create the escrow with that address
 a different Solana wallet is not automatically linked to the node signing key.
 
 The service verifies the signature and expiry, checks the escrow's state and its
-budget above rent, simulates, claims a receipt, signs, submits and confirms. The
-program pays 20% of the amount (rounded down) to `PROTOCOL_FEE_RECIPIENT` and the
+USDC balance, simulates, claims a receipt, signs, submits and confirms. The
+voucher's recipient must already have a USDC associated token account (initialized,
+unfrozen, of `USDC_MINT`). Otherwise settlement is refused with `422` before a receipt
+is claimed, so the voucher can be resubmitted once the account exists (until it expires).
+The operator does not create recipient accounts. The transaction creates only the
+protocol fee wallet's USDC token account, if missing, at the operator's expense. The program
+then pays 20% of the amount (rounded down) to `PROTOCOL_FEE_RECIPIENT` and the
 remaining 80% to the voucher's recipient.
 
 ## Payment replay protection

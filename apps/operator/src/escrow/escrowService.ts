@@ -1,4 +1,5 @@
-import type { Signer } from "@solana/web3.js";
+import { createAssociatedTokenAccountIdempotentInstruction, TOKEN_PROGRAM_ID, unpackAccount } from "@solana/spl-token";
+import type { AccountInfo, Signer } from "@solana/web3.js";
 import { Connection, PublicKey, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import { OperationError } from "../errors.js";
 import type { ReceiptRepository } from "../repository.js";
@@ -10,7 +11,7 @@ import { solanaUserFromSpki } from "../solana/userAddress.js";
 
 /** The Connection methods the service uses, so tests can supply a fake. */
 export type EscrowConnection = Pick<Connection,
-    'getAccountInfoAndContext' | 'getMinimumBalanceForRentExemption' | 'getLatestBlockhash' | 'simulateTransaction' |
+    'getAccountInfoAndContext' | 'getLatestBlockhash' | 'simulateTransaction' |
     'sendTransaction' | 'confirmTransaction' | 'getSignatureStatuses' | 'getBlockHeight'>;
 
 /**
@@ -28,24 +29,39 @@ export interface ReconcileSummary {
 
 export interface OperationResult {
     escrowAddress: string;
+    /** The escrow's USDC token account. Users fund the escrow by transferring USDC here. */
+    escrowTokenAddress?: string;
     status: 'confirmed' | 'unconfirmed' | 'existing';
     signature?: string;
     blockhash?: string;
     lastValidBlockHeight?: number;
 }
 
+/** An initialized, unfrozen token account of `mint` owned by `owner`. */
+function isUsableTokenAccount(account: AccountInfo<Buffer> | null, address: PublicKey, owner: PublicKey, mint: PublicKey): boolean {
+    if (account === null) return false;
+    try {
+        const token = unpackAccount(address, account, TOKEN_PROGRAM_ID);
+        return token.mint.equals(mint) && token.owner.equals(owner) && token.isInitialized && !token.isFrozen;
+    } catch {
+        return false;
+    }
+}
+
 /**
  * The EscrowService is responsible for communicating with Solana to initiate and withdraw from an escrow account.
  */
 export class EscrowService {
-    constructor(private readonly receipts: ReceiptRepository, private readonly escrowProgramId: PublicKey, private readonly authority: Signer, private readonly feeRecipient: PublicKey, private readonly connection: EscrowConnection) {}
+    constructor(private readonly receipts: ReceiptRepository, private readonly escrowProgramId: PublicKey, private readonly authority: Signer, private readonly feeRecipient: PublicKey, private readonly mint: PublicKey, private readonly connection: EscrowConnection) {}
 
     async initiateEscrow(user: PublicKey): Promise<OperationResult> {
         const instruction = createEscrowInstruction({
             programId: this.escrowProgramId,
             authority: this.authority.publicKey,
             user,
+            mint: this.mint,
         });
+        const addresses = { escrowAddress: instruction.escrowAddress.toBase58(), escrowTokenAddress: instruction.escrowTokenAddress.toBase58() };
 
         const snapshot = await this.connection.getAccountInfoAndContext(instruction.escrowAddress, 'confirmed');
         if (snapshot.value !== null && snapshot.value.owner.equals(this.escrowProgramId)) {
@@ -55,7 +71,7 @@ export class EscrowService {
             } catch {
                 throw new OperationError(409, 'Existing escrow account has invalid state');
             }
-            return { escrowAddress: instruction.escrowAddress.toBase58(), status: 'existing' };
+            return { ...addresses, status: 'existing' };
         }
 
         // Empty System-owned prefunded PDAs are accepted by initialization.
@@ -80,7 +96,7 @@ export class EscrowService {
 
         transaction.sign([this.authority]);
         const signature = encodeBase58(transaction.signatures[0]!);
-        const result = { escrowAddress: instruction.escrowAddress.toBase58(), signature, ...lifetime };
+        const result = { ...addresses, signature, ...lifetime };
 
         try {
             await this.connection.sendTransaction(transaction, {
@@ -117,7 +133,7 @@ export class EscrowService {
         } catch {
             throw new OperationError(400, 'Invalid voucher public key or recipient address');
         }
-        const amountLamports = BigInt(amount);
+        const amountMicroUsdc = BigInt(amount);
 
         const instruction = createWithdrawEscrowInstruction({
             programId: this.escrowProgramId,
@@ -125,12 +141,13 @@ export class EscrowService {
             user,
             recipient,
             feeRecipient: this.feeRecipient,
-            amountLamports,
+            mint: this.mint,
+            amountMicroUsdc,
         });
 
-        const budget = await getEscrowBudget({ connection: this.connection, programId: this.escrowProgramId, authority: this.authority.publicKey, user, requestedWithdrawalLamports: amountLamports });
+        const budget = await getEscrowBudget({ connection: this.connection, programId: this.escrowProgramId, authority: this.authority.publicKey, user, mint: this.mint, requestedWithdrawalMicroUsdc: amountMicroUsdc });
         if (!budget.isInitialized) throw new OperationError(404, 'Escrow account does not exist');
-        if (!budget.hasEnoughBudget) throw new OperationError(409, 'Insufficient escrow budget after reserving rent');
+        if (!budget.hasEnoughBudget) throw new OperationError(409, 'Insufficient escrow balance');
 
         const snapshot = await this.connection.getAccountInfoAndContext(instruction.escrowAddress, 'confirmed');
         if (snapshot.value !== null && snapshot.value.owner.equals(this.escrowProgramId)) {
@@ -142,12 +159,22 @@ export class EscrowService {
             }
         }
 
+        // Providers create their own USDC token account; the operator doesn't pay for it.
+        const recipientToken = await this.connection.getAccountInfoAndContext(instruction.recipientTokenAddress, 'confirmed');
+        if (!isUsableTokenAccount(recipientToken.value, instruction.recipientTokenAddress, recipient, this.mint)) {
+            throw new OperationError(422, `Recipient ${recipient.toBase58()} has no usable USDC token account at ${instruction.recipientTokenAddress.toBase58()}`);
+        }
+
         const lifetime = await this.connection.getLatestBlockhash('confirmed');
 
         const transaction = new VersionedTransaction(new TransactionMessage({
             payerKey: this.authority.publicKey, 
             recentBlockhash: lifetime.blockhash, 
-            instructions: [instruction.instruction],   
+            instructions: [
+                // The protocol fee wallet's token account is created once, at the operator's expense.
+                createAssociatedTokenAccountIdempotentInstruction(this.authority.publicKey, instruction.feeTokenAddress, this.feeRecipient, this.mint),
+                instruction.instruction,
+            ],
         }).compileToV0Message());
 
         const simulation = await this.connection.simulateTransaction(transaction, {

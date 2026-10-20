@@ -50,7 +50,7 @@ describe("external invoke retries", () => {
     const resource = { path: "com.example", name: "Weather", metadata: { baseUrl: "https://remote.example" }, functions: [] } as unknown as Resource;
     const parameters = [{ name: "city", value: "Oslo" }];
 
-    function createInvoker(paymentManifest?: { costLamports: number; recipientAddress: string }) {
+    function createInvoker(paymentManifest?: { costMicroUsdc: number; recipientAddress: string }) {
         const { publicKey, privateKey } = generateBase64KeyPair();
         const repository = { getResourceFunction: async () => ({ paymentManifest }) } as unknown as ResourceRepository;
         return new CombinationResourceInvoker(repository, 100_000, publicKey, privateKey);
@@ -128,7 +128,7 @@ describe("external invoke retries", () => {
     test("reuses the same payment voucher on every attempt", async () => {
         fetchMock.mockResolvedValueOnce(status(503)).mockResolvedValueOnce(status(503)).mockResolvedValueOnce(ok());
 
-        const invoker = createInvoker({ costLamports: 10000, recipientAddress: "4HkmXgXCJ8tw1ih5VFHetRt4kWdo1VLBVmV7B5p6ctK2" });
+        const invoker = createInvoker({ costMicroUsdc: 10000, recipientAddress: "4HkmXgXCJ8tw1ih5VFHetRt4kWdo1VLBVmV7B5p6ctK2" });
         const pending = invoker.invoke(resource, "forecast", parameters);
         await vi.runAllTimersAsync();
         await pending;
@@ -146,7 +146,7 @@ describe("restricted functions", () => {
     const parameters = [{ name: "city", value: "Oslo" }];
     const chain = [{ id: "grant" }] as unknown as Grant[];
 
-    function createInvoker(grantService: Partial<GrantService> | undefined, paymentManifest?: { costLamports: number; recipientAddress: string }) {
+    function createInvoker(grantService: Partial<GrantService> | undefined, paymentManifest?: { costMicroUsdc: number; recipientAddress: string }) {
         const { publicKey, privateKey } = generateBase64KeyPair();
         const repository = { getResourceFunction: async () => ({ restricted: true, paymentManifest }) } as unknown as ResourceRepository;
         return new CombinationResourceInvoker(repository, 100_000, publicKey, privateKey, grantService as GrantService | undefined);
@@ -185,7 +185,7 @@ describe("restricted functions", () => {
         let nonce = 0;
         const authorize = vi.fn(() => ({ nonce: `nonce-${nonce++}` }) as unknown as InvocationAuthorization);
 
-        const invoker = createInvoker({ chainFor: async () => chain, authorize }, { costLamports: 10000, recipientAddress: "4HkmXgXCJ8tw1ih5VFHetRt4kWdo1VLBVmV7B5p6ctK2" });
+        const invoker = createInvoker({ chainFor: async () => chain, authorize }, { costMicroUsdc: 10000, recipientAddress: "4HkmXgXCJ8tw1ih5VFHetRt4kWdo1VLBVmV7B5p6ctK2" });
         const pending = invoker.invoke(resource, "forecast", parameters);
         await vi.runAllTimersAsync();
 

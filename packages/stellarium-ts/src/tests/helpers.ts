@@ -22,7 +22,7 @@ export function testConfig(overrides: Partial<NodeConfig> = {}): NodeConfig {
         ...generateBase64KeyPair(),
         apiKey: "secret",
         operatorUrl: "http://operator.invalid/v1",
-        costLimitLamports: 100_000,
+        costLimitMicroUsdc: 100_000,
         ...overrides,
     };
 }
@@ -41,7 +41,7 @@ export function weatherResource(baseUrl = "http://127.0.0.1:3002"): StellariumRe
                 parameters: [{ name: "city", type: "string" }],
                 returnType: "int32",
                 exec: async (args) => (args.find((arg) => arg.name === "city")?.value === "Oslo" ? 12 : 20),
-                paymentManifest: { costLamports: COST, recipientAddress: RECIPIENT },
+                paymentManifest: { costMicroUsdc: COST, recipientAddress: RECIPIENT },
             },
             {
                 name: "humidity",

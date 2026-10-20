@@ -174,7 +174,7 @@ function isValidPaymentVoucher(voucher: PaymentVoucher, manifest: StellariumReso
     if (voucher.invocationHash !== expectedHash) {
         return false;
     }
-    if (voucher.amount < manifest.costLamports) {
+    if (voucher.amount < manifest.costMicroUsdc) {
         return false;
     }
     if (voucher.recipientAddress !== manifest.recipientAddress) {
@@ -262,7 +262,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
                         description: parameter.description,
                     })),
                     paymentManifest: fn.paymentManifest ? ({
-                        costLamports: fn.paymentManifest.costLamports,
+                        costMicroUsdc: fn.paymentManifest.costMicroUsdc,
                         recipientAddress: fn.paymentManifest.recipientAddress,
                     }) : undefined,
                     restricted: fn.restricted || undefined,

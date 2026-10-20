@@ -8,8 +8,9 @@ export const DEFAULT_DATABASE_PATH = './requestscript.db';
  * Version 1 dropped `UNIQUE (base_url)` from `resource` and added uniqueness to the function tables.
  * Version 2 added `resource_function.restricted`.
  * Version 3 added `resource.website` and the `description` columns of the resource tables.
+ * Version 4 renamed `resource_function_payment_manifest.cost_lamports` to `cost_micro_usdc` (payments moved to USDC).
  */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 /** Opens (or creates) the node database and brings its schema up to date. Pass ':memory:' for tests. */
 export async function openDatabase(filename: string = DEFAULT_DATABASE_PATH): Promise<Database> {
@@ -93,7 +94,7 @@ export async function createTables(db: Database) {
         CREATE TABLE IF NOT EXISTS resource_function_payment_manifest (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             resource_function_id INTEGER NOT NULL,
-            cost_lamports INTEGER NOT NULL,
+            cost_micro_usdc INTEGER NOT NULL,
             recipient_address TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,

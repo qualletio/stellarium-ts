@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { DEFAULT_COST_LIMIT_LAMPORTS, resolveConfig } from "../server.js";
+import { DEFAULT_COST_LIMIT_MICRO_USDC, resolveConfig } from "../server.js";
 import { weatherResource } from "./helpers.js";
 
 describe("resolveConfig", () => {
@@ -20,19 +20,19 @@ describe("resolveConfig", () => {
         vi.stubEnv("BASE_URL", "http://env.example");
         vi.stubEnv("SIGNING_PUBLIC_KEY", "env-public");
         vi.stubEnv("SIGNING_PRIVATE_KEY", "env-private");
-        vi.stubEnv("COST_LIMIT_LAMPORTS", "500");
+        vi.stubEnv("COST_LIMIT_MICRO_USDC", "500");
 
-        expect(resolveConfig({})).toMatchObject({ baseUrl: "http://env.example", publicKey: "env-public", privateKey: "env-private", costLimitLamports: 500 });
+        expect(resolveConfig({})).toMatchObject({ baseUrl: "http://env.example", publicKey: "env-public", privateKey: "env-private", costLimitMicroUsdc: 500 });
     });
 
     test("defaults the cost limit", () => {
-        vi.stubEnv("COST_LIMIT_LAMPORTS", undefined);
+        vi.stubEnv("COST_LIMIT_MICRO_USDC", undefined);
 
-        expect(resolveConfig(keys).costLimitLamports).toBe(DEFAULT_COST_LIMIT_LAMPORTS);
+        expect(resolveConfig(keys).costLimitMicroUsdc).toBe(DEFAULT_COST_LIMIT_MICRO_USDC);
     });
 
-    test.each([-1, 1.5, Number.NaN])("rejects a cost limit of %s", (costLimitLamports) => {
-        expect(() => resolveConfig({ ...keys, costLimitLamports })).toThrow("costLimitLamports");
+    test.each([-1, 1.5, Number.NaN])("rejects a cost limit of %s", (costLimitMicroUsdc) => {
+        expect(() => resolveConfig({ ...keys, costLimitMicroUsdc })).toThrow("costLimitMicroUsdc");
     });
 
     test("requires the signing keys and base URL", () => {

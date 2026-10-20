@@ -9,10 +9,10 @@ export interface Service {
     paymentService: PaymentService;
 }
 
-export function createService(db: Database, escrowProgramId: PublicKey, authority: Signer, feeRecipient: PublicKey, connection: EscrowConnection): Service {
+export function createService(db: Database, escrowProgramId: PublicKey, authority: Signer, feeRecipient: PublicKey, mint: PublicKey, connection: EscrowConnection): Service {
     const receipts = new ReceiptRepository(db);
     return {
-        escrowService: new EscrowService(receipts, escrowProgramId, authority, feeRecipient, connection),
+        escrowService: new EscrowService(receipts, escrowProgramId, authority, feeRecipient, mint, connection),
         paymentService: new PaymentService(receipts),
     };
 }

@@ -1,10 +1,11 @@
-import { Keypair } from '@solana/web3.js';
+import { AccountState, ASSOCIATED_TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
+import { Keypair, type VersionedTransaction } from '@solana/web3.js';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { Database } from '../db/database.js';
 import { receiptsTable } from '../db/schema.js';
 import { OperationError } from '../errors.js';
 import { ReceiptRepository } from '../repository.js';
-import { createTestDatabase, FakeConnection, generateNodeKeys, RENT_MINIMUM, signedVoucher } from '../testing.js';
+import { createTestDatabase, FakeConnection, generateNodeKeys, MINT, RECIPIENT, signedVoucher, tokenAccount } from '../testing.js';
 import { EscrowService, RECONCILE_MIN_AGE_MS } from './escrowService.js';
 
 describe('EscrowService', () => {
@@ -21,8 +22,8 @@ describe('EscrowService', () => {
     beforeEach(async () => {
         ({ db, close } = await createTestDatabase());
         connection = new FakeConnection(programId, authority.publicKey);
-        connection.fund(keys.publicKey, RENT_MINIMUM + 1_000_000);
-        service = new EscrowService(new ReceiptRepository(db), programId, authority, feeRecipient, connection);
+        connection.fund(keys.publicKey, 1_000_000n);
+        service = new EscrowService(new ReceiptRepository(db), programId, authority, feeRecipient, MINT, connection);
     });
 
     afterEach(async () => {
@@ -42,8 +43,48 @@ describe('EscrowService', () => {
             expect(await receipts()).toMatchObject([{ status: 'confirmed', transactionSignature: result.signature, lastValidBlockHeight: 100 }]);
         });
 
+        test('creates a missing fee token account, but not the recipient\'s', async () => {
+            let simulated: VersionedTransaction | undefined;
+            const simulate = connection.simulateTransaction;
+            connection.simulateTransaction = (async (transaction: VersionedTransaction, ...rest: unknown[]) => {
+                simulated = transaction;
+                return (simulate as (...args: unknown[]) => unknown)(transaction, ...rest);
+            }) as typeof connection.simulateTransaction;
+
+            await service.settlePayment(signedVoucher(keys));
+
+            const message = simulated!.message;
+            const keyAt = (index: number) => message.staticAccountKeys[index]!;
+            const programs = message.compiledInstructions.map(ix => keyAt(ix.programIdIndex).toBase58());
+            expect(programs).toEqual([ASSOCIATED_TOKEN_PROGRAM_ID, programId].map(key => key.toBase58()));
+            // Associated token account creation takes the new account second.
+            expect(keyAt(message.compiledInstructions[0]!.accountKeyIndexes[1]!).toBase58())
+                .toBe(getAssociatedTokenAddressSync(MINT, feeRecipient, true).toBase58());
+        });
+
+        test('422s without sending or claiming when the recipient has no USDC token account', async () => {
+            const unprepared = Keypair.generate().publicKey;
+
+            await rejectsWithStatus(service.settlePayment(signedVoucher(keys, { recipientAddress: unprepared.toBase58() })), 422);
+            expect(connection.sent).toEqual([]);
+            expect(await receipts()).toEqual([]);
+        });
+
+        test.each([
+            ['frozen', () => connection.createTokenAccount(RECIPIENT, 0n, AccountState.Frozen)],
+            ['of another mint', () => connection.accounts.set(getAssociatedTokenAddressSync(MINT, RECIPIENT, true).toBase58(),
+                tokenAccount(Keypair.generate().publicKey, RECIPIENT, 0n))],
+            ['not a token account', () => connection.accounts.set(getAssociatedTokenAddressSync(MINT, RECIPIENT, true).toBase58(),
+                { ...tokenAccount(MINT, RECIPIENT, 0n), owner: Keypair.generate().publicKey })],
+        ])('422s when the recipient token account is %s', async (_, prepare) => {
+            prepare();
+
+            await rejectsWithStatus(service.settlePayment(signedVoucher(keys)), 422);
+            expect(connection.sent).toEqual([]);
+        });
+
         test('stores amounts above the 32-bit integer range', async () => {
-            connection.fund(keys.publicKey, RENT_MINIMUM + 5_000_000_000);
+            connection.fund(keys.publicKey, 5_000_000_000n);
 
             await service.settlePayment(signedVoucher(keys, { amount: 3_000_000_000 }));
 
@@ -72,7 +113,7 @@ describe('EscrowService', () => {
             await rejectsWithStatus(service.settlePayment(signedVoucher(stranger)), 404);
         });
 
-        test('409s when the escrow cannot cover the amount above rent', async () => {
+        test('409s when the escrow cannot cover the amount', async () => {
             await rejectsWithStatus(service.settlePayment(signedVoucher(keys, { amount: 1_000_001 })), 409);
             expect(await receipts()).toEqual([]);
         });

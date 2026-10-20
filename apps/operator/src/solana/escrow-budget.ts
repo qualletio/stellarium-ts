@@ -1,53 +1,43 @@
+import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID, unpackAccount } from '@solana/spl-token';
 import type { Commitment, Connection, PublicKey } from '@solana/web3.js';
-import { decodeEscrowAccount, ESCROW_ACCOUNT_SIZE, getEscrowAddress } from './escrow.js';
+import { decodeEscrowAccount, getEscrowAddress } from './escrow.js';
 
 export interface EscrowBudget {
     escrowAddress: PublicKey;
+    escrowTokenAddress: PublicKey;
     slot: number;
+    /** Both the escrow state account and its USDC token account exist. */
     isInitialized: boolean;
-    isRentExempt: boolean;
-    totalBalanceLamports: bigint;
-    rentReserveLamports: bigint;
-    availableBudgetLamports: bigint;
-    requestedWithdrawalLamports: bigint;
-    shortfallLamports: bigint;
+    totalBalanceMicroUsdc: bigint;
+    /** The full token balance, or zero while the token account is frozen. */
+    availableBudgetMicroUsdc: bigint;
+    requestedWithdrawalMicroUsdc: bigint;
+    shortfallMicroUsdc: bigint;
     hasEnoughBudget: boolean;
 }
 
-function exactLamports(value: number, label: string): bigint {
-    // web3.js exposes RPC u64 values as numbers. Reject precision loss rather
-    // than overestimating a provider's budget.
-    if (!Number.isSafeInteger(value) || value < 0) {
-        throw new Error(`${label} must be a nonnegative safe integer`);
-    }
-    return BigInt(value);
-}
-
-/** Read-only SOL budget snapshot; does not reserve funds or authorize withdrawals. */
+/** Read-only USDC budget snapshot; does not reserve funds or authorize withdrawals. */
 export async function getEscrowBudget(input: {
-    connection: Pick<Connection, 'getAccountInfoAndContext' | 'getMinimumBalanceForRentExemption'>;
+    connection: Pick<Connection, 'getAccountInfoAndContext'>;
     programId: PublicKey;
     authority: PublicKey;
     user: PublicKey;
-    requestedWithdrawalLamports?: bigint;
+    mint: PublicKey;
+    requestedWithdrawalMicroUsdc?: bigint;
     commitment?: Commitment;
 }): Promise<EscrowBudget> {
-    const { connection, programId, authority, user, commitment = 'confirmed',
-        requestedWithdrawalLamports = 0n } = input;
-    if (typeof requestedWithdrawalLamports !== 'bigint' || requestedWithdrawalLamports < 0n ||
-        requestedWithdrawalLamports > 18_446_744_073_709_551_615n) {
-        throw new RangeError('requestedWithdrawalLamports must be a bigint in the u64 range');
+    const { connection, programId, authority, user, mint, commitment = 'confirmed',
+        requestedWithdrawalMicroUsdc = 0n } = input;
+    if (typeof requestedWithdrawalMicroUsdc !== 'bigint' || requestedWithdrawalMicroUsdc < 0n ||
+        requestedWithdrawalMicroUsdc > 18_446_744_073_709_551_615n) {
+        throw new RangeError('requestedWithdrawalMicroUsdc must be a bigint in the u64 range');
     }
     const escrowAddress = getEscrowAddress(programId, authority, user);
-    const [snapshot, rentMinimum] = await Promise.all([
+    const escrowTokenAddress = getAssociatedTokenAddressSync(mint, escrowAddress, true);
+    const [snapshot, tokenSnapshot] = await Promise.all([
         connection.getAccountInfoAndContext(escrowAddress, commitment),
-        connection.getMinimumBalanceForRentExemption(ESCROW_ACCOUNT_SIZE, commitment),
+        connection.getAccountInfoAndContext(escrowTokenAddress, commitment),
     ]);
-    const rentReserveLamports = exactLamports(rentMinimum, 'Rent reserve');
-    // This web3.js method returns zero on some RPC errors. Fail closed.
-    if (rentReserveLamports === 0n) {
-        throw new Error('Unable to establish a positive escrow rent reserve');
-    }
     const account = snapshot.value;
     if (account !== null) {
         const state = decodeEscrowAccount(programId, escrowAddress, account);
@@ -55,16 +45,25 @@ export async function getEscrowBudget(input: {
             throw new Error('Escrow user or authority does not match the request');
         }
     }
-    const totalBalanceLamports = account === null ? 0n : exactLamports(account.lamports, 'Escrow balance');
-    const isInitialized = account !== null;
-    const isRentExempt = isInitialized && totalBalanceLamports >= rentReserveLamports;
-    const availableBudgetLamports = isRentExempt ? totalBalanceLamports - rentReserveLamports : 0n;
-    const shortfallLamports = requestedWithdrawalLamports > availableBudgetLamports
-        ? requestedWithdrawalLamports - availableBudgetLamports : 0n;
+    let totalBalanceMicroUsdc = 0n;
+    let isFrozen = false;
+    if (tokenSnapshot.value !== null) {
+        // unpackAccount rejects accounts not owned by the token program.
+        const token = unpackAccount(escrowTokenAddress, tokenSnapshot.value, TOKEN_PROGRAM_ID);
+        if (!token.mint.equals(mint) || !token.owner.equals(escrowAddress)) {
+            throw new Error('Escrow token account has the wrong mint or owner');
+        }
+        totalBalanceMicroUsdc = token.amount;
+        isFrozen = token.isFrozen;
+    }
+    const isInitialized = account !== null && tokenSnapshot.value !== null;
+    const availableBudgetMicroUsdc = isInitialized && !isFrozen ? totalBalanceMicroUsdc : 0n;
+    const shortfallMicroUsdc = requestedWithdrawalMicroUsdc > availableBudgetMicroUsdc
+        ? requestedWithdrawalMicroUsdc - availableBudgetMicroUsdc : 0n;
     return {
-        escrowAddress, slot: snapshot.context.slot, isInitialized, isRentExempt,
-        totalBalanceLamports, rentReserveLamports, availableBudgetLamports,
-        requestedWithdrawalLamports, shortfallLamports,
-        hasEnoughBudget: isRentExempt && shortfallLamports === 0n,
+        escrowAddress, escrowTokenAddress, slot: snapshot.context.slot, isInitialized,
+        totalBalanceMicroUsdc, availableBudgetMicroUsdc,
+        requestedWithdrawalMicroUsdc, shortfallMicroUsdc,
+        hasEnoughBudget: isInitialized && shortfallMicroUsdc === 0n,
     };
 }

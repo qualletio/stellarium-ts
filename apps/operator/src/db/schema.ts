@@ -17,7 +17,7 @@ export const receiptsTable = pgTable("receipts", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   requestId: varchar({ length: 255 }).notNull(),
   invocationId: varchar({ length: 255 }).notNull(),
-  // Lamports. Integer would overflow above ~2.1 SOL.
+  // Micro-USDC. Integer would overflow above ~2,147 USDC.
   amount: bigint({ mode: 'number' }).notNull(),
   recipientAddress: varchar({ length: 255 }).notNull(),
   voucherSignature: varchar({ length: 255 }).notNull(),

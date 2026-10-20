@@ -1,20 +1,28 @@
 use super::*;
+use solana_program::{instruction::Instruction, program_option::COption, program_stubs};
+use spl_token::{error::TokenError, state::{AccountState, Mint}};
+use std::cell::{Cell, RefCell};
 
 fn run_case(change: impl FnOnce(&mut Vec<AccountInfo>, &Pubkey, &Pubkey)) -> ProgramResult {
     let program = Pubkey::new_unique();
     let authority = Pubkey::new_unique();
     let user = Pubkey::new_unique();
+    let mint = Pubkey::new_unique();
     let address = escrow_address(&program, &authority, &user).0;
     let keys = [
         Pubkey::new_unique(),
         user,
         authority,
         address,
+        get_associated_token_address(&address, &mint),
+        mint,
         system_program::ID,
+        spl_token::ID,
+        spl_associated_token_account::ID,
     ];
-    let owners = [system_program::ID; 5];
-    let mut balances = [10_000_000, 0, 0, 0, 1];
-    let mut data: [Vec<u8>; 5] = std::array::from_fn(|_| vec![]);
+    let owners = [system_program::ID; 9];
+    let mut balances = [10_000_000, 0, 0, 0, 0, 1, 1, 1, 1];
+    let mut data: [Vec<u8>; 9] = std::array::from_fn(|_| vec![]);
     let mut accounts: Vec<_> = keys
         .iter()
         .zip(owners.iter())
@@ -25,23 +33,25 @@ fn run_case(change: impl FnOnce(&mut Vec<AccountInfo>, &Pubkey, &Pubkey)) -> Pro
             AccountInfo::new(
                 key,
                 i == 0 || i == 2,
-                i == 0 || i == 3,
+                i == 0 || i == 3 || i == 4,
                 lamports,
                 data,
                 owner,
-                i == 4,
+                i >= 6,
                 0,
             )
         })
         .collect();
     change(&mut accounts, &program, &authority);
-    initialize(&program, &accounts, &authority)
+    initialize(&program, &accounts, &authority, &mint)
 }
 
 #[test]
 fn unconfigured_authority_fails_closed_and_configured_authority_requires_accounts() {
     let expected = if ESCROW_AUTHORITY.is_none() {
         ProgramError::Custom(AUTHORITY_NOT_CONFIGURED)
+    } else if USDC_MINT.is_none() {
+        ProgramError::Custom(MINT_NOT_CONFIGURED)
     } else {
         ProgramError::NotEnoughAccountKeys
     };
@@ -86,10 +96,22 @@ fn another_signer_cannot_replace_authority() {
 }
 
 #[test]
-fn rejects_wrong_pda() {
+fn rejects_wrong_pda_or_token_account() {
     assert_eq!(
         run_case(|a, _, _| a[3].key = a[1].key),
         Err(ProgramError::InvalidSeeds)
+    );
+    assert_eq!(
+        run_case(|a, _, _| a[4].key = a[1].key),
+        Err(ProgramError::InvalidSeeds)
+    );
+}
+
+#[test]
+fn rejects_another_mint() {
+    assert_eq!(
+        run_case(|a, _, _| a[5].key = a[1].key),
+        Err(ProgramError::Custom(WRONG_MINT))
     );
 }
 
@@ -104,13 +126,15 @@ fn mutable_accounts_must_be_writable() {
 }
 
 #[test]
-fn rejects_fake_system_program() {
+fn rejects_fake_system_token_or_associated_token_program() {
+    for index in [6, 7, 8] {
+        assert_eq!(
+            run_case(|a, _, _| a[index].key = a[1].key),
+            Err(ProgramError::IncorrectProgramId)
+        );
+    }
     assert_eq!(
-        run_case(|a, _, _| a[4].key = a[1].key),
-        Err(ProgramError::IncorrectProgramId)
-    );
-    assert_eq!(
-        run_case(|a, _, _| a[4].executable = false),
+        run_case(|a, _, _| a[6].executable = false),
         Err(ProgramError::IncorrectProgramId)
     );
 }
@@ -154,6 +178,79 @@ fn pda_is_canonical_and_scoped_to_user_and_authority() {
     assert_ne!(escrow_address(&p, &Pubkey::new_unique(), &user).0, address);
 }
 
+thread_local! {
+    /// The program the current test's CPIs are made from, for checking PDA signatures.
+    static CALLER: Cell<Pubkey> = Cell::new(Pubkey::default());
+    /// Every CPI made on this thread, in order.
+    static INVOKED: RefCell<Vec<Instruction>> = const { RefCell::new(vec![]) };
+}
+
+/// Runs Token Program CPIs in-process with spl-token's own processor, so
+/// withdrawal tests move real token balances. Other CPIs are only recorded.
+struct TokenProgramStubs;
+
+impl program_stubs::SyscallStubs for TokenProgramStubs {
+    fn sol_invoke_signed(
+        &self,
+        instruction: &Instruction,
+        account_infos: &[AccountInfo],
+        signers_seeds: &[&[&[u8]]],
+    ) -> ProgramResult {
+        INVOKED.with(|invoked| invoked.borrow_mut().push(instruction.clone()));
+        if instruction.program_id != spl_token::ID {
+            return Ok(());
+        }
+        let caller = CALLER.get();
+        let signers: Vec<Pubkey> = signers_seeds
+            .iter()
+            .map(|seeds| Pubkey::create_program_address(seeds, &caller).unwrap())
+            .collect();
+        let accounts: Vec<AccountInfo> = instruction
+            .accounts
+            .iter()
+            .map(|meta| {
+                let mut info = account_infos
+                    .iter()
+                    .find(|info| info.key == &meta.pubkey)
+                    .expect("CPI account was not passed")
+                    .clone();
+                info.is_signer |= signers.contains(&meta.pubkey);
+                info
+            })
+            .collect();
+        spl_token::processor::Processor::process(&instruction.program_id, &accounts, &instruction.data)
+    }
+}
+
+fn install_stubs(program: Pubkey) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        program_stubs::set_syscall_stubs(Box::new(TokenProgramStubs));
+    });
+    CALLER.set(program);
+    INVOKED.with(|invoked| invoked.borrow_mut().clear());
+}
+
+fn token_account_data(mint: &Pubkey, owner: &Pubkey, amount: u64) -> Vec<u8> {
+    let mut data = vec![0; TokenAccount::LEN];
+    TokenAccount {
+        mint: *mint,
+        owner: *owner,
+        amount,
+        state: AccountState::Initialized,
+        ..TokenAccount::default()
+    }
+    .pack_into_slice(&mut data);
+    data
+}
+
+fn token_amount(account: &AccountInfo) -> u64 {
+    TokenAccount::unpack(&account.try_borrow_data().unwrap()).unwrap().amount
+}
+
+/// Accounts: authority, escrow, escrow token (500), recipient token (1,000,000),
+/// fee token (1,000,000), mint, Token Program. Returns each result and the final
+/// escrow, recipient and fee token balances.
 fn withdrawal_case(
     amounts: &[u64],
     change: impl FnOnce(&mut Vec<AccountInfo>),
@@ -162,17 +259,38 @@ fn withdrawal_case(
     let authority = Pubkey::new_unique();
     let user = Pubkey::new_unique();
     let fee_recipient = Pubkey::new_unique();
+    let mint = Pubkey::new_unique();
+    install_stubs(program);
     let (address, bump) = escrow_address(&program, &authority, &user);
-    let keys = [authority, address, Pubkey::new_unique(), fee_recipient];
-    let owners = [system_program::ID, program, system_program::ID, system_program::ID];
-    let rent = Rent::default();
-    let mut balances = [
-        1_000_000,
-        rent.minimum_balance(ESCROW_LEN) + 500,
-        1_000_000,
-        1_000_000,
+    let keys = [
+        authority,
+        address,
+        get_associated_token_address(&address, &mint),
+        Pubkey::new_unique(),
+        get_associated_token_address(&fee_recipient, &mint),
+        mint,
+        spl_token::ID,
     ];
-    let mut data: [Vec<u8>; 4] = [
+    let owners = [
+        system_program::ID,
+        program,
+        spl_token::ID,
+        spl_token::ID,
+        spl_token::ID,
+        spl_token::ID,
+        solana_sdk_ids::bpf_loader::ID,
+    ];
+    let mut balances = [1_000_000; 7];
+    let mut mint_data = vec![0; Mint::LEN];
+    Mint {
+        mint_authority: COption::None,
+        supply: u64::MAX,
+        decimals: USDC_DECIMALS,
+        is_initialized: true,
+        freeze_authority: COption::None,
+    }
+    .pack_into_slice(&mut mint_data);
+    let mut data: [Vec<u8>; 7] = [
         vec![],
         [
             DISCRIMINATOR.as_slice(),
@@ -181,7 +299,10 @@ fn withdrawal_case(
             &[bump],
         ]
         .concat(),
-        vec![],
+        token_account_data(&mint, &address, 500),
+        token_account_data(&mint, &Pubkey::new_unique(), 1_000_000),
+        token_account_data(&mint, &fee_recipient, 1_000_000),
+        mint_data,
         vec![],
     ];
     let mut accounts: Vec<_> = keys
@@ -191,28 +312,30 @@ fn withdrawal_case(
         .zip(data.iter_mut())
         .enumerate()
         .map(|(i, (((key, owner), lamports), data))| {
-            AccountInfo::new(key, i == 0, i != 0, lamports, data, owner, false, 0)
+            AccountInfo::new(key, i == 0, (2..=4).contains(&i), lamports, data, owner, i == 6, 0)
         })
         .collect();
     change(&mut accounts);
     let mut results = vec![];
     for amount in amounts {
         let before = (
-            accounts[1].lamports(),
-            accounts[2].lamports(),
-            accounts[3].lamports(),
+            token_amount(&accounts[2]),
+            token_amount(&accounts[3]),
+            token_amount(&accounts[4]),
         );
         let state = accounts[1].try_borrow_data().unwrap().to_vec();
-        let result = withdraw(&program, &accounts, &authority, &fee_recipient, *amount, &rent);
+        let lamports: Vec<u64> = accounts.iter().map(|a| a.lamports()).collect();
+        let result = withdraw(&program, &accounts, &authority, &fee_recipient, &mint, *amount);
         assert_eq!(accounts[1].try_borrow_data().unwrap().to_vec(), state);
+        assert_eq!(accounts.iter().map(|a| a.lamports()).collect::<Vec<_>>(), lamports);
         let after = (
-            accounts[1].lamports(),
-            accounts[2].lamports(),
-            accounts[3].lamports(),
+            token_amount(&accounts[2]),
+            token_amount(&accounts[3]),
+            token_amount(&accounts[4]),
         );
         if result.is_err() {
             assert_eq!(after, before);
-        } else if accounts[2].key == accounts[3].key {
+        } else if accounts[3].key == accounts[4].key {
             assert_eq!(after, (before.0 - amount, before.1 + amount, before.2 + amount));
         } else {
             let fee = protocol_fee(*amount);
@@ -222,23 +345,40 @@ fn withdrawal_case(
     }
     (
         results,
-        accounts[1].lamports(),
-        accounts[2].lamports(),
-        accounts[3].lamports(),
+        token_amount(&accounts[2]),
+        token_amount(&accounts[3]),
+        token_amount(&accounts[4]),
     )
 }
 
 #[test]
-fn withdrawal_transfers_to_chosen_recipient_and_preserves_rent_and_state() {
+fn withdrawal_transfers_tokens_to_chosen_recipient_and_preserves_state() {
     let (results, escrow_balance, recipient_balance, fee_balance) =
         withdrawal_case(&[200, 300, 1], |_| {});
     assert_eq!(
         results,
         vec![Ok(()), Ok(()), Err(ProgramError::InsufficientFunds)]
     );
-    assert_eq!(escrow_balance, Rent::default().minimum_balance(ESCROW_LEN));
+    assert_eq!(escrow_balance, 0);
     assert_eq!(recipient_balance, 1_000_400);
     assert_eq!(fee_balance, 1_000_100);
+}
+
+#[test]
+fn withdrawal_signs_two_checked_transfers_as_the_escrow() {
+    let (results, ..) = withdrawal_case(&[500], |_| {});
+    assert_eq!(results, vec![Ok(())]);
+    let invoked = INVOKED.with(|invoked| invoked.borrow().clone());
+    let amounts: Vec<_> = invoked
+        .iter()
+        .map(|ix| match spl_token::instruction::TokenInstruction::unpack(&ix.data).unwrap() {
+            spl_token::instruction::TokenInstruction::TransferChecked { amount, decimals } => {
+                (amount, decimals)
+            }
+            other => panic!("unexpected instruction {other:?}"),
+        })
+        .collect();
+    assert_eq!(amounts, vec![(400, USDC_DECIMALS), (100, USDC_DECIMALS)]);
 }
 
 #[test]
@@ -256,12 +396,13 @@ fn withdrawal_below_fee_granularity_pays_recipient_in_full() {
     assert_eq!(results, vec![Ok(())]);
     assert_eq!(recipient_balance, 1_000_004);
     assert_eq!(fee_balance, 1_000_000);
+    assert_eq!(INVOKED.with(|invoked| invoked.borrow().len()), 1);
 }
 
 #[test]
-fn withdrawal_to_fee_recipient_takes_no_fee() {
+fn withdrawal_to_fee_account_takes_no_fee() {
     let (results, _, recipient_balance, fee_balance) =
-        withdrawal_case(&[500], |a| a[2] = a[3].clone());
+        withdrawal_case(&[500], |a| a[3] = a[4].clone());
     assert_eq!(results, vec![Ok(())]);
     assert_eq!(recipient_balance, 1_000_500);
     assert_eq!(fee_balance, 1_000_500);
@@ -270,18 +411,20 @@ fn withdrawal_to_fee_recipient_takes_no_fee() {
 #[test]
 fn withdrawal_requires_configured_fee_recipient() {
     assert_eq!(
-        withdrawal_case(&[1], |a| a[3] = a[2].clone()).0,
+        withdrawal_case(&[1], |a| a[4] = a[3].clone()).0,
         vec![Err(ProgramError::Custom(WRONG_FEE_RECIPIENT))]
     );
 }
 
 #[test]
-fn withdrawal_rejects_fee_overflow_without_debiting_escrow() {
+fn withdrawal_requires_configured_mint_and_token_program() {
     assert_eq!(
-        withdrawal_case(&[10], |a| **a[3].try_borrow_mut_lamports().unwrap() =
-            u64::MAX)
-        .0,
-        vec![Err(ProgramError::ArithmeticOverflow)]
+        withdrawal_case(&[1], |a| a[5].key = a[0].key).0,
+        vec![Err(ProgramError::Custom(WRONG_MINT))]
+    );
+    assert_eq!(
+        withdrawal_case(&[1], |a| a[6].key = a[0].key).0,
+        vec![Err(ProgramError::IncorrectProgramId)]
     );
 }
 
@@ -304,7 +447,7 @@ fn withdrawal_requires_controlling_signer() {
         vec![Err(ProgramError::MissingRequiredSignature)]
     );
     assert_eq!(
-        withdrawal_case(&[1], |a| a[0].key = a[2].key).0,
+        withdrawal_case(&[1], |a| a[0].key = a[3].key).0,
         vec![Err(ProgramError::Custom(WRONG_AUTHORITY))]
     );
     assert_eq!(
@@ -342,43 +485,54 @@ fn withdrawal_rejects_spoofed_escrow_state() {
 }
 
 #[test]
-fn withdrawal_requires_distinct_writable_nonexecutable_destination() {
-    for index in [1, 2, 3] {
+fn withdrawal_only_debits_the_escrow_token_account() {
+    // Another account of the same mint, even one the escrow owns, is not its associated account.
+    assert_eq!(
+        withdrawal_case(&[1], |a| a[2].key = Box::leak(Box::new(Pubkey::new_unique()))).0,
+        vec![Err(ProgramError::InvalidSeeds)]
+    );
+    assert_eq!(
+        withdrawal_case(&[1], |a| a[2].owner = a[0].owner).0,
+        vec![Err(ProgramError::InvalidAccountOwner)]
+    );
+}
+
+#[test]
+fn withdrawal_requires_distinct_writable_token_accounts() {
+    for index in [2, 3, 4] {
         assert_eq!(
             withdrawal_case(&[1], |a| a[index].is_writable = false).0,
             vec![Err(ProgramError::InvalidArgument)]
         );
     }
     assert_eq!(
-        withdrawal_case(&[1], |a| a[2] = a[1].clone()).0,
+        withdrawal_case(&[1], |a| a[3] = a[2].clone()).0,
         vec![Err(ProgramError::InvalidArgument)]
     );
-    for index in [2, 3] {
-        assert_eq!(
-            withdrawal_case(&[1], |a| a[index].executable = true).0,
-            vec![Err(ProgramError::InvalidArgument)]
-        );
-    }
 }
 
 #[test]
-fn withdrawal_can_pay_the_controlling_wallet() {
-    let (results, _, recipient_balance, fee_balance) = withdrawal_case(&[500], |a| {
-        a[2] = a[0].clone();
-        a[2].is_writable = true;
-    });
-    assert_eq!(results, vec![Ok(())]);
-    assert_eq!(recipient_balance, 1_000_400);
-    assert_eq!(fee_balance, 1_000_100);
-}
-
-#[test]
-fn withdrawal_rejects_recipient_overflow_without_debiting_escrow() {
+fn token_program_rejects_a_recipient_of_another_mint() {
     assert_eq!(
-        withdrawal_case(&[1], |a| **a[2].try_borrow_mut_lamports().unwrap() =
-            u64::MAX)
+        withdrawal_case(&[1], |a| {
+            let other = token_account_data(&Pubkey::new_unique(), &Pubkey::new_unique(), 0);
+            a[3].try_borrow_mut_data().unwrap().copy_from_slice(&other);
+        })
         .0,
-        vec![Err(ProgramError::ArithmeticOverflow)]
+        vec![Err(TokenError::MintMismatch.into())]
+    );
+}
+
+#[test]
+fn token_program_rejects_recipient_overflow_without_debiting_escrow() {
+    assert_eq!(
+        withdrawal_case(&[1], |a| {
+            let mut account = TokenAccount::unpack(&a[3].try_borrow_data().unwrap()).unwrap();
+            account.amount = u64::MAX;
+            account.pack_into_slice(&mut a[3].try_borrow_mut_data().unwrap());
+        })
+        .0,
+        vec![Err(TokenError::Overflow.into())]
     );
 }
 
@@ -398,6 +552,8 @@ fn withdrawal_parser_rejects_missing_trailing_and_zero_amounts() {
     }
     let expected = if ESCROW_AUTHORITY.is_none() {
         ProgramError::Custom(AUTHORITY_NOT_CONFIGURED)
+    } else if USDC_MINT.is_none() {
+        ProgramError::Custom(MINT_NOT_CONFIGURED)
     } else if PROTOCOL_FEE_RECIPIENT.is_none() {
         ProgramError::Custom(FEE_RECIPIENT_NOT_CONFIGURED)
     } else {
