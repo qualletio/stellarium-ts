@@ -41,7 +41,8 @@ function freePort(): Promise<number> {
  * A provider node hosting the paid weather resource, a caller node that bootstraps from it,
  * and a fake operator that records settlements. Everything runs in-process over real HTTP.
  */
-describe("two-node network", () => {
+// Each test starts real HTTP nodes on SQLite files, which can take several seconds on a loaded CI runner.
+describe("two-node network", { timeout: 15_000 }, () => {
     const servers: FastifyInstance[] = [];
     const settlements: PaymentVoucher[] = [];
     const callerKeys = generateBase64KeyPair();
