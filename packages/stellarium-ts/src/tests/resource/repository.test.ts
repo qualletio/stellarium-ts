@@ -110,14 +110,14 @@ describe("ResourceRepository", () => {
         test("returns each function's own payment manifest", async () => {
             await repository.learn(resource("Forecast", [
                 { name: "free" },
-                { name: "paid", paymentManifest: { costLamports: 250, recipientAddress: RECIPIENT } },
+                { name: "paid", paymentManifest: { costMicroUsdc: 250, recipientAddress: RECIPIENT } },
             ]));
 
             const found = await repository.getResource("com.provider.Forecast") as StellariumResource;
 
             expect(found.metadata).toEqual({ baseUrl: PROVIDER });
             expect(found.functions.find(f => f.name === "free")?.paymentManifest).toBeUndefined();
-            expect(found.functions.find(f => f.name === "paid")?.paymentManifest).toMatchObject({ costLamports: 250, recipientAddress: RECIPIENT });
+            expect(found.functions.find(f => f.name === "paid")?.paymentManifest).toMatchObject({ costMicroUsdc: 250, recipientAddress: RECIPIENT });
         });
 
         test("prefers the internal resource", async () => {
@@ -150,14 +150,14 @@ describe("ResourceRepository", () => {
         test("adds new functions, parameters and payment manifests to a known resource", async () => {
             await save([resource("Forecast", [{ name: "today" }])]);
             const result = await save([resource("Forecast", [
-                { name: "today", parameters: [{ name: "city", type: "string" }], paymentManifest: { costLamports: 100, recipientAddress: RECIPIENT } },
+                { name: "today", parameters: [{ name: "city", type: "string" }], paymentManifest: { costMicroUsdc: 100, recipientAddress: RECIPIENT } },
                 { name: "tomorrow" },
             ])]);
 
             expect(result).toEqual({ ok: true, rejected: [] });
             const today = await repository.getResourceFunction("com.provider", "Forecast", "today");
             expect(today?.parameters).toEqual([{ name: "city", type: "string" }]);
-            expect(today?.paymentManifest).toMatchObject({ costLamports: 100 });
+            expect(today?.paymentManifest).toMatchObject({ costMicroUsdc: 100 });
             expect(await repository.getResourceFunction("com.provider", "Forecast", "tomorrow")).toBeDefined();
         });
 
@@ -177,7 +177,7 @@ describe("ResourceRepository", () => {
         });
 
         test("removes functions and payment manifests the peer no longer advertises", async () => {
-            await save([resource("Forecast", [{ name: "today", paymentManifest: { costLamports: 100, recipientAddress: RECIPIENT } }, { name: "old" }])]);
+            await save([resource("Forecast", [{ name: "today", paymentManifest: { costMicroUsdc: 100, recipientAddress: RECIPIENT } }, { name: "old" }])]);
             await save([resource("Forecast", [{ name: "today" }])]);
 
             expect((await repository.getResourceFunction("com.provider", "Forecast", "today"))?.paymentManifest).toBeUndefined();

@@ -20,7 +20,7 @@ describe("openDatabase", () => {
         await (await openDatabase(filename)).close();
         const db = await openDatabase(filename);
 
-        expect(await db.get("PRAGMA user_version")).toEqual({ user_version: 3 });
+        expect(await db.get("PRAGMA user_version")).toEqual({ user_version: 4 });
         await db.close();
     });
 

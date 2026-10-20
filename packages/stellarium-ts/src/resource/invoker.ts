@@ -70,7 +70,7 @@ async function fetchWithRetry(url: string, init: () => RequestInit): Promise<Res
 export class CombinationResourceInvoker implements ResourceInvoker {
 
     /** Without a `grantService`, calls to restricted remote functions fail. */
-    constructor(private readonly resourceRepository: ResourceRepository, private readonly costLimitLamports: number, private readonly publicKey: string, private readonly privateKey: string, private readonly grantService?: GrantService) {}
+    constructor(private readonly resourceRepository: ResourceRepository, private readonly costLimitMicroUsdc: number, private readonly publicKey: string, private readonly privateKey: string, private readonly grantService?: GrantService) {}
     /**
      * Invoke a function on a resource.
      * If the resource has a baseUrl, it will be invoked as a remote function.
@@ -111,10 +111,10 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             let paymentVoucher: PaymentVoucher | undefined;
             if (resourceFunction.paymentManifest) {
                 console.log(`Resource function ${resource.name}.${functionName} has a payment manifest, creating payment voucher...`);
-                if (resourceFunction.paymentManifest.costLamports > this.costLimitLamports) {
-                    throw new Error(`Function ${functionName} cost ${resourceFunction.paymentManifest.costLamports} lamports, which exceeds the cost limit of ${this.costLimitLamports} lamports`);
+                if (resourceFunction.paymentManifest.costMicroUsdc > this.costLimitMicroUsdc) {
+                    throw new Error(`Function ${functionName} cost ${resourceFunction.paymentManifest.costMicroUsdc} micro-USDC, which exceeds the cost limit of ${this.costLimitMicroUsdc} micro-USDC`);
                 }
-                paymentVoucher = this.createPaymentVoucher(resourceFunction.paymentManifest.recipientAddress, resourceFunction.paymentManifest.costLamports, resource.path, resource.name, functionName, parameters);
+                paymentVoucher = this.createPaymentVoucher(resourceFunction.paymentManifest.recipientAddress, resourceFunction.paymentManifest.costMicroUsdc, resource.path, resource.name, functionName, parameters);
                 requestBody.paymentVoucher = paymentVoucher;
             }
 

@@ -9,7 +9,7 @@ import routes, { RateLimitConfig } from './routes.js';
 import { createService, type NodeConfig, type Service } from './service.js';
 import { StartupService } from './startup.js';
 
-export const DEFAULT_COST_LIMIT_LAMPORTS = 10_000;
+export const DEFAULT_COST_LIMIT_MICRO_USDC = 10_000;
 export const DEFAULT_GRANT_REFRESH_INTERVAL_MS = 1000 * 60 * 5;
 
 export interface StellariumNodeOptions {
@@ -28,8 +28,8 @@ export interface StellariumNodeOptions {
     apiKey?: string;
     /** Defaults to `OPERATOR_URL`. */
     operatorUrl?: string;
-    /** Most this node pays for one remote call. Defaults to `COST_LIMIT_LAMPORTS`, then 10,000. */
-    costLimitLamports?: number;
+    /** Most this node pays for one remote call. Defaults to `COST_LIMIT_MICRO_USDC`, then 10,000 ($0.01). */
+    costLimitMicroUsdc?: number;
     /** SQLite file. Defaults to `./requestscript.db`; use ':memory:' for tests. */
     databasePath?: string;
     /**
@@ -58,9 +58,9 @@ function hostsPaidFunctions(resources: StellariumResource[]): boolean {
 }
 
 export function resolveConfig(options: StellariumNodeOptions, resources: StellariumResource[] = []): NodeConfig {
-    const costLimit = options.costLimitLamports ?? (process.env.COST_LIMIT_LAMPORTS ? Number(process.env.COST_LIMIT_LAMPORTS) : DEFAULT_COST_LIMIT_LAMPORTS);
+    const costLimit = options.costLimitMicroUsdc ?? (process.env.COST_LIMIT_MICRO_USDC ? Number(process.env.COST_LIMIT_MICRO_USDC) : DEFAULT_COST_LIMIT_MICRO_USDC);
     if (!Number.isSafeInteger(costLimit) || costLimit < 0) {
-        throw new Error('costLimitLamports must be a nonnegative integer');
+        throw new Error('costLimitMicroUsdc must be a nonnegative integer');
     }
     return {
         baseUrl: required('BASE_URL', options.baseUrl ?? process.env.BASE_URL),
@@ -71,7 +71,7 @@ export function resolveConfig(options: StellariumNodeOptions, resources: Stellar
         operatorUrl: hostsPaidFunctions(resources)
             ? required('OPERATOR_URL', options.operatorUrl ?? process.env.OPERATOR_URL)
             : options.operatorUrl ?? process.env.OPERATOR_URL,
-        costLimitLamports: costLimit,
+        costLimitMicroUsdc: costLimit,
     };
 }
 

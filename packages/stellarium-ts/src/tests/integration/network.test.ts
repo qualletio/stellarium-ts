@@ -122,7 +122,7 @@ describe("two-node network", () => {
         expect(callerResources.resources).toContainEqual(expect.objectContaining({
             name: "Weather",
             baseUrl: providerUrl,
-            functions: expect.arrayContaining([expect.objectContaining({ name: "temperature", paymentManifest: { costLamports: COST, recipientAddress: RECIPIENT } })]),
+            functions: expect.arrayContaining([expect.objectContaining({ name: "temperature", paymentManifest: { costMicroUsdc: COST, recipientAddress: RECIPIENT } })]),
         }));
 
         expect(await run(caller.url)).toEqual({ returnValue: { value: 12, error: null } });
@@ -220,7 +220,7 @@ describe("two-node network", () => {
     });
 
     test("the caller refuses a call that costs more than its limit", async () => {
-        const caller = await startCaller({ costLimitLamports: COST - 1 });
+        const caller = await startCaller({ costLimitMicroUsdc: COST - 1 });
 
         const result = await run(caller.url);
 

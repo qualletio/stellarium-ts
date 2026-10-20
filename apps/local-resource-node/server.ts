@@ -20,7 +20,7 @@ const weather: StellariumResource = {
         return city === "Oslo" ? 12 : 20;
       },
       paymentManifest: {
-        costLamports: 10000,
+        costMicroUsdc: 10000,
         recipientAddress: process.env.RECIPIENT_ADDRESS ?? process.env.RECEIPIENT_ADDRESS!,
       },
     },

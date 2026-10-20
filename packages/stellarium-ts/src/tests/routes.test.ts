@@ -344,7 +344,7 @@ describe("routes", () => {
                 parameters: [{ name: "city", type: "string" }],
                 returnType: "string",
                 exec: async () => "sunny",
-                paymentManifest: { costLamports: 500, recipientAddress: RECIPIENT },
+                paymentManifest: { costMicroUsdc: 500, recipientAddress: RECIPIENT },
             }],
         });
 
@@ -372,7 +372,7 @@ describe("routes", () => {
             const resources = (await fastify.inject({ method: "GET", url: "/v1/resources" })).json().resources;
             expect(resources.find((r: StellariumResource) => r.name === "Forecast")).toMatchObject({
                 baseUrl: peer.baseUrl,
-                functions: [{ name: "tomorrow", paymentManifest: { costLamports: 500, recipientAddress: RECIPIENT } }],
+                functions: [{ name: "tomorrow", paymentManifest: { costMicroUsdc: 500, recipientAddress: RECIPIENT } }],
             });
         });
 
@@ -460,7 +460,7 @@ describe("restricted functions", () => {
         name: "Vault",
         functions: [
             { name: "open", parameters: [{ name: "city", type: "string" }], returnType: "int32", exec: async () => 7, restricted: true },
-            { name: "premium", parameters: [{ name: "city", type: "string" }], returnType: "int32", exec: async () => 9, restricted: true, paymentManifest: { costLamports: COST, recipientAddress: RECIPIENT } },
+            { name: "premium", parameters: [{ name: "city", type: "string" }], returnType: "int32", exec: async () => 9, restricted: true, paymentManifest: { costMicroUsdc: COST, recipientAddress: RECIPIENT } },
         ],
     };
     const call = (functionName: string) => ({ resourcePath: "com.example", resourceName: "Vault", functionName, parameters });

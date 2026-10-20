@@ -2,13 +2,16 @@
 
 This guide covers a local Solana validator, the native Rust escrow program,
 PostgreSQL, the operator API, and two Stellarium nodes: a caller and a paid
-resource provider. All money is **local test SOL**. Commands assume macOS/Linux,
+resource provider. Payments are in **local test USDC** (a 6-decimal mint you
+create), and fees are local test SOL. All payment amounts are micro-USDC (1 USDC =
+1,000,000). Commands assume macOS/Linux,
 run from the repository root unless a different directory is shown.
 
-**Current status (2026-10-16):** the source blockers this guide used to list are
-fixed, and the paid two-node flow is covered by automated tests (see the end of this
-guide). The validator-backed procedure in sections 7–9 has not been rerun since
-those fixes. An HTTP success or a receipt alone is not proof of payment.
+**Current status (2026-10-19):** payments moved from SOL to USDC. The paid
+two-node flow is covered by automated tests (see the end of this guide). Escrow
+setup, a USDC deposit and a split withdrawal through the operator's `EscrowService`
+were verified on a local validator. The full two-node procedure in sections 7–9
+has not been rerun since the switch. An HTTP success or a receipt alone is not proof of payment.
 This guide does not deploy anything for you.
 
 ## 1. What the source does now
@@ -18,7 +21,7 @@ The source is the authority here. Summary of the behavior this guide relies on:
 | Area | Behavior |
 | --- | --- |
 | Program authority | `programs/escrow_program/src/lib.rs` has local fixture keys compiled in. Replace them with your own (section 4). |
-| Node configuration | `StellariumNode.start` takes `baseUrl`, keys, `apiKey`, `operatorUrl`, `costLimitLamports` and `databasePath`, falling back to the environment. It rejects when a required value is missing. |
+| Node configuration | `StellariumNode.start` takes `baseUrl`, keys, `apiKey`, `operatorUrl`, `costLimitMicroUsdc` and `databasePath`, falling back to the environment. It rejects when a required value is missing. |
 | SQLite | Schema is created on startup and reused on restart. Bootstrapping is idempotent, and a provider may host several resources. |
 | Peer discovery | Announcements are signed over `{ baseUrl, name, publicKey, expiry }` and verified with the announced key. Resource broadcasts carry the sender's `publicKey`, and a peer may only publish its own resources. |
 | Provider verification | `/v1/run/resource` requires a voucher for a paid function and checks its invocation hash, amount, recipient, expiry and signature before running it. It settles only after a successful run. |
@@ -44,20 +47,22 @@ Caller node :3000  -- signed paid invocation --> Provider node :3002
                                           Solana RPC :8899
                                          WebSocket   :8900
                                                     |
-                                        Escrow program + PDA
+                                Escrow program + PDA + PDA's USDC token account
                                                     |
-                                            SOL to provider
+                                            USDC to provider
 ```
 
 | Identity | Format / role |
 | --- | --- |
-| Operator authority | Solana keypair JSON, loaded as `PRIVATE_KEY`; pays transaction fees and setup rent, signs withdrawals, and is the compiled `ESCROW_AUTHORITY` and deployment upgrade authority. |
+| Operator authority | Solana keypair JSON, loaded as `PRIVATE_KEY`; pays transaction fees, setup rent and recipients' token-account rent, signs withdrawals, and is the compiled `ESCROW_AUTHORITY`, the deployment upgrade authority and the test mint's mint authority. |
+| Test USDC mint | 6-decimal SPL Token mint from `usdc-mint.json`; compiled as `USDC_MINT` and set as the operator's `USDC_MINT`. |
 | Program ID | Separate Solana program keypair's public address; becomes `ESCROW_PROGRAM_ID`. Not the authority. |
 | Caller/user | Node Ed25519 signing key; **raw public key underlying SPKI**, converted to Solana base58. Used in escrow PDA seeds. No separate caller wallet is automatically linked to it. |
 | Provider signing key | Separate node Ed25519 key for peer discovery. |
-| Provider recipient | Separate Solana public address in the function payment manifest. Receives 80% of each withdrawal; does not sign it. |
-| Protocol fee wallet | Separate Solana public address compiled as `PROTOCOL_FEE_RECIPIENT` and set as the operator's `PROTOCOL_FEE_RECIPIENT`. Receives 20% of each withdrawal; does not sign it. |
-| Escrow PDA | Derived from `["escrow", authority bytes, user bytes]` under the deployed program ID. Has no private key. Holds 73 bytes of state and SOL. |
+| Provider recipient | Separate Solana public address in the function payment manifest. Its USDC associated token account receives 80% of each withdrawal and must exist before the first payment (section 4); the operator won't create it. Does not sign. |
+| Protocol fee wallet | Separate Solana public address compiled as `PROTOCOL_FEE_RECIPIENT` and set as the operator's `PROTOCOL_FEE_RECIPIENT`. Its USDC associated token account receives 20% of each withdrawal; does not sign it. |
+| Escrow PDA | Derived from `["escrow", authority bytes, user bytes]` under the deployed program ID. Has no private key. Holds 73 bytes of state and owns the escrow token account. |
+| Escrow token account | The PDA's USDC associated token account, created at setup. Holds the user's spendable USDC. |
 
 Use three terminals for validator/operator/provider and another for the caller;
 use a fifth for commands. Set the same `REPO` in each terminal:
@@ -77,8 +82,8 @@ Needed: Node, pnpm 12.11.2 (the root `packageManager`), Rust/Cargo, Solana CLI,
 `cargo build-sbf`, `solana-test-validator`, Docker with its daemon running,
 and `curl`. Commands below also use Python 3 for JSON/public env extraction.
 Anchor is not required: this is a native `solana-program` crate, not an Anchor
-workspace. No token mint, SPL token account, oracle, or external RPC secret is
-needed for this SOL-only flow.
+workspace. The `spl-token` CLI (installed with the Solana CLI) creates the test
+mint and moves test USDC. No oracle or external RPC secret is needed.
 
 The machine inspected for this guide had Node 25.0.0, pnpm 12.11.2, and Solana CLI,
 builder and validator 3.1.10. This is an observed baseline, not a guarantee that
@@ -102,7 +107,8 @@ NO_DNA=1 cargo test --manifest-path programs/escrow_program/Cargo.toml --locked
 ```
 
 Type checking does not detect the SQL or payment integration failures above.
-The 23 Rust tests exercise helpers and program logic without a validator. The
+The 26 Rust tests exercise helpers and program logic without a validator; Token
+Program CPIs run in-process through spl-token's processor. The
 operator README's `apps/operator/tests/*.test.mjs` files do not exist in this
 checkout; do not treat that command as validator coverage.
 
@@ -120,6 +126,7 @@ solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/opera
 solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/program.json
 solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/recipient.json
 solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/protocol-fee.json
+solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/usdc-mint.json
 
 node --input-type=module <<'JS'
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
@@ -135,6 +142,7 @@ const common = {
   AUTHORITY_ADDRESS: address('operator'),
   RECIPIENT_ADDRESS: address('recipient'),
   PROTOCOL_FEE_RECIPIENT: address('protocol-fee'),
+  USDC_MINT: address('usdc-mint'),
 };
 for (const [role, port] of [['caller', 3000], ['provider', 3002]]) {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -169,17 +177,21 @@ export AUTHORITY_ADDRESS="$(solana-keygen pubkey .keys/local-e2e/operator.json)"
 export ESCROW_PROGRAM_ID="$(solana-keygen pubkey .keys/local-e2e/program.json)"
 export RECIPIENT_ADDRESS="$(solana-keygen pubkey .keys/local-e2e/recipient.json)"
 export PROTOCOL_FEE_RECIPIENT="$(solana-keygen pubkey .keys/local-e2e/protocol-fee.json)"
+export USDC_MINT="$(solana-keygen pubkey .keys/local-e2e/usdc-mint.json)"
 export USER_ADDRESS="$(python3 -c 'from pathlib import Path; print(dict(line.split("=",1) for line in Path(".keys/local-e2e/caller.env").read_text().splitlines())["USER_ADDRESS"])')"
 ```
 
-Edit `programs/escrow_program/src/lib.rs`, replacing each `None` with your public
-`AUTHORITY_ADDRESS` and `PROTOCOL_FEE_RECIPIENT` (only public addresses belong in source):
+Edit `programs/escrow_program/src/lib.rs`, setting the constants to your public
+`AUTHORITY_ADDRESS`, `PROTOCOL_FEE_RECIPIENT` and `USDC_MINT` (only public addresses
+belong in source):
 
 ```rust
 pub const ESCROW_AUTHORITY: Option<Pubkey> =
     Some(solana_program::pubkey!("YOUR_LOCAL_OPERATOR_PUBLIC_ADDRESS"));
 pub const PROTOCOL_FEE_RECIPIENT: Option<Pubkey> =
     Some(solana_program::pubkey!("YOUR_LOCAL_PROTOCOL_FEE_ADDRESS"));
+pub const USDC_MINT: Option<Pubkey> =
+    Some(solana_program::pubkey!("YOUR_LOCAL_USDC_MINT_ADDRESS"));
 ```
 
 Build the configured binary:
@@ -207,8 +219,10 @@ curl -sS "$RPC" -H 'Content-Type: application/json' \
 # Expect result: "ok".
 
 solana --url "$RPC" airdrop 100 "$AUTHORITY_ADDRESS"
-solana --url "$RPC" airdrop 1 "$RECIPIENT_ADDRESS"
-solana --url "$RPC" airdrop 1 "$PROTOCOL_FEE_RECIPIENT"
+spl-token --url "$RPC" create-token --decimals 6 \
+  --fee-payer .keys/local-e2e/operator.json \
+  --mint-authority "$AUTHORITY_ADDRESS" \
+  .keys/local-e2e/usdc-mint.json
 solana --url "$RPC" program deploy \
   --keypair .keys/local-e2e/operator.json \
   --fee-payer .keys/local-e2e/operator.json \
@@ -219,9 +233,18 @@ solana --url "$RPC" program show "$ESCROW_PROGRAM_ID"
 ```
 
 Expect the program ID to equal `ESCROW_PROGRAM_ID` and its upgrade authority to
-equal `AUTHORITY_ADDRESS`. The recipient and protocol fee wallet are prefunded so
-a tiny withdrawal does not create an underfunded new account. Setup pays escrow rent; it does **not**
-fund the user's spendable budget. CLI deployment and local validation follow the
+equal `AUTHORITY_ADDRESS`, and `create-token` to print `USDC_MINT`. The recipient
+and protocol fee wallets need no SOL. The operator creates the fee wallet's USDC token
+account in the first withdrawal, but not the recipient's, so create it now (the
+operator pays this test account's rent as fee payer):
+
+```sh
+spl-token --url "$RPC" create-account "$USDC_MINT" --owner "$RECIPIENT_ADDRESS" \
+  --fee-payer .keys/local-e2e/operator.json
+```
+
+Setup pays rent for the escrow state and
+token account; it does **not** fund the user's spendable budget. CLI deployment and local validation follow the
 [Solana Rust program guide](https://solana.com/docs/programs/rust).
 
 ## 5. PostgreSQL and operator
@@ -280,27 +303,31 @@ writeFileSync('../../.keys/local-e2e/escrow-result.json', JSON.stringify(result,
 JS
 cd "$REPO"
 export ESCROW_ADDRESS="$(python3 -c 'import json; print(json.load(open(".keys/local-e2e/escrow-result.json"))["escrowAddress"])')"
+export ESCROW_TOKEN_ADDRESS="$(python3 -c 'import json; print(json.load(open(".keys/local-e2e/escrow-result.json"))["escrowTokenAddress"])')"
 solana --url "$RPC" account "$ESCROW_ADDRESS"
+spl-token --url "$RPC" display "$ESCROW_TOKEN_ADDRESS"
 ```
 
 Successful creation returns HTTP 200 (202 when the result is `unconfirmed`). Expect `confirmed` and a signature on first creation,
 `existing` without a new transaction on a repeat. Verify account owner equals
-the program ID and data length is 73. For a first creation, use the signature
+the program ID and data length is 73, and that the token account's mint is
+`USDC_MINT` and its owner is `ESCROW_ADDRESS`. For a first creation, use the signature
 verification in section 9. If status is `unconfirmed`, check the saved signature
 before proceeding.
 
-Deposit 0.1 SOL above the rent reserve using an ordinary System Program transfer:
+Deposit 1 test USDC. The operator is the test mint's authority, so mint it
+straight into the escrow token account:
 
 ```sh
-solana --url "$RPC" transfer "$ESCROW_ADDRESS" 0.1 \
-  --from .keys/local-e2e/operator.json --fee-payer .keys/local-e2e/operator.json
-solana --url "$RPC" balance "$ESCROW_ADDRESS" --lamports
+spl-token --url "$RPC" mint "$USDC_MINT" 1 "$ESCROW_TOKEN_ADDRESS" \
+  --mint-authority .keys/local-e2e/operator.json --fee-payer .keys/local-e2e/operator.json
+spl-token --url "$RPC" balance --address "$ESCROW_TOKEN_ADDRESS"
 ```
 
-The operator sponsors this test deposit. A real user can fund the same escrow
-from another wallet. The user key need not itself have lamports for setup or
-withdrawal: the operator pays the fees. Escrow balance should be rent minimum
-for 73 bytes plus 100,000,000 lamports.
+A real user funds the same escrow with an ordinary SPL Token transfer from any
+wallet's USDC account (`spl-token transfer "$USDC_MINT" 1 "$ESCROW_TOKEN_ADDRESS"`).
+The user key need not hold SOL for setup or withdrawal: the operator pays the
+fees. The escrow token balance should be 1 (1,000,000 micro-USDC).
 
 ## 7. Start provider and caller
 
@@ -324,7 +351,7 @@ if (provider) {
       id: 1, name: 'temperature',
       parameters: [{ name: 'city', type: 'string' }], returnType: 'int32',
       paymentManifest: {
-        id: 1, costLamports: 500, recipientAddress: process.env.RECIPIENT_ADDRESS,
+        id: 1, costMicroUsdc: 500, recipientAddress: process.env.RECIPIENT_ADDRESS,
       },
       exec: async args => args.find(arg => arg.name === 'city')?.value === 'Oslo' ? 12 : 20,
     }],
@@ -368,7 +395,7 @@ curl -fsS http://127.0.0.1:3000/v1/peers
 ```
 
 The caller must resolve `com.example.Weather` as **remote**, with base URL
-`http://127.0.0.1:3002` and `temperature`'s 500-lamport manifest. A local resource
+`http://127.0.0.1:3002` and `temperature`'s 500-micro-USDC manifest. A local resource
 invocation bypasses voucher creation, so it cannot prove settlement. For a
 separate discovery test, announce each peer with a valid signature and then
 broadcast resources; startup only broadcasts to already known peers.
@@ -380,8 +407,8 @@ Record escrow and recipient balances, then call the caller's API with its JSON
 `{ source }` body and its `API_KEY`:
 
 ```sh
-solana --url "$RPC" balance "$ESCROW_ADDRESS" --lamports
-solana --url "$RPC" balance "$RECIPIENT_ADDRESS" --lamports
+spl-token --url "$RPC" balance --address "$ESCROW_TOKEN_ADDRESS"
+spl-token --url "$RPC" balance "$USDC_MINT" --owner "$RECIPIENT_ADDRESS"
 export CALLER_API_KEY="$(python3 -c 'from pathlib import Path; print(dict(line.split("=",1) for line in Path(".keys/local-e2e/caller.env").read_text().splitlines())["API_KEY"])')"
 curl -sS -i http://127.0.0.1:3000/v1/run \
   -H 'Content-Type: application/json' \
@@ -432,7 +459,7 @@ a new authorization each time it runs, so do not rerun it to retry an uncertain
 payment. Reuse the saved body and first reconcile its saved signature.
 
 Expected behavior: a confirmed result with a withdrawal signature, one
-`confirmed` receipt, and a 500-lamport transfer.
+`confirmed` receipt, and a 500-micro-USDC transfer.
 
 ## 9. Verify on the local chain
 
@@ -453,8 +480,9 @@ interpret `null` as successful settlement. See the official
 [getTransaction reference](https://solana.com/docs/rpc/http/gettransaction).
 
 For a payment, this dependency-free checker asserts transaction success, program
-invocation, the exact withdrawal amount/account order, and transaction-local
-balance changes. Run from the command terminal after setting all public env vars:
+invocation, the exact withdrawal amount and account order, and the transaction's own
+token balance changes. Run it from the command terminal after setting all public env
+vars:
 
 ```sh
 python3 <<'PY'
@@ -468,12 +496,21 @@ assert meta['err'] is None, meta['err']
 keys = message['accountKeys']
 loaded = meta.get('loadedAddresses') or {}
 keys += loaded.get('writable', []) + loaded.get('readonly', [])
-escrow, recipient, authority, program, fee_wallet = [os.environ[name] for name in
-    ['ESCROW_ADDRESS', 'RECIPIENT_ADDRESS', 'AUTHORITY_ADDRESS', 'ESCROW_PROGRAM_ID',
-     'PROTOCOL_FEE_RECIPIENT']]
-def delta(address):
-    i = keys.index(address)
-    return meta['postBalances'][i] - meta['preBalances'][i]
+escrow, escrow_token, recipient, authority, program, fee_wallet, mint = [os.environ[name] for name in
+    ['ESCROW_ADDRESS', 'ESCROW_TOKEN_ADDRESS', 'RECIPIENT_ADDRESS', 'AUTHORITY_ADDRESS',
+     'ESCROW_PROGRAM_ID', 'PROTOCOL_FEE_RECIPIENT', 'USDC_MINT']]
+def token_delta(owner):
+    # Token balances are keyed by account index; an account created in this
+    # transaction (a first-time recipient) has no pre-balance.
+    def amount(balances):
+        return sum(int(b['uiTokenAmount']['amount']) for b in balances
+                   if b['owner'] == owner and b['mint'] == mint)
+    return amount(meta['postTokenBalances']) - amount(meta['preTokenBalances'])
+def token_account_of(owner):
+    matches = {keys[b['accountIndex']] for b in meta['postTokenBalances']
+               if b['owner'] == owner and b['mint'] == mint}
+    assert len(matches) == 1, (owner, matches)
+    return matches.pop()
 alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 def unbase58(value):
     n = 0
@@ -484,25 +521,25 @@ withdrawals = [ix for ix in message['instructions']
     if keys[ix['programIdIndex']] == program and unbase58(ix['data'])[:1] == b'\x01']
 assert len(withdrawals) == 1, 'Expected one escrow withdrawal instruction'
 ix = withdrawals[0]
-assert [keys[i] for i in ix['accounts']] == [authority, escrow, recipient, fee_wallet]
+token_program = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+assert [keys[i] for i in ix['accounts']] == [authority, escrow, escrow_token,
+    token_account_of(recipient), token_account_of(fee_wallet), mint, token_program]
 data = unbase58(ix['data'])
 assert len(data) == 9 and int.from_bytes(data[1:], 'little') == 500
-assert delta(escrow) == -500, delta(escrow)
-assert delta(recipient) == 400, delta(recipient)
-assert delta(fee_wallet) == 100, delta(fee_wallet)
+assert token_delta(escrow) == -500, token_delta(escrow)
+assert token_delta(recipient) == 400, token_delta(recipient)
+assert token_delta(fee_wallet) == 100, token_delta(fee_wallet)
 assert keys[0] == authority, 'Expected operator fee payer'
-assert delta(authority) == -meta['fee'], (delta(authority), meta['fee'])
-print('PASS: 500-lamport withdrawal split 400/100 with protocol fee; operator paid the tx fee; slot', tx['slot'])
+print('PASS: 500-micro-USDC withdrawal split 400/100 with protocol fee; operator paid the tx fee; slot', tx['slot'])
 PY
 ```
 
 For creation, inspect the same RPC data: `meta.err` must be null, the top-level
 instruction must invoke your program with data `[0]`, and the new account must
-be program-owned with valid state. Creation's balance changes include rent plus
-the operator's fee, so do not run the withdrawal checker on it.
+be program-owned with valid state. Do not run the withdrawal checker on it.
 
-Validate current escrow state and rent with the repository's decoder/budget helper
-(operator workspace, operator env file loaded):
+Validate the current escrow state and USDC balance with the repository's decoder
+and budget helper (operator workspace, operator env file loaded):
 
 ```sh
 cd "$REPO/apps/operator"
@@ -515,23 +552,24 @@ const connection = new Connection(process.env.SOLANA_RPC_URL, 'confirmed');
 const programId = new PublicKey(process.env.ESCROW_PROGRAM_ID);
 const authority = new PublicKey(process.env.AUTHORITY_ADDRESS);
 const user = new PublicKey(process.env.USER_ADDRESS); // exported public caller address
-const budget = await getEscrowBudget({ connection, programId, authority, user });
+const mint = new PublicKey(process.env.USDC_MINT);
+const budget = await getEscrowBudget({ connection, programId, authority, user, mint });
 const account = await connection.getAccountInfo(budget.escrowAddress, 'confirmed');
 assert(account);
 const state = decodeEscrowAccount(programId, budget.escrowAddress, account);
 assert(state.user.equals(user) && state.authority.equals(authority));
-assert(budget.isInitialized && budget.isRentExempt);
+assert(budget.isInitialized);
 console.log({ escrowAddress: budget.escrowAddress.toBase58(),
-  balance: budget.totalBalanceLamports.toString(),
-  rent: budget.rentReserveLamports.toString(),
-  spendable: budget.availableBudgetLamports.toString() });
+  escrowTokenAddress: budget.escrowTokenAddress.toBase58(),
+  balance: budget.totalBalanceMicroUsdc.toString(),
+  spendable: budget.availableBudgetMicroUsdc.toString() });
 JS
 cd "$REPO"
 ```
 
-For exactly one 500-lamport payment after the 0.1 SOL deposit, spendable budget
-must be **99,999,500 lamports**. After both the full-flow test and the separate
-direct-payment test succeed it must be **99,999,000**. The state stays intact.
+For exactly one 500-micro-USDC payment after the 1 USDC deposit, the spendable
+budget must be **999,500 micro-USDC**. After both the full-flow test and the
+separate direct-payment test succeed, it must be **999,000**. The state stays intact.
 Transaction-specific deltas are stronger evidence than before/after wallet
 snapshots when other requests may be running.
 
@@ -550,8 +588,9 @@ The full-system happy path passes only when all of these hold:
 3. Operator persists a receipt tied to that request/invocation and a signature.
 4. That signature exists on your local validator, succeeds, and invokes the
    configured program's withdrawal instruction.
-5. Escrow decreases by exactly 500 lamports; recipient increases by exactly 500;
-   operator pays the transaction fee; escrow state and rent reserve stay valid.
+5. The escrow token account decreases by exactly 500 micro-USDC, the recipient's
+   USDC account increases by exactly 400 and the fee wallet's by 100. The operator
+   pays the transaction fee, and the escrow state stays valid.
 
 Run these additional cases. Use
 fresh IDs for independent test authorizations, but the **same saved voucher** for
@@ -563,7 +602,7 @@ replay tests. Inspect chain balances and signatures, not only HTTP status codes.
 | Missing/wrong escrow token | 401; no setup transaction. |
 | Tamper signed amount/recipient/context | Rejected, no withdrawal or receipt. |
 | Expired voucher | 401 before submission, no transfer. |
-| Insufficient spendable escrow balance | Rejected, no withdrawal, rent preserved. |
+| Insufficient escrow USDC balance | Rejected with 409, no withdrawal or receipt. |
 | Missing escrow | Rejected, no withdrawal. |
 | Same voucher twice / concurrent submissions | Exactly one on-chain payment; the repeat gets 409. |
 | Operator restart and retry same voucher | No second transfer; reconciliation resolves the saved signature to `confirmed`, `failed` or `expired`. |
@@ -577,25 +616,28 @@ replay tests. Inspect chain balances and signatures, not only HTTP status codes.
 | --- | --- |
 | `… is required: pass it to StellariumNode.start` | The node's env file is loaded and has that variable. |
 | `/v1/run` answers 401 | `Authorization: Bearer` matches the caller's `API_KEY`. |
-| Paid call answers 402 or 400 | The caller knows the provider's current manifest (restart it to relearn) and its `costLimitLamports` covers the cost. |
+| Paid call answers 402 or 400 | The caller knows the provider's current manifest (restart it to relearn) and its `costLimitMicroUsdc` covers the cost. |
 | Invalid DER / invalid public key | Caller env loaded into the invoker; SPKI/raw conversion in the operator. |
 | Simulation error, custom program error 0 | Program was built with `ESCROW_AUTHORITY = None`; configure, rebuild, redeploy. |
 | Custom program error 1 | Compiled authority differs from operator `PRIVATE_KEY` public address. |
 | Withdrawal fails with custom program error 2 | Program was built with `PROTOCOL_FEE_RECIPIENT = None`; configure, rebuild, redeploy. |
 | Withdrawal fails with custom program error 3 | Operator `PROTOCOL_FEE_RECIPIENT` differs from the compiled fee wallet. |
+| Operator answers 422 `has no usable USDC token account` | The provider's `RECIPIENT_ADDRESS` has no initialized, unfrozen USDC account of `USDC_MINT`; create it as in section 4 and resubmit the saved voucher before it expires. |
+| Custom program error 4 | Program was built with `USDC_MINT = None`; configure, rebuild, redeploy. |
+| Custom program error 5 | Operator `USDC_MINT` differs from the compiled mint. |
+| Token Program error during withdrawal | A recipient token account of another mint, or a frozen account. Read the simulation logs. |
 | `relation receipts does not exist` | The operator failed to apply migrations at startup; check its log and `DATABASE_URL`. |
 | Receipt stuck `unconfirmed` | Reconciliation runs every `RECONCILE_INTERVAL_MS` (30s) and waits two minutes after the last change. Rows without `lastValidBlockHeight` need manual review. |
 | `ECONNREFUSED` on 8899/8900 | Validator process, RPC/WS ports, and local URL. |
 | Operator doesn't see a settlement | `OPERATOR_URL` includes `/v1`; provider voucher verification succeeded; background errors surfaced. |
 | Signature not found | Check local RPC, wait for confirmation, check whether ledger was reset. A DB receipt is not chain proof. |
-| Tiny payment to new recipient fails | Prefund recipient as in section 4 and examine simulation logs. |
 | SBF syscall warnings / deploy failure | Record builder/validator versions, update compatible tooling, rebuild; unit tests do not validate binary runtime compatibility. |
 
 Stop the caller/provider/operator before resetting their state. Stop the validator
 before a ledger reset. For a clean scenario, choose a **new** ledger directory,
 new node working directories, and a fresh database (or deliberately clear the
 test-only receipt/settlement tables). Redeploy the same program ID, airdrop again,
-recreate escrow, and fund it. Reusing receipts from a different ledger can cause
+recreate the test mint, recreate the escrow, and fund it. Reusing receipts from a different ledger can cause
 false replay conflicts or reference signatures that no longer exist.
 
 To pause and resume, retain the ledger, PostgreSQL volume, keys, and each node's
@@ -611,5 +653,10 @@ ledger under `.local-ledger/` are ignored by Git.
   network test with real HTTP and a fake operator (discovery, a paid call, settlement,
   restart, cost limit), node route and repository tests on in-memory SQLite, and operator
   tests on in-memory PGlite with a fake Solana connection (claims, retries, reconciliation).
-- All 23 Rust unit tests pass (`cargo test`).
-- The validator-backed procedure in this guide has not been rerun since the fixes above.
+- All 26 Rust unit tests pass (`cargo test`).
+- On a local validator, the operator's `EscrowService` created an escrow and its USDC token account,
+  settled a 10,000 micro-USDC voucher as 8,000 to the recipient's token account and 2,000 to the fee
+  wallet, settled a 4 micro-USDC voucher with no fee, and refused an overdraw with 409. A recipient
+  without a USDC token account was refused with 422 and no receipt; after it created one, the same
+  payment settled.
+- The full two-node procedure in this guide has not been rerun since the switch to USDC.
