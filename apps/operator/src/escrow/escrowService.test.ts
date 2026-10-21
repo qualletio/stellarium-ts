@@ -1,11 +1,12 @@
 import { AccountState, ASSOCIATED_TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
-import { Keypair, type VersionedTransaction } from '@solana/web3.js';
+import { Keypair, VersionedTransaction } from '@solana/web3.js';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { Database } from '../db/database.js';
 import { receiptsTable, settlementsTable } from '../db/schema.js';
 import { OperationError } from '../errors.js';
 import { ReceiptRepository } from '../repository.js';
 import { createTestDatabase, FakeConnection, generateNodeKeys, MINT, RECIPIENT, signedInferenceVoucher, signedVoucher, tokenAccount } from '../testing.js';
+import { solanaUserFromSpki } from '../solana/userAddress.js';
 import { EscrowService, RECONCILE_MIN_AGE_MS, type SettlementPolicy } from './escrowService.js';
 
 describe('EscrowService', () => {
@@ -59,6 +60,38 @@ describe('EscrowService', () => {
     /** The amount the withdrawal instruction (the transaction's second) withdraws. */
     const withdrawnAmount = (transaction: VersionedTransaction) =>
         Buffer.from(transaction.message.compiledInstructions[1]!.data).readBigUInt64LE(1);
+
+    describe('initiateEscrow', () => {
+        const user = Keypair.generate().publicKey;
+
+        test('returns an unsigned transaction the user pays for', async () => {
+            const result = await service.initiateEscrow(user);
+
+            expect(result).toMatchObject({ status: 'unsigned', blockhash: expect.any(String) });
+            const transaction = VersionedTransaction.deserialize(Buffer.from(result.transaction!, 'base64'));
+            const { staticAccountKeys, header } = transaction.message;
+            expect(staticAccountKeys[0]!.equals(user)).toBe(true);
+            // Only the user signs: the authority is a readonly, unsigned account.
+            expect(header.numRequiredSignatures).toBe(1);
+            expect(transaction.signatures[0]!.every(byte => byte === 0)).toBe(true);
+            expect(staticAccountKeys.some(key => key.equals(authority.publicKey))).toBe(true);
+            expect(connection.sent).toEqual([]);
+        });
+
+        test('returns an existing escrow without a transaction', async () => {
+            const result = await service.initiateEscrow(solanaUserFromSpki(keys.publicKey));
+
+            expect(result).toMatchObject({ status: 'existing' });
+            expect(result.transaction).toBeUndefined();
+        });
+
+        test('422s when simulation fails, for example for an unfunded user', async () => {
+            connection.simulateTransaction = (async () => ({ context: { slot: 2 }, value: { err: 'InsufficientFundsForRent', logs: [] } })) as unknown as typeof connection.simulateTransaction;
+
+            await rejectsWithStatus(service.initiateEscrow(user), 422);
+            expect(connection.sent).toEqual([]);
+        });
+    });
 
     describe('accruePayment', () => {
         test('records an accrued receipt without sending a transaction', async () => {

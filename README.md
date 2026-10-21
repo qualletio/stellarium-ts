@@ -388,7 +388,6 @@ for (const [role, port] of [['caller', 3000], ['provider', 3002]]) {
 }
 const values = { ...common,
   DATABASE_URL: 'postgresql://stellarium:local-only-password@127.0.0.1:5433/stellarium',
-  OPERATOR_API_TOKEN: randomBytes(32).toString('hex'),
   // Nominal: prices a settlement transaction at 1 micro-USDC, so a single paid call settles.
   SOL_PRICE_USDC: '0.0001',
   PRIVATE_KEY: readFileSync('.keys/local-e2e/operator.json', 'utf8').trim() };
@@ -405,7 +404,8 @@ solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/calle
 ```
 
 Configure the escrow program. The operator key is the escrow authority: it signs
-escrow setup and withdrawals and is the program's upgrade authority. Escrows hold
+withdrawals and is the program's upgrade authority. Each user signs and pays for
+their own escrow's setup. Escrows hold
 USDC: locally, a test mint you create stands in for it. Each escrow withdrawal pays
 20% of the amount to the protocol fee wallet and the remaining 80% to the resource
 provider. Print the three addresses:
@@ -445,11 +445,13 @@ cargo build-sbf --manifest-path programs/escrow_program/Cargo.toml \
 ```
 
 Fund the wallets with SOL for transaction fees. The operator pays for the program
-deploy, escrow setup, and the protocol fee wallet's USDC token account:
+deploy and the protocol fee wallet's USDC token account. The caller node's
+`USER_ADDRESS` (in `.keys/local-e2e/caller.env`) pays its escrow's rent:
 
 ```sh
 solana airdrop 100 "$(solana-keygen pubkey .keys/local-e2e/operator.json)"
 solana airdrop 5 "$(solana-keygen pubkey .keys/local-e2e/caller.json)"
+solana airdrop 1 "$(sed -n 's/^USER_ADDRESS=//p' .keys/local-e2e/caller.env)"
 ```
 
 Deploy the Escrow program with the operator as fee payer and upgrade authority:
@@ -524,7 +526,6 @@ PROTOCOL_FEE_RECIPIENT=
 USDC_MINT=
 PRIVATE_KEY=
 PORT=
-OPERATOR_API_TOKEN=SET_THIS_TO_ANYTHING
 SOL_PRICE_USDC=0.0001
 ```
 
@@ -541,33 +542,36 @@ Start the services:
 docker compose up -d --build
 ```
 
-Initialize an escrow account:
+Initialize the caller's escrow account. `POST /v1/escrow` returns an unsigned
+transaction; the caller signs it with its node key and pays the rent:
 
-POST to `http://localhost:3001/v1/escrow`
-
-Authorization header: `Bearer YOUR_OPERATOR_API_TOKEN`
-
-request body:
-
-```json
-{
-  "user": "YOUR_USER_ADDRESS"
+```sh
+cd apps/operator
+node --env-file=../../.keys/local-e2e/caller.env --input-type=module <<'JS'
+import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
+// The node's Ed25519 key is its escrow user: the PKCS#8 DER ends with the 32-byte seed.
+const user = Keypair.fromSeed(Buffer.from(process.env.SIGNING_PRIVATE_KEY, 'base64url').subarray(-32));
+const response = await fetch('http://localhost:3001/v1/escrow', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ user: user.publicKey.toBase58() }) });
+const result = await response.json();
+if (!response.ok) throw new Error(JSON.stringify(result));
+if (result.status === 'unsigned') {
+  const transaction = VersionedTransaction.deserialize(Buffer.from(result.transaction, 'base64'));
+  transaction.sign([user]);
+  const connection = new Connection(process.env.SOLANA_RPC_URL, 'confirmed');
+  const signature = await connection.sendTransaction(transaction);
+  const { blockhash, lastValidBlockHeight } = result;
+  const { value } = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+  if (value.err) throw new Error(`Escrow creation failed: ${signature}`);
 }
+console.log({ escrowAddress: result.escrowAddress, escrowTokenAddress: result.escrowTokenAddress });
+JS
+cd ../..
 ```
 
 Copy the escrow token address value. The escrow PDA owns this USDC token
-account, and deposits go to it:
-
-```json
-{
-  "escrowAddress": "ESCROW_ADDRESS",
-  "escrowTokenAddress": "ESCROW_TOKEN_ADDRESS",
-  "signature": "SIGNATURE",
-  "blockhash": "BLOCKHASH",
-  "lastValidBlockHeight": 1111,
-  "status": "confirmed"
-}
-```
+account, and deposits go to it. A 422 means `USER_ADDRESS` holds too little SOL.
 
 Fund the escrow with 1 USDC:
 

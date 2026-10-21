@@ -62,7 +62,9 @@ export interface OperationResult {
     escrowAddress: string;
     /** The escrow's USDC token account. Users fund the escrow by transferring USDC here. */
     escrowTokenAddress?: string;
-    status: 'confirmed' | 'unconfirmed' | 'existing' | 'accrued';
+    status: 'confirmed' | 'unconfirmed' | 'existing' | 'accrued' | 'unsigned';
+    /** A base64 v0 transaction the user signs as fee payer and submits to create their escrow. */
+    transaction?: string;
     signature?: string;
     blockhash?: string;
     lastValidBlockHeight?: number;
@@ -86,6 +88,10 @@ function isUsableTokenAccount(account: AccountInfo<Buffer> | null, address: Publ
 export class EscrowService {
     constructor(private readonly receipts: ReceiptRepository, private readonly escrowProgramId: PublicKey, private readonly authority: Signer, private readonly feeRecipient: PublicKey, private readonly mint: PublicKey, private readonly connection: EscrowConnection, private readonly policy: SettlementPolicy) {}
 
+    /**
+     * Returns an existing escrow, or an unsigned transaction that creates it. The user is its fee payer and
+     * pays the rent, so creating escrows costs the operator nothing.
+     */
     async initiateEscrow(user: PublicKey): Promise<OperationResult> {
         const instruction = createEscrowInstruction({
             programId: this.escrowProgramId,
@@ -110,7 +116,7 @@ export class EscrowService {
         const lifetime = await this.connection.getLatestBlockhash('confirmed');
 
         const transaction = new VersionedTransaction(new TransactionMessage({
-            payerKey: this.authority.publicKey,
+            payerKey: user,
             recentBlockhash: lifetime.blockhash,
             instructions: [instruction.instruction],
         }).compileToV0Message());
@@ -123,36 +129,11 @@ export class EscrowService {
 
         if (simulation.value.err !== null) {
             console.error(simulation.value.err);
-            throw new OperationError(422, 'Transaction simulation failed');
+            throw new OperationError(422, `Transaction simulation failed: ${user.toBase58()} must hold enough SOL for the escrow's rent and fees`);
         }
 
-        transaction.sign([this.authority]);
-        const signature = encodeBase58(transaction.signatures[0]!);
-        const result = { ...addresses, signature, ...lifetime };
-
-        try {
-            await this.connection.sendTransaction(transaction, {
-                skipPreflight: false, preflightCommitment: 'confirmed',
-                minContextSlot: simulation.context.slot, maxRetries: 3,
-            });
-        } catch {
-            // The RPC may have accepted the transaction before a transport error.
-            // Preserve its signature instead of inviting a duplicate payment.
-            return { ...result, status: 'unconfirmed' };
-        }
-
-        let confirmation;
-        try {
-            confirmation = await this.connection.confirmTransaction({ signature, ...lifetime }, 'confirmed');
-        } catch {
-            return { ...result, status: 'unconfirmed' };
-        }
-
-        if (confirmation.value.err !== null) {
-            throw new OperationError(422, `Transaction failed: ${signature}`);
-        }
-
-        return { ...result, status: 'confirmed' };
+        const serialized = Buffer.from(transaction.serialize()).toString('base64');
+        return { ...addresses, status: 'unsigned', transaction: serialized, ...lifetime };
     }
 
     /**

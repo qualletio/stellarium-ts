@@ -25,7 +25,7 @@ The source is the authority here. Summary of the behavior this guide relies on:
 | SQLite | Schema is created on startup and reused on restart. Bootstrapping is idempotent, and a provider may host several resources. |
 | Peer discovery | Announcements are signed over `{ baseUrl, name, publicKey, expiry }` and verified with the announced key. Resource broadcasts carry the sender's `publicKey`, and a peer may only publish its own resources. |
 | Provider verification | `/v1/run/resource` requires a voucher for a paid function and checks its invocation hash, amount, recipient, expiry and signature before running it. It settles only after a successful run. |
-| Operator authorization/errors | `POST /v1/escrow` requires `Authorization: Bearer <OPERATOR_API_TOKEN>`. Request bodies are schema-validated, and `OperationError`s keep their HTTP status. |
+| Operator authorization/errors | `POST /v1/escrow` needs no token: it returns an unsigned setup transaction that the user signs and pays for. Request bodies are schema-validated, and `OperationError`s keep their HTTP status. |
 | Payment durability | Migrations create `receipts` and `settlements` at startup. An accepted voucher becomes an accrued receipt (`202`, no transaction). A settlement loop pays a payer's accrued receipts to one recipient in a single withdrawal once the policy in the operator README is met; the local configuration's nominal `SOL_PRICE_USDC` makes one paid call enough. A settlement is claimed atomically before broadcast and moves through `pending` → `confirmed`, `unconfirmed`, `failed` or `expired`. Reconciliation checks the chain for uncertain settlements; failed and expired ones release their receipts to a later settlement. |
 
 Do not work around voucher failures by disabling verification or using a different
@@ -159,7 +159,6 @@ for (const [role, port] of [['caller', 3000], ['provider', 3002]]) {
 }
 const values = { ...common,
   DATABASE_URL: 'postgresql://stellarium:local-only-password@127.0.0.1:5433/stellarium',
-  OPERATOR_API_TOKEN: randomBytes(32).toString('hex'),
   // Nominal: prices a settlement transaction at 1 micro-USDC, so a single paid call settles.
   SOL_PRICE_USDC: '0.0001',
   PRIVATE_KEY: readFileSync('.keys/local-e2e/operator.json', 'utf8').trim() };
@@ -221,6 +220,8 @@ curl -sS "$RPC" -H 'Content-Type: application/json' \
 # Expect result: "ok".
 
 solana --url "$RPC" airdrop 100 "$AUTHORITY_ADDRESS"
+# The caller pays its own escrow's rent and setup fee.
+solana --url "$RPC" airdrop 1 "$USER_ADDRESS"
 spl-token --url "$RPC" create-token --decimals 6 \
   --fee-payer .keys/local-e2e/operator.json \
   --mint-authority "$AUTHORITY_ADDRESS" \
@@ -284,23 +285,35 @@ payment database query and escrow simulation are needed to exercise those paths.
 
 ## 6. Create and fund the caller's escrow
 
-Run this in the operator workspace in the command terminal. The local fixture
-token is loaded by Node and sent only to loopback:
+Run this in the operator workspace in the command terminal. The operator returns
+an unsigned setup transaction; the caller signs it with its node key, which is its
+escrow user, and pays the rent and fee:
 
 ```sh
 cd "$REPO/apps/operator"
-node --env-file="$REPO/.keys/local-e2e/operator.env" --input-type=module <<'JS'
-import { readFileSync, writeFileSync } from 'node:fs';
-const env = Object.fromEntries(readFileSync('../../.keys/local-e2e/caller.env', 'utf8')
-  .trim().split('\n').map(line => line.split(/=(.*)/s).slice(0, 2)));
+node --env-file="$REPO/.keys/local-e2e/caller.env" --input-type=module <<'JS'
+import { writeFileSync } from 'node:fs';
+import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
+// The PKCS#8 DER of an Ed25519 key ends with its 32-byte seed.
+const user = Keypair.fromSeed(Buffer.from(process.env.SIGNING_PRIVATE_KEY, 'base64url').subarray(-32));
+if (user.publicKey.toBase58() !== process.env.USER_ADDRESS) throw new Error('Key does not match USER_ADDRESS');
 const response = await fetch('http://127.0.0.1:3001/v1/escrow', {
-  method: 'POST', headers: { 'Content-Type': 'application/json',
-    Authorization: `Bearer ${process.env.OPERATOR_API_TOKEN}` },
-  body: JSON.stringify({ user: env.USER_ADDRESS }) });
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ user: process.env.USER_ADDRESS }) });
 const result = await response.json();
-console.log(response.status, result);
-if (!response.ok || !['confirmed', 'existing'].includes(result.status))
-  throw new Error('Escrow not confirmed; reconcile any returned signature first');
+console.log(response.status, result.status, result.error ?? '');
+if (!response.ok) throw new Error('Escrow setup refused');
+if (result.status === 'unsigned') {
+  const transaction = VersionedTransaction.deserialize(Buffer.from(result.transaction, 'base64'));
+  transaction.sign([user]);
+  const connection = new Connection(process.env.SOLANA_RPC_URL, 'confirmed');
+  const signature = await connection.sendTransaction(transaction);
+  const { blockhash, lastValidBlockHeight } = result;
+  const { value } = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+  if (value.err) throw new Error(`Escrow setup failed: ${signature}`);
+  result.signature = signature;
+}
+delete result.transaction;
 writeFileSync('../../.keys/local-e2e/escrow-result.json', JSON.stringify(result, null, 2));
 JS
 cd "$REPO"
@@ -310,12 +323,11 @@ solana --url "$RPC" account "$ESCROW_ADDRESS"
 spl-token --url "$RPC" display "$ESCROW_TOKEN_ADDRESS"
 ```
 
-Successful creation returns HTTP 200 (202 when the result is `unconfirmed`). Expect `confirmed` and a signature on first creation,
-`existing` without a new transaction on a repeat. Verify account owner equals
+The route answers HTTP 200 with `unsigned` and a transaction on first creation, and
+`existing` without one on a repeat. A 422 means `USER_ADDRESS` holds too little SOL. Verify account owner equals
 the program ID and data length is 73, and that the token account's mint is
 `USDC_MINT` and its owner is `ESCROW_ADDRESS`. For a first creation, use the signature
-verification in section 9. If status is `unconfirmed`, check the saved signature
-before proceeding.
+verification in section 9 on the saved `signature`.
 
 Deposit 1 test USDC. The operator is the test mint's authority, so mint it
 straight into the escrow token account:

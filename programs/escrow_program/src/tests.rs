@@ -3,6 +3,8 @@ use solana_program::{instruction::Instruction, program_option::COption, program_
 use spl_token::{error::TokenError, state::{AccountState, Mint}};
 use std::cell::{Cell, RefCell};
 
+/// Accounts: user (funded signer), authority, escrow PDA, escrow token account,
+/// mint, System Program, Token Program, Associated Token Account Program.
 fn run_case(change: impl FnOnce(&mut Vec<AccountInfo>, &Pubkey, &Pubkey)) -> ProgramResult {
     let program = Pubkey::new_unique();
     let authority = Pubkey::new_unique();
@@ -10,7 +12,6 @@ fn run_case(change: impl FnOnce(&mut Vec<AccountInfo>, &Pubkey, &Pubkey)) -> Pro
     let mint = Pubkey::new_unique();
     let address = escrow_address(&program, &authority, &user).0;
     let keys = [
-        Pubkey::new_unique(),
         user,
         authority,
         address,
@@ -20,9 +21,9 @@ fn run_case(change: impl FnOnce(&mut Vec<AccountInfo>, &Pubkey, &Pubkey)) -> Pro
         spl_token::ID,
         spl_associated_token_account::ID,
     ];
-    let owners = [system_program::ID; 9];
-    let mut balances = [10_000_000, 0, 0, 0, 0, 1, 1, 1, 1];
-    let mut data: [Vec<u8>; 9] = std::array::from_fn(|_| vec![]);
+    let owners = [system_program::ID; 8];
+    let mut balances = [10_000_000, 0, 0, 0, 1, 1, 1, 1];
+    let mut data: [Vec<u8>; 8] = std::array::from_fn(|_| vec![]);
     let mut accounts: Vec<_> = keys
         .iter()
         .zip(owners.iter())
@@ -32,12 +33,12 @@ fn run_case(change: impl FnOnce(&mut Vec<AccountInfo>, &Pubkey, &Pubkey)) -> Pro
         .map(|(i, (((key, owner), lamports), data))| {
             AccountInfo::new(
                 key,
-                i == 0 || i == 2,
-                i == 0 || i == 3 || i == 4,
+                i == 0,
+                i == 0 || i == 2 || i == 3,
                 lamports,
                 data,
                 owner,
-                i >= 6,
+                i >= 5,
                 0,
             )
         })
@@ -72,15 +73,27 @@ fn rejects_unknown_and_trailing_instruction_data() {
 }
 
 #[test]
-fn authority_must_sign() {
-    assert_eq!(
-        run_case(|a, _, _| a[2].is_signer = false),
-        Err(ProgramError::MissingRequiredSignature)
-    );
+fn user_signs_and_pays_without_the_authority() {
+    install_stubs(Pubkey::default());
+    let (mut user, mut escrow) = (Pubkey::default(), Pubkey::default());
+    let result = run_case(|a, _, _| {
+        assert!(!a[1].is_signer);
+        user = *a[0].key;
+        escrow = *a[2].key;
+    });
+    assert_eq!(result, Ok(()));
+    let invoked = INVOKED.with(|invoked| invoked.borrow().clone());
+    let rent = Rent::default().minimum_balance(ESCROW_LEN);
+    assert_eq!(invoked[0], system_instruction::transfer(&user, &escrow, rent));
+    let token_setup = invoked
+        .iter()
+        .find(|ix| ix.program_id == spl_associated_token_account::ID)
+        .expect("escrow token account setup");
+    assert_eq!(token_setup.accounts[0].pubkey, user);
 }
 
 #[test]
-fn payer_must_sign() {
+fn user_must_sign() {
     assert_eq!(
         run_case(|a, _, _| a[0].is_signer = false),
         Err(ProgramError::MissingRequiredSignature)
@@ -88,9 +101,9 @@ fn payer_must_sign() {
 }
 
 #[test]
-fn another_signer_cannot_replace_authority() {
+fn rejects_another_authority() {
     assert_eq!(
-        run_case(|a, _, _| a[2].key = a[0].key),
+        run_case(|a, _, _| a[1].key = a[0].key),
         Err(ProgramError::Custom(WRONG_AUTHORITY))
     );
 }
@@ -98,11 +111,11 @@ fn another_signer_cannot_replace_authority() {
 #[test]
 fn rejects_wrong_pda_or_token_account() {
     assert_eq!(
-        run_case(|a, _, _| a[3].key = a[1].key),
+        run_case(|a, _, _| a[2].key = a[1].key),
         Err(ProgramError::InvalidSeeds)
     );
     assert_eq!(
-        run_case(|a, _, _| a[4].key = a[1].key),
+        run_case(|a, _, _| a[3].key = a[1].key),
         Err(ProgramError::InvalidSeeds)
     );
 }
@@ -110,14 +123,14 @@ fn rejects_wrong_pda_or_token_account() {
 #[test]
 fn rejects_another_mint() {
     assert_eq!(
-        run_case(|a, _, _| a[5].key = a[1].key),
+        run_case(|a, _, _| a[4].key = a[0].key),
         Err(ProgramError::Custom(WRONG_MINT))
     );
 }
 
 #[test]
 fn mutable_accounts_must_be_writable() {
-    for index in [0, 3] {
+    for index in [0, 2] {
         assert_eq!(
             run_case(|a, _, _| a[index].is_writable = false),
             Err(ProgramError::InvalidArgument)
@@ -127,14 +140,14 @@ fn mutable_accounts_must_be_writable() {
 
 #[test]
 fn rejects_fake_system_token_or_associated_token_program() {
-    for index in [6, 7, 8] {
+    for index in [5, 6, 7] {
         assert_eq!(
             run_case(|a, _, _| a[index].key = a[1].key),
             Err(ProgramError::IncorrectProgramId)
         );
     }
     assert_eq!(
-        run_case(|a, _, _| a[6].executable = false),
+        run_case(|a, _, _| a[5].executable = false),
         Err(ProgramError::IncorrectProgramId)
     );
 }
@@ -144,13 +157,17 @@ fn cannot_reinitialize_or_use_foreign_owned_account() {
     // The program and foreign owners have fixture-local lifetimes; use leaked
     // public keys only in these short-lived tests.
     assert_eq!(
-        run_case(|a, p, _| a[3].owner = Box::leak(Box::new(*p))),
+        run_case(|a, p, _| a[2].owner = Box::leak(Box::new(*p))),
         Err(ProgramError::AccountAlreadyInitialized)
     );
     assert_eq!(
-        run_case(|a, _, _| a[3].owner = a[1].key),
+        run_case(|a, _, _| a[2].owner = a[1].key),
         Err(ProgramError::InvalidAccountOwner)
     );
+}
+
+#[test]
+fn user_must_be_a_wallet() {
     assert_eq!(
         run_case(|a, _, _| a[0].owner = a[1].key),
         Err(ProgramError::InvalidAccountOwner)
@@ -186,7 +203,8 @@ thread_local! {
 }
 
 /// Runs Token Program CPIs in-process with spl-token's own processor, so
-/// withdrawal tests move real token balances. Other CPIs are only recorded.
+/// withdrawal tests move real token balances. System Program allocations resize
+/// the account's data; other CPIs are only recorded.
 struct TokenProgramStubs;
 
 impl program_stubs::SyscallStubs for TokenProgramStubs {
@@ -197,6 +215,16 @@ impl program_stubs::SyscallStubs for TokenProgramStubs {
         signers_seeds: &[&[&[u8]]],
     ) -> ProgramResult {
         INVOKED.with(|invoked| invoked.borrow_mut().push(instruction.clone()));
+        // SystemInstruction::Allocate: a LE u32 tag of 8, then the LE u64 size.
+        if instruction.program_id == system_program::ID && instruction.data[..4] == 8u32.to_le_bytes() {
+            let space = u64::from_le_bytes(instruction.data[4..12].try_into().unwrap());
+            let account = account_infos
+                .iter()
+                .find(|info| info.key == &instruction.accounts[0].pubkey)
+                .expect("CPI account was not passed");
+            *account.data.borrow_mut() = Box::leak(vec![0; space as usize].into_boxed_slice());
+            return Ok(());
+        }
         if instruction.program_id != spl_token::ID {
             return Ok(());
         }
@@ -219,6 +247,11 @@ impl program_stubs::SyscallStubs for TokenProgramStubs {
             })
             .collect();
         spl_token::processor::Processor::process(&instruction.program_id, &accounts, &instruction.data)
+    }
+
+    fn sol_get_rent_sysvar(&self, var_addr: *mut u8) -> u64 {
+        unsafe { *(var_addr as *mut Rent) = Rent::default() };
+        solana_program::entrypoint::SUCCESS
     }
 }
 

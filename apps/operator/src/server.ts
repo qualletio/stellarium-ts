@@ -49,10 +49,7 @@ await fastify.register(rateLimit, {
   max: Number(process.env.RATE_LIMIT_MAX ?? 100),
   timeWindow: process.env.RATE_LIMIT_TIME_WINDOW ?? '1 minute',
 });
-if (!process.env.OPERATOR_API_TOKEN) {
-  fastify.log.warn('OPERATOR_API_TOKEN is not set: POST /v1/escrow will reject every request');
-}
-fastify.register(routes, { prefix: '/v1', service, apiToken: process.env.OPERATOR_API_TOKEN });
+fastify.register(routes, { prefix: '/v1', service });
 
 // Resolve settlements left pending or unconfirmed, then pay out accrued receipts that are due.
 // Reconciling first releases the receipts of failed and expired settlements to this pass. Runs one pass at a time.

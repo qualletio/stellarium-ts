@@ -18,8 +18,6 @@ payer. The deployed escrow program must have the same public key configured in
   `USDC_MINT`.
 - `PRIVATE_KEY`: JSON-encoded Solana secret key byte array for the authority.
   Configure it privately; never include it in requests or logs.
-- `OPERATOR_API_TOKEN`: bearer token for `POST /v1/escrow`. When unset, escrow
-  creation rejects every request.
 - `SOLANA_RPC_URL`: RPC endpoint; defaults to `http://localhost:8899`.
 - `RATE_LIMIT_MAX` / `RATE_LIMIT_TIME_WINDOW`: per-IP limit on every route;
   defaults to 100 per minute.
@@ -30,36 +28,40 @@ payer. The deployed escrow program must have the same public key configured in
   chain and due receipts are paid out; defaults to 30000.
 
 The operator listens on port 3001. The authorization header is redacted from server
-logs. Token holders are trusted operator callers; do not distribute the token as a
-public resource-provider credential.
+logs.
 
 ## POST /v1/escrow
 
-Requires `Authorization: Bearer <OPERATOR_API_TOKEN>`.
+Needs no token.
 
 ```json
 { "user": "USER_SOLANA_PUBLIC_KEY" }
 ```
 
-Creates the deterministic escrow for this user and the configured authority, along
-with the escrow's USDC associated token account. The response's
-`escrowTokenAddress` is where the user deposits USDC. The operator sponsors rent
-and fees, which is why creation requires the token.
+Builds the transaction that creates the deterministic escrow for this user and the
+configured authority, along with the escrow's USDC associated token account. The
+operator doesn't sign or send it. The user is its fee payer and pays the rent for
+both accounts (about 0.0035 SOL), so creating escrows costs the operator nothing.
+The user signs `transaction` (base64, v0) with their key and submits it before
+`lastValidBlockHeight`. The response's `escrowTokenAddress` is where the user
+deposits USDC.
 
 ```json
 {
   "escrowAddress": "ESCROW_PUBLIC_KEY",
-  "status": "confirmed",
-  "signature": "TRANSACTION_SIGNATURE",
+  "escrowTokenAddress": "ESCROW_TOKEN_ADDRESS",
+  "status": "unsigned",
+  "transaction": "BASE64_TRANSACTION",
   "blockhash": "RECENT_BLOCKHASH",
   "lastValidBlockHeight": 123
 }
 ```
 
-An already initialized and validated escrow returns `status: "existing"` and its
-address, without sending another transaction. Submission and confirmation use
-`confirmed` commitment. Every transaction is simulated before signing, and
-submission also performs RPC preflight. Transactions use v0.
+The transaction is simulated with the user as fee payer first. If the simulation
+fails, usually because the user's wallet holds too little SOL, the route answers
+422. An already initialized and validated escrow returns `status: "existing"` and
+its addresses, with no transaction. Reads and simulation use `confirmed`
+commitment.
 
 ## POST /v1/payment
 

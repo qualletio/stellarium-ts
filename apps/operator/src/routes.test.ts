@@ -13,13 +13,13 @@ describe('operator routes', () => {
     beforeEach(async () => {
         service = {
             escrowService: {
-                initiateEscrow: vi.fn().mockResolvedValue({ escrowAddress: 'escrow', status: 'confirmed' }),
+                initiateEscrow: vi.fn().mockResolvedValue({ escrowAddress: 'escrow', status: 'unsigned', transaction: 'tx' }),
                 accruePayment: vi.fn().mockResolvedValue({ escrowAddress: 'escrow', status: 'accrued' }),
             },
             paymentService: { verifyPayment: vi.fn().mockResolvedValue(undefined) },
         };
         fastify = Fastify();
-        await fastify.register(routes, { prefix: '/v1', service: service as unknown as Service, apiToken: 'token' });
+        await fastify.register(routes, { prefix: '/v1', service: service as unknown as Service });
         await fastify.ready();
     });
 
@@ -99,48 +99,27 @@ describe('operator routes', () => {
 
     describe('POST /v1/escrow', () => {
         const user = Keypair.generate().publicKey.toBase58();
-        const create = (authorization?: string, payload: object = { user }) =>
-            fastify.inject({ method: 'POST', url: '/v1/escrow', headers: authorization ? { authorization } : {}, payload });
+        const create = (payload: object = { user }) =>
+            fastify.inject({ method: 'POST', url: '/v1/escrow', payload });
 
-        test('creates an escrow for a token holder', async () => {
-            const response = await create('Bearer token');
+        test('returns the unsigned creation transaction without a token', async () => {
+            const response = await create();
 
             expect(response.statusCode).toBe(200);
+            expect(response.json()).toEqual({ escrowAddress: 'escrow', status: 'unsigned', transaction: 'tx' });
             expect(service.escrowService.initiateEscrow).toHaveBeenCalledOnce();
         });
 
-        test.each([
-            ['no header', undefined],
-            ['the wrong token', 'Bearer wrong'],
-            ['the wrong scheme', 'Basic token'],
-            ['no token', 'Bearer'],
-        ])('rejects %s with 401', async (_, authorization) => {
-            const response = await create(authorization);
-
-            expect(response.statusCode).toBe(401);
+        test('rejects a missing user', async () => {
+            expect((await create({})).statusCode).toBe(400);
             expect(service.escrowService.initiateEscrow).not.toHaveBeenCalled();
         });
 
-        test('authenticates before validating the body', async () => {
-            expect((await create(undefined, {})).statusCode).toBe(401);
-            expect((await create('Bearer token', {})).statusCode).toBe(400);
-        });
-
         test('rejects a user that is not a Solana address', async () => {
-            const response = await create('Bearer token', { user: 'not-a-key' });
+            const response = await create({ user: 'not-a-key' });
 
             expect(response.statusCode).toBe(400);
             expect(response.json()).toEqual({ error: 'Invalid public key' });
-        });
-
-        test('rejects every request when no token is configured', async () => {
-            const open = Fastify();
-            await open.register(routes, { prefix: '/v1', service: service as unknown as Service });
-
-            const response = await open.inject({ method: 'POST', url: '/v1/escrow', headers: { authorization: 'Bearer ' }, payload: { user } });
-
-            expect(response.statusCode).toBe(401);
-            await open.close();
         });
     });
 });

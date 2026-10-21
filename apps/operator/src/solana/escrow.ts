@@ -19,15 +19,17 @@ export function getEscrowTokenAddress(programId: PublicKey, authority: PublicKey
     return getAssociatedTokenAddressSync(mint, getEscrowAddress(programId, authority, user), true);
 }
 
-/** Authority must equal the program's configured ESCROW_AUTHORITY, and mint its USDC_MINT. */
+/**
+ * Authority must equal the program's configured ESCROW_AUTHORITY, and mint its USDC_MINT.
+ * The user signs and pays rent for the escrow and its token account; the authority doesn't sign.
+ */
 export function createEscrowInstruction(input: {
     programId: PublicKey;
     authority: PublicKey;
     user: PublicKey;
     mint: PublicKey;
-    payer?: PublicKey;
 }): { escrowAddress: PublicKey; escrowTokenAddress: PublicKey; instruction: TransactionInstruction } {
-    const { programId, authority, user, mint, payer = authority } = input;
+    const { programId, authority, user, mint } = input;
     const escrowAddress = getEscrowAddress(programId, authority, user);
     const escrowTokenAddress = getAssociatedTokenAddressSync(mint, escrowAddress, true);
     return {
@@ -36,9 +38,8 @@ export function createEscrowInstruction(input: {
         instruction: new TransactionInstruction({
             programId,
             keys: [
-                { pubkey: payer, isSigner: true, isWritable: true },
-                { pubkey: user, isSigner: false, isWritable: false },
-                { pubkey: authority, isSigner: true, isWritable: false },
+                { pubkey: user, isSigner: true, isWritable: true },
+                { pubkey: authority, isSigner: false, isWritable: false },
                 { pubkey: escrowAddress, isSigner: false, isWritable: true },
                 { pubkey: escrowTokenAddress, isSigner: false, isWritable: true },
                 { pubkey: mint, isSigner: false, isWritable: false },

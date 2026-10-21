@@ -1,14 +1,11 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
 import { PublicKey } from '@solana/web3.js';
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import type { OperationResult } from './escrow/escrowService.js';
 import { OperationError } from './errors.js';
 import type { Service } from './service.js';
 
 interface RouteOptions {
     service: Service;
-    /** Bearer token required by `POST /escrow`. When unset, escrow creation is refused. */
-    apiToken?: string;
 }
 
 // Wire formats match PaymentVoucher and InferencePaymentVoucher in stellarium-ts/resource/invoker.ts,
@@ -125,18 +122,13 @@ function publicKey(value: string): PublicKey {
     catch { throw new OperationError(400, 'Invalid public key'); }
 }
 
-/** Constant-time comparison. Hashing first gives equal-length buffers for timingSafeEqual. */
-function secretsEqual(a: string, b: string): boolean {
-    const digest = (value: string) => createHash('sha256').update(value).digest();
-    return timingSafeEqual(digest(a), digest(b));
-}
 
 /** An uncertain or accrued submission is accepted but not confirmed. */
 function sendResult(reply: FastifyReply, result: OperationResult) {
     return reply.status(result.status === 'unconfirmed' || result.status === 'accrued' ? 202 : 200).send(result);
 }
 
-const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, { service, apiToken }) {
+const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, { service }) {
     // Rejections keep their status so callers only retry unexpected (500) failures.
     fastify.setErrorHandler((error, request, reply) => {
         if (error instanceof OperationError) {
@@ -151,17 +143,10 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, { serv
         return reply.status(500).send({ error: 'Failed to verify and accept payment', details: error instanceof Error ? error.message : undefined });
     });
 
-    async function requireApiToken(request: FastifyRequest, reply: FastifyReply) {
-        const [scheme, token] = (request.headers.authorization ?? '').split(' ');
-        if (!apiToken || scheme !== 'Bearer' || !token || !secretsEqual(token, apiToken)) {
-            return reply.status(401).send({ error: 'Missing or invalid bearer token' });
-        }
-    }
-
     fastify.get('/', async () => ({ hello: 'world' }));
 
-    // The operator pays rent for every escrow it creates, so creation is limited to token holders.
-    fastify.post('/escrow', { schema: { body: escrowSchema }, preValidation: requireApiToken }, async (request, reply) => {
+    // Open to anyone: the operator only builds the transaction, and the user signs it and pays its rent and fees.
+    fastify.post('/escrow', { schema: { body: escrowSchema } }, async (request, reply) => {
         const { user } = request.body as { user: string };
         return sendResult(reply, await service.escrowService.initiateEscrow(publicKey(user)));
     });

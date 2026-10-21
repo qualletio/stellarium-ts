@@ -4,8 +4,8 @@ use solana_program::{
     entrypoint::ProgramResult,
     program::{invoke, invoke_signed, set_return_data},
     program_error::ProgramError,
-    pubkey::Pubkey,
     program_pack::Pack,
+    pubkey::Pubkey,
     sysvar::{rent::Rent, Sysvar},
 };
 
@@ -18,10 +18,10 @@ use spl_token::{instruction::transfer_checked, state::Account as TokenAccount};
 
 entrypoint!(process_instruction);
 
-// The operator wallet that signs escrow setup and withdrawals. Use the same wallet as the
+// The operator wallet that signs withdrawals. Users sign and pay for their own escrow setup. Use the same wallet as the
 // program's upgrade authority. These are local end-to-end keys: set your own before deploying.
 pub const ESCROW_AUTHORITY: Option<Pubkey> = Some(solana_program::pubkey!(
-    "EjmMczWqevGUXrxmoJqWKj51sjLpWpFXczWqu5Pzerxk"
+    "BLZc1qdgoJrCZ3TL9yT7gGrrwb5RZyeeZzhkb3kmaBKB"
 ));
 pub const ESCROW_SEED: &[u8] = b"escrow";
 pub const DISCRIMINATOR: &[u8; 8] = b"ESCROW02";
@@ -38,14 +38,14 @@ pub const WRONG_MINT: u32 = 5;
 // (4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU) or mainnet USDC
 // (EPjFWdd5AufqSSqeM2qZzJpgyyhwJaZgw7tFFtbs2Mn) when deploying there.
 pub const USDC_MINT: Option<Pubkey> = Some(solana_program::pubkey!(
-    "3fsMYVogfVUXGeY2iqRZR5wXq1JBmq8DHTUFmcRSVCrs"
+    "EPjFWdd5AufqSSqeM2qZzJpgyyhwJaZgw7tFFtbs2Mn"
 ));
 pub const USDC_DECIMALS: u8 = 6;
 
 // The wallet that receives the protocol fee. Withdrawals fail closed when this is None.
 // These are local end-to-end keys: set your own before deploying.
 pub const PROTOCOL_FEE_RECIPIENT: Option<Pubkey> = Some(solana_program::pubkey!(
-    "6xwrneeAHpUEaMp99YV4WVyRgCNai1XjwC1VxcCz5QPP"
+    "A9XBu8QhuWe5i4CNzQpVGroSWzhQHcgfU4KvJdQBrzp1"
 ));
 /// Protocol fee taken from each withdrawal, in basis points (2000 = 20%).
 pub const PROTOCOL_FEE_BPS: u64 = 2_000;
@@ -65,11 +65,11 @@ pub fn escrow_address(program_id: &Pubkey, authority: &Pubkey, user: &Pubkey) ->
 }
 
 /// Dispatch initialize ([0]) or withdraw ([1] + amount in USDC base units as LE u64).
-/// Initialize accounts: payer (writable signer), user (readonly),
-/// authority (signer), escrow PDA (writable), escrow token account (writable),
-/// USDC mint, System Program, Token Program, Associated Token Account Program.
-/// The authority may also be the payer. No user signature is required: the
-/// authority sponsors setup for the user without debiting the user's account.
+/// Initialize accounts: user (writable signer), authority (readonly),
+/// escrow PDA (writable), escrow token account (writable), USDC mint,
+/// System Program, Token Program, Associated Token Account Program.
+/// The user signs and pays rent for both accounts, so creating escrows costs the
+/// authority nothing. The authority doesn't sign setup, only withdrawals.
 pub fn process_instruction(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -94,7 +94,14 @@ pub fn process_instruction(
         Some(amount) => {
             let fee_recipient =
                 PROTOCOL_FEE_RECIPIENT.ok_or(ProgramError::Custom(FEE_RECIPIENT_NOT_CONFIGURED))?;
-            withdraw(program_id, accounts, &authority, &fee_recipient, &mint, amount)
+            withdraw(
+                program_id,
+                accounts,
+                &authority,
+                &fee_recipient,
+                &mint,
+                amount,
+            )
         }
     }
 }
@@ -219,7 +226,6 @@ fn initialize(
     expected_mint: &Pubkey,
 ) -> ProgramResult {
     let mut iter = accounts.iter();
-    let payer = next_account_info(&mut iter)?;
     let user = next_account_info(&mut iter)?;
     let authority = next_account_info(&mut iter)?;
     let escrow = next_account_info(&mut iter)?;
@@ -235,10 +241,10 @@ fn initialize(
     if mint.key != expected_mint {
         return Err(ProgramError::Custom(WRONG_MINT));
     }
-    if !payer.is_signer || !authority.is_signer {
+    if !user.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    if !payer.is_writable || !escrow.is_writable || payer.key == escrow.key {
+    if !user.is_writable || !escrow.is_writable || user.key == escrow.key {
         return Err(ProgramError::InvalidArgument);
     }
     if system.key != &system_program::ID
@@ -248,7 +254,7 @@ fn initialize(
     {
         return Err(ProgramError::IncorrectProgramId);
     }
-    if payer.owner != &system_program::ID || !payer.data_is_empty() {
+    if user.owner != &system_program::ID || !user.data_is_empty() {
         return Err(ProgramError::InvalidAccountOwner);
     }
     let (address, bump) = escrow_address(program_id, authority.key, user.key);
@@ -276,8 +282,8 @@ fn initialize(
     let shortfall = rent.saturating_sub(escrow.lamports());
     if shortfall > 0 {
         invoke(
-            &system_instruction::transfer(payer.key, escrow.key, shortfall),
-            &[payer.clone(), escrow.clone(), system.clone()],
+            &system_instruction::transfer(user.key, escrow.key, shortfall),
+            &[user.clone(), escrow.clone(), system.clone()],
         )?;
     }
     invoke_signed(
@@ -299,13 +305,13 @@ fn initialize(
     // Idempotent, so a token account someone created ahead of setup cannot block it.
     invoke(
         &create_associated_token_account_idempotent(
-            payer.key,
+            user.key,
             escrow.key,
             mint.key,
             token_program.key,
         ),
         &[
-            payer.clone(),
+            user.clone(),
             escrow_token.clone(),
             escrow.clone(),
             mint.clone(),

@@ -2,9 +2,9 @@
 
 Creates one program-owned escrow state account per `(authority, user)` pair, plus
 that PDA's USDC associated token account, and returns the PDA's 32-byte public key
-through Solana return data. The controlling wallet must sign setup; the payer funds
-rent for both accounts, and the user can be a readonly public key. The authority can
-be the payer. Setup does not debit the user. Users fund the escrow by transferring
+through Solana return data. The user signs setup and pays the rent for both
+accounts, so nobody can make the controlling wallet pay for escrows. The controlling
+wallet doesn't sign setup. Users fund the escrow by transferring
 USDC to its token account. That same controlling wallet can withdraw USDC to a
 chosen token account of the mint. Each withdrawal pays a 20% protocol fee to the
 compiled `PROTOCOL_FEE_RECIPIENT` wallet's USDC associated token account. Amounts
@@ -108,7 +108,6 @@ const { escrowAddress, escrowTokenAddress, instruction } = createEscrowInstructi
   authority: new PublicKey('YOUR_PUBLIC_KEY'),
   user: new PublicKey('USER_PUBLIC_KEY'),
   mint: new PublicKey('USDC_MINT_ADDRESS'),
-  // payer defaults to authority; specify another signer to sponsor rent.
 });
 console.log(escrowAddress.toBase58(), escrowTokenAddress.toBase58());
 ```
@@ -116,13 +115,14 @@ console.log(escrowAddress.toBase58(), escrowTokenAddress.toBase58());
 `escrowAddress` is derivable before signing and is the same address returned by
 the program. `escrowTokenAddress` is its USDC associated token account (also
 available from `getEscrowTokenAddress`), where deposits go. It exists on-chain only after successful transaction confirmation.
-Have your wallet sign a transaction containing `instruction`; simulate before
-sending and set the cluster, fee payer and recent blockhash. Both payer and
-authority must sign if they differ. After confirmation, fetch the escrow account
+Have the user's wallet sign a transaction containing `instruction`; simulate
+before sending and set the cluster, fee payer and recent blockhash. The user is the
+only required signer and pays the rent. After confirmation, fetch the escrow account
 and call `decodeEscrowAccount(programId, escrowAddress, account)` to validate its
 owner, layout, address, and bump. The helper builds instructions without accessing
-private keys or sending transactions. The operator service uses these helpers
-to submit transactions through its configured signer; see `apps/operator/README.md`
+private keys or sending transactions. The operator's `/escrow` route uses
+these helpers to return an unsigned setup transaction with the user as fee payer, and
+to submit withdrawals through its configured signer; see `apps/operator/README.md`
 for the `/escrow` route and signed manifest/voucher payment submissions.
 
 ## Check a resource provider's withdrawal budget
@@ -244,15 +244,14 @@ Initialize instruction data is exactly `[0]`. Account order:
 
 | Index | Account | Signer | Writable |
 | --- | --- | --- | --- |
-| 0 | Payer, System-owned wallet | Yes | Yes |
-| 1 | User | No | No |
-| 2 | Configured authority | Yes | No |
-| 3 | Escrow PDA | No | Yes |
-| 4 | Escrow token account (the PDA's USDC associated token account) | No | Yes |
-| 5 | USDC mint (`USDC_MINT`) | No | No |
-| 6 | System Program | No | No |
-| 7 | Token Program | No | No |
-| 8 | Associated Token Account Program | No | No |
+| 0 | User, a System-owned wallet that pays the rent | Yes | Yes |
+| 1 | Configured authority | No | No |
+| 2 | Escrow PDA | No | Yes |
+| 3 | Escrow token account (the PDA's USDC associated token account) | No | Yes |
+| 4 | USDC mint (`USDC_MINT`) | No | No |
+| 5 | System Program | No | No |
+| 6 | Token Program | No | No |
+| 7 | Associated Token Account Program | No | No |
 
 PDA seeds: `[b"escrow", authority.to_bytes(), user.to_bytes()]`, with the canonical
 bump. Prefunded empty System-owned PDAs are supported: setup tops up rent,
