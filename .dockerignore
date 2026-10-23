@@ -16,3 +16,5 @@ target
 requestscript.db
 **/*.log
 .DS_Store
+.next
+**/.next

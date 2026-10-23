@@ -100,7 +100,7 @@ Copy each endpoint's signing secret into `STRIPE_WEBHOOK_SECRET` and `STRIPE_CON
 
 ## 7. The dashboard
 
-Deploy `apps/dashboard` as a Next.js app on the domain `platform.stellarium.sh`, for example on Vercel with the project's root directory set to `apps/dashboard`, or with `pnpm --filter dashboard build && pnpm --filter dashboard start` behind your proxy. Set:
+Deploy `apps/dashboard` as a Next.js app on the domain `platform.stellarium.sh`, for example on Vercel with the project's root directory set to `apps/dashboard`, or with `pnpm --filter dashboard build && pnpm --filter dashboard start` behind your proxy. `apps/dashboard/Dockerfile` builds an image of it, from the repository root (`docker build -f apps/dashboard/Dockerfile .`), that listens on port 3010. On Railway, set `RAILWAY_DOCKERFILE_PATH=apps/dashboard/Dockerfile` on the service; otherwise Railway builds the root `Dockerfile`, which doesn't build the dashboard. Set:
 
 | Variable | Value |
 | --- | --- |
