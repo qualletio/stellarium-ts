@@ -21,9 +21,10 @@ services:
       target: operator
     environment:
       DATABASE_URL: postgresql://stellarium:local-only-password@postgres:5432/stellarium
-      SOLANA_RPC_URL: http://host.docker.internal:8899
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # Enrolls the fixture nodes' keys (set in the repo root .env, matching each app's .env) and credits the caller.
+      SEED_DEV: "1"
+      SEED_PROVIDER_PUBLIC_KEY: ${PROVIDER_SIGNING_PUBLIC_KEY:?set PROVIDER_SIGNING_PUBLIC_KEY in .env}
+      SEED_CALLER_PUBLIC_KEY: ${CALLER_SIGNING_PUBLIC_KEY:?set CALLER_SIGNING_PUBLIC_KEY in .env}
     ports:
       - "127.0.0.1:3001:3001"
     depends_on:
@@ -47,6 +48,10 @@ services:
       OPERATOR_URL: http://operator:3001/v1
     ports:
       - "127.0.0.1:3002:3002"
+    # Hosting paid functions, it learns its organization from the operator at startup.
+    depends_on:
+      operator:
+        condition: service_healthy
     init: true
     healthcheck:
       test: ["CMD", "node", "/app/docker/healthcheck.mjs", "3002"]

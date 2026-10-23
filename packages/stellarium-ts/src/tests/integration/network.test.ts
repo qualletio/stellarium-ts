@@ -8,7 +8,7 @@ import { verifyData } from "../../crypto/utils.js";
 import { type PaymentVoucher, paymentVoucherPayload } from "../../resource/invoker.js";
 import { StellariumNode, type StellariumNodeOptions } from "../../server.js";
 import type { StellariumResource } from "../../resource/repository.js";
-import { COST, generateBase64KeyPair, INFERENCE_RATES, modelResource, RECIPIENT, temperatureSource, weatherResource } from "../helpers.js";
+import { COST, generateBase64KeyPair, INFERENCE_RATES, modelResource, ORGANIZATION, temperatureSource, weatherResource } from "../helpers.js";
 
 /** A free function only callers with a grant from the provider may run. */
 function vaultResource(baseUrl: string): StellariumResource {
@@ -40,13 +40,17 @@ function freePort(): Promise<number> {
 
 /**
  * A provider node hosting the paid weather resource, a caller node that bootstraps from it,
- * and a fake operator that records settlements. Everything runs in-process over real HTTP.
+ * and a fake operator that enrolls the provider and records holds and captures. Everything runs in-process over real HTTP.
  */
 // Each test starts real HTTP nodes on SQLite files, which can take several seconds on a loaded CI runner.
 describe("two-node network", { timeout: 15_000 }, () => {
     const servers: FastifyInstance[] = [];
     const settlements: PaymentVoucher[] = [];
     const submissions: unknown[] = [];
+    const authorizations: unknown[] = [];
+    const releases: unknown[] = [];
+    /** What the fake operator answers to the next authorizations; undefined places the hold. */
+    let refuseAuthorization: { status: number, error: string } | undefined;
     const callerKeys = generateBase64KeyPair();
     let dir: string;
     let operatorUrl: string;
@@ -86,13 +90,33 @@ describe("two-node network", { timeout: 15_000 }, () => {
         dir = await mkdtemp(path.join(tmpdir(), "stellarium-network-"));
         settlements.length = 0;
         submissions.length = 0;
+        authorizations.length = 0;
+        releases.length = 0;
+        refuseAuthorization = undefined;
 
         const operator = Fastify();
         servers.push(operator);
-        operator.post("/v1/payment", async (request) => {
+        operator.post("/v1/nodes/session", async (request, reply) => {
+            if (!String(request.headers.authorization).startsWith("Stellarium ")) {
+                return reply.status(401).send({ error: "Unsigned request" });
+            }
+            return { organizationId: ORGANIZATION };
+        });
+        operator.post("/v1/payments/authorize", async (request, reply) => {
+            authorizations.push(request.body);
+            if (refuseAuthorization) {
+                return reply.status(refuseAuthorization.status).send({ error: refuseAuthorization.error });
+            }
+            return { status: "held" };
+        });
+        operator.post("/v1/payments/capture", async (request) => {
             settlements.push((request.body as { voucher: PaymentVoucher }).voucher);
             submissions.push(request.body);
-            return { status: "confirmed" };
+            return { status: "captured" };
+        });
+        operator.post("/v1/payments/release", async (request) => {
+            releases.push(request.body);
+            return { status: "released" };
         });
         operatorUrl = `${await operator.listen({ port: 0, host: "127.0.0.1" })}/v1`;
 
@@ -128,14 +152,15 @@ describe("two-node network", { timeout: 15_000 }, () => {
         expect(callerResources.resources).toContainEqual(expect.objectContaining({
             name: "Weather",
             baseUrl: providerUrl,
-            functions: expect.arrayContaining([expect.objectContaining({ name: "temperature", paymentManifest: { costMicroUsdc: COST, recipientAddress: RECIPIENT } })]),
+            functions: expect.arrayContaining([expect.objectContaining({ name: "temperature", paymentManifest: { costMicroUsd: COST, recipientOrganizationId: ORGANIZATION } })]),
         }));
 
         expect(await run(caller.url)).toEqual({ returnValue: { value: 12, error: null } });
 
         await vi.waitFor(() => expect(settlements).toHaveLength(1));
         const [voucher] = settlements;
-        expect(voucher).toMatchObject({ amount: COST, recipientAddress: RECIPIENT, publicKey: callerKeys.publicKey });
+        expect(authorizations).toEqual([{ voucher }]);
+        expect(voucher).toMatchObject({ amount: COST, recipientOrganizationId: ORGANIZATION, publicKey: callerKeys.publicKey });
         expect(verifyData(paymentVoucherPayload(voucher), voucher.publicKey, voucher.signature)).toBe(true);
     });
 
@@ -226,13 +251,27 @@ describe("two-node network", { timeout: 15_000 }, () => {
     });
 
     test("the caller refuses a call that costs more than its limit", async () => {
-        const caller = await startCaller({ costLimitMicroUsdc: COST - 1 });
+        const caller = await startCaller({ costLimitMicroUsd: COST - 1 });
 
         const result = await run(caller.url);
 
         expect(result.returnValue.value).toBeNull();
         expect(result.returnValue.error.message).toContain("exceeds the cost limit");
         expect(settlements).toEqual([]);
+        expect(authorizations).toEqual([]);
+    });
+
+    test("the provider refuses to run a call the operator won't hold, and the caller sees why", async () => {
+        const caller = await startCaller();
+        refuseAuthorization = { status: 402, error: "Insufficient balance" };
+
+        const result = await run(caller.url);
+
+        expect(result.returnValue.value).toBeNull();
+        expect(result.returnValue.error.message).toContain("Insufficient balance");
+        expect(authorizations).toHaveLength(1);
+        expect(settlements).toEqual([]);
+        expect(releases).toEqual([]);
     });
 
     describe("inference functions", () => {
@@ -245,13 +284,13 @@ describe("two-node network", { timeout: 15_000 }, () => {
             await vi.waitFor(() => expect(submissions).toHaveLength(1));
             // 3 input tokens at $3/M plus 10 output tokens at $15/M, rounded up.
             expect(submissions[0]).toMatchObject({
-                voucher: { kind: "inference", maxAmount: 159, maxTokens: 10, ...INFERENCE_RATES, recipientAddress: RECIPIENT, publicKey: callerKeys.publicKey },
+                voucher: { kind: "inference", maxAmount: 159, maxTokens: 10, ...INFERENCE_RATES, recipientOrganizationId: ORGANIZATION, publicKey: callerKeys.publicKey },
                 usage: { inputTokens: 3, outputTokens: 10 },
             });
         });
 
         test("the caller refuses a call whose maxAmount is over its inference cost limit", async () => {
-            const caller = await startCaller({ inferenceCostLimitMicroUsdc: 158 });
+            const caller = await startCaller({ inferenceCostLimitMicroUsd: 158 });
 
             const result = await run(caller.url, completeSource);
 

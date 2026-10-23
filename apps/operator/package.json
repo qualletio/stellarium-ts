@@ -11,7 +11,8 @@
     "dev": "node --watch src/server.ts",
     "test": "vitest --passWithNoTests --exclude 'dist/**'",
     "lint": "biome lint src",
-    "check-types": "tsc --noEmit"
+    "check-types": "tsc --noEmit",
+    "seed:dev": "node dist/seed.js"
   },
   "keywords": [],
   "author": "",
@@ -29,8 +30,6 @@
   },
   "dependencies": {
     "@fastify/rate-limit": "^11.2.1",
-    "@solana/spl-token": "^0.4.15",
-    "@solana/web3.js": "^1.99.0",
     "dotenv": "^18.0.7",
     "drizzle-orm": "1.0.0-rc.4",
     "fastify": "^5.12.5",

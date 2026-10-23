@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { DEFAULT_COST_LIMIT_MICRO_USDC, resolveConfig } from "../server.js";
+import { DEFAULT_COST_LIMIT_MICRO_USD, resolveConfig } from "../server.js";
 import { modelResource, weatherResource } from "./helpers.js";
 
 describe("resolveConfig", () => {
@@ -20,19 +20,19 @@ describe("resolveConfig", () => {
         vi.stubEnv("BASE_URL", "http://env.example");
         vi.stubEnv("SIGNING_PUBLIC_KEY", "env-public");
         vi.stubEnv("SIGNING_PRIVATE_KEY", "env-private");
-        vi.stubEnv("COST_LIMIT_MICRO_USDC", "500");
+        vi.stubEnv("COST_LIMIT_MICRO_USD", "500");
 
-        expect(resolveConfig({})).toMatchObject({ baseUrl: "http://env.example", publicKey: "env-public", privateKey: "env-private", costLimitMicroUsdc: 500 });
+        expect(resolveConfig({})).toMatchObject({ baseUrl: "http://env.example", publicKey: "env-public", privateKey: "env-private", costLimitMicroUsd: 500 });
     });
 
     test("defaults the cost limit", () => {
-        vi.stubEnv("COST_LIMIT_MICRO_USDC", undefined);
+        vi.stubEnv("COST_LIMIT_MICRO_USD", undefined);
 
-        expect(resolveConfig(keys).costLimitMicroUsdc).toBe(DEFAULT_COST_LIMIT_MICRO_USDC);
+        expect(resolveConfig(keys).costLimitMicroUsd).toBe(DEFAULT_COST_LIMIT_MICRO_USD);
     });
 
-    test.each([-1, 1.5, Number.NaN])("rejects a cost limit of %s", (costLimitMicroUsdc) => {
-        expect(() => resolveConfig({ ...keys, costLimitMicroUsdc })).toThrow("costLimitMicroUsdc");
+    test.each([-1, 1.5, Number.NaN])("rejects a cost limit of %s", (costLimitMicroUsd) => {
+        expect(() => resolveConfig({ ...keys, costLimitMicroUsd })).toThrow("costLimitMicroUsd");
     });
 
     test("requires the signing keys and base URL", () => {
@@ -49,13 +49,13 @@ describe("resolveConfig", () => {
     });
 
     test("defaults the inference cost limit to the cost limit, and reads its own option or environment variable", () => {
-        vi.stubEnv("INFERENCE_COST_LIMIT_MICRO_USDC", undefined);
-        expect(resolveConfig({ ...keys, costLimitMicroUsdc: 700 }).inferenceCostLimitMicroUsdc).toBe(700);
+        vi.stubEnv("INFERENCE_COST_LIMIT_MICRO_USD", undefined);
+        expect(resolveConfig({ ...keys, costLimitMicroUsd: 700 }).inferenceCostLimitMicroUsd).toBe(700);
 
-        vi.stubEnv("INFERENCE_COST_LIMIT_MICRO_USDC", "900");
-        expect(resolveConfig({ ...keys, costLimitMicroUsdc: 700 }).inferenceCostLimitMicroUsdc).toBe(900);
-        expect(resolveConfig({ ...keys, inferenceCostLimitMicroUsdc: 1_000 }).inferenceCostLimitMicroUsdc).toBe(1_000);
-        expect(() => resolveConfig({ ...keys, inferenceCostLimitMicroUsdc: -1 })).toThrow("inferenceCostLimitMicroUsdc");
+        vi.stubEnv("INFERENCE_COST_LIMIT_MICRO_USD", "900");
+        expect(resolveConfig({ ...keys, costLimitMicroUsd: 700 }).inferenceCostLimitMicroUsd).toBe(900);
+        expect(resolveConfig({ ...keys, inferenceCostLimitMicroUsd: 1_000 }).inferenceCostLimitMicroUsd).toBe(1_000);
+        expect(() => resolveConfig({ ...keys, inferenceCostLimitMicroUsd: -1 })).toThrow("inferenceCostLimitMicroUsd");
     });
 
     test("accepts well-declared inference functions", () => {
@@ -66,8 +66,8 @@ describe("resolveConfig", () => {
         ["without a maxTokens parameter", { parameters: [{ name: "prompt", type: "string" }] }, "maxTokens: int32"],
         ["whose maxTokens isn't an int32", { parameters: [{ name: "maxTokens", type: "int64" }] }, "maxTokens: int32"],
         ["that is paid but has no estimator", { estimateInputTokens: undefined }, "estimateInputTokens"],
-        ["priced with a flat cost", { paymentManifest: { costMicroUsdc: 5, recipientAddress: "r" } }, "per million tokens"],
-        ["with a negative rate", { paymentManifest: { inputCostMicroUsdcPerMillionTokens: -1, outputCostMicroUsdcPerMillionTokens: 0, recipientAddress: "r" } }, "per million tokens"],
+        ["priced with a flat cost", { paymentManifest: { costMicroUsd: 5, recipientOrganizationId: "r" } }, "per million tokens"],
+        ["with a negative rate", { paymentManifest: { inputCostMicroUsdPerMillionTokens: -1, outputCostMicroUsdPerMillionTokens: 0, recipientOrganizationId: "r" } }, "per million tokens"],
     ])("rejects an inference function %s", (_, overrides, message) => {
         const model = modelResource();
         model.functions = [{ ...model.functions[0]!, ...overrides }];

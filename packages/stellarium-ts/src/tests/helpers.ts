@@ -13,7 +13,8 @@ export function generateBase64KeyPair() {
     };
 }
 
-export const RECIPIENT = "4HkmXgXCJ8tw1ih5VFHetRt4kWdo1VLBVmV7B5p6ctK2";
+/** The operator organization the fixture provider is enrolled in. */
+export const ORGANIZATION = "org_provider";
 export const COST = 10000;
 
 export function testConfig(overrides: Partial<NodeConfig> = {}): NodeConfig {
@@ -22,8 +23,9 @@ export function testConfig(overrides: Partial<NodeConfig> = {}): NodeConfig {
         ...generateBase64KeyPair(),
         apiKey: "secret",
         operatorUrl: "http://operator.invalid/v1",
-        costLimitMicroUsdc: 100_000,
-        inferenceCostLimitMicroUsdc: 100_000,
+        organizationId: ORGANIZATION,
+        costLimitMicroUsd: 100_000,
+        inferenceCostLimitMicroUsd: 100_000,
         ...overrides,
     };
 }
@@ -42,7 +44,7 @@ export function weatherResource(baseUrl = "http://127.0.0.1:3002"): StellariumRe
                 parameters: [{ name: "city", type: "string" }],
                 returnType: "int32",
                 exec: async (args) => (args.find((arg) => arg.name === "city")?.value === "Oslo" ? 12 : 20),
-                paymentManifest: { costMicroUsdc: COST, recipientAddress: RECIPIENT },
+                paymentManifest: { costMicroUsd: COST },
             },
             {
                 name: "humidity",
@@ -54,7 +56,7 @@ export function weatherResource(baseUrl = "http://127.0.0.1:3002"): StellariumRe
     };
 }
 
-export const INFERENCE_RATES = { inputCostMicroUsdcPerMillionTokens: 3_000_000, outputCostMicroUsdcPerMillionTokens: 15_000_000 };
+export const INFERENCE_RATES = { inputCostMicroUsdPerMillionTokens: 3_000_000, outputCostMicroUsdPerMillionTokens: 15_000_000 };
 
 /**
  * A fixture provider's model: paid inference `complete`, which counts one token per four prompt characters
@@ -72,7 +74,7 @@ export function modelResource(baseUrl = "http://127.0.0.1:3002"): StellariumReso
             value: `echo: ${prompt(args)}`,
             usage: { inputTokens: Math.ceil(prompt(args).length / 4), outputTokens: Number(args.find((arg) => arg.name === "maxTokens")?.value) },
         }),
-        paymentManifest: { ...INFERENCE_RATES, recipientAddress: RECIPIENT },
+        paymentManifest: { ...INFERENCE_RATES },
     };
     return {
         id: 2,

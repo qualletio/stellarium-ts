@@ -25,7 +25,7 @@ describe("payment voucher", () => {
         const invoker = new CombinationResourceInvoker({} as ResourceRepository, 100_000, publicKey, privateKey);
         const parameters = [{ name: "city", value: "Oslo" }];
         const voucher = invoker.createPaymentVoucher(
-            "4HkmXgXCJ8tw1ih5VFHetRt4kWdo1VLBVmV7B5p6ctK2",
+            "org_provider",
             10000,
             "com.example",
             "Weather",
@@ -51,7 +51,7 @@ describe("external invoke retries", () => {
     const resource = { path: "com.example", name: "Weather", metadata: { baseUrl: "https://remote.example" }, functions: [] } as unknown as Resource;
     const parameters = [{ name: "city", value: "Oslo" }];
 
-    function createInvoker(paymentManifest?: { costMicroUsdc: number; recipientAddress: string }) {
+    function createInvoker(paymentManifest?: { costMicroUsd: number; recipientOrganizationId?: string }) {
         const { publicKey, privateKey } = generateBase64KeyPair();
         const repository = { getResourceFunction: async () => ({ paymentManifest }) } as unknown as ResourceRepository;
         return new CombinationResourceInvoker(repository, 100_000, publicKey, privateKey);
@@ -129,7 +129,7 @@ describe("external invoke retries", () => {
     test("reuses the same payment voucher on every attempt", async () => {
         fetchMock.mockResolvedValueOnce(status(503)).mockResolvedValueOnce(status(503)).mockResolvedValueOnce(ok());
 
-        const invoker = createInvoker({ costMicroUsdc: 10000, recipientAddress: "4HkmXgXCJ8tw1ih5VFHetRt4kWdo1VLBVmV7B5p6ctK2" });
+        const invoker = createInvoker({ costMicroUsd: 10000, recipientOrganizationId: "org_provider" });
         const pending = invoker.invoke(resource, "forecast", parameters);
         await vi.runAllTimersAsync();
         await pending;
@@ -140,6 +140,13 @@ describe("external invoke retries", () => {
         expect(JSON.parse(bodies[0]).paymentVoucher.requestId).toBeDefined();
         expect(JSON.parse(bodies[0]).paymentVoucher.invocationHash).toBe(invocationHash("com.example", "Weather", "forecast", parameters));
     });
+
+    test("refuses a paid function whose manifest names no recipient organization, without signing a voucher", async () => {
+        const result = await createInvoker({ costMicroUsd: 10000 }).invoke(resource, "forecast", parameters);
+
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(result.error?.message).toContain("names no recipient organization");
+    });
 });
 
 describe("restricted functions", () => {
@@ -147,7 +154,7 @@ describe("restricted functions", () => {
     const parameters = [{ name: "city", value: "Oslo" }];
     const chain = [{ id: "grant" }] as unknown as Grant[];
 
-    function createInvoker(grantService: Partial<GrantService> | undefined, paymentManifest?: { costMicroUsdc: number; recipientAddress: string }) {
+    function createInvoker(grantService: Partial<GrantService> | undefined, paymentManifest?: { costMicroUsd: number; recipientOrganizationId: string }) {
         const { publicKey, privateKey } = generateBase64KeyPair();
         const repository = { getResourceFunction: async () => ({ restricted: true, paymentManifest }) } as unknown as ResourceRepository;
         return new CombinationResourceInvoker(repository, 100_000, publicKey, privateKey, grantService as GrantService | undefined);
@@ -186,7 +193,7 @@ describe("restricted functions", () => {
         let nonce = 0;
         const authorize = vi.fn(() => ({ nonce: `nonce-${nonce++}` }) as unknown as InvocationAuthorization);
 
-        const invoker = createInvoker({ chainFor: async () => chain, authorize }, { costMicroUsdc: 10000, recipientAddress: "4HkmXgXCJ8tw1ih5VFHetRt4kWdo1VLBVmV7B5p6ctK2" });
+        const invoker = createInvoker({ chainFor: async () => chain, authorize }, { costMicroUsd: 10000, recipientOrganizationId: "org_provider" });
         const pending = invoker.invoke(resource, "forecast", parameters);
         await vi.runAllTimersAsync();
 
@@ -199,10 +206,10 @@ describe("restricted functions", () => {
 });
 
 describe("inference functions", () => {
-    const RECIPIENT = "4HkmXgXCJ8tw1ih5VFHetRt4kWdo1VLBVmV7B5p6ctK2";
+    const ORGANIZATION = "org_provider";
     const resource = { path: "com.example", name: "Model", metadata: { baseUrl: "https://remote.example" }, functions: [] } as unknown as Resource;
     const parameters = [{ name: "prompt", value: "Hello" }, { name: "maxTokens", value: 1000 }];
-    const manifest = { inputCostMicroUsdcPerMillionTokens: 3_000_000, outputCostMicroUsdcPerMillionTokens: 15_000_000, recipientAddress: RECIPIENT };
+    const manifest = { inputCostMicroUsdPerMillionTokens: 3_000_000, outputCostMicroUsdPerMillionTokens: 15_000_000, recipientOrganizationId: ORGANIZATION };
     // 2,000 input tokens and 1,000 output tokens: 6,000 + 15,000.
     const MAX_AMOUNT = 21_000;
 
@@ -225,9 +232,9 @@ describe("inference functions", () => {
 
     test("inferenceCharge rounds up per million tokens", () => {
         expect(inferenceCharge(manifest, 2_000, 1_000)).toBe(21_000);
-        expect(inferenceCharge({ inputCostMicroUsdcPerMillionTokens: 150_000, outputCostMicroUsdcPerMillionTokens: 0 }, 1, 1_000_000)).toBe(1);
-        expect(inferenceCharge({ inputCostMicroUsdcPerMillionTokens: 0, outputCostMicroUsdcPerMillionTokens: 0 }, 5, 5)).toBe(0);
-        expect(() => inferenceCharge({ inputCostMicroUsdcPerMillionTokens: Number.MAX_SAFE_INTEGER, outputCostMicroUsdcPerMillionTokens: 0 }, Number.MAX_SAFE_INTEGER, 0)).toThrow();
+        expect(inferenceCharge({ inputCostMicroUsdPerMillionTokens: 150_000, outputCostMicroUsdPerMillionTokens: 0 }, 1, 1_000_000)).toBe(1);
+        expect(inferenceCharge({ inputCostMicroUsdPerMillionTokens: 0, outputCostMicroUsdPerMillionTokens: 0 }, 5, 5)).toBe(0);
+        expect(() => inferenceCharge({ inputCostMicroUsdPerMillionTokens: Number.MAX_SAFE_INTEGER, outputCostMicroUsdPerMillionTokens: 0 }, Number.MAX_SAFE_INTEGER, 0)).toThrow();
     });
 
     test("asks the provider for an estimate, then signs a voucher for its maxAmount at the advertised rates", async () => {
@@ -244,7 +251,7 @@ describe("inference functions", () => {
         const voucher = JSON.parse(runInit.body).paymentVoucher;
         expect(voucher).toMatchObject({ kind: "inference", maxAmount: MAX_AMOUNT, maxTokens: 1000, ...manifest, publicKey });
         expect(voucher.amount).toBeUndefined();
-        expect(Object.keys(inferenceVoucherPayload(voucher))).toEqual(["kind", "requestId", "invocationId", "maxAmount", "inputCostMicroUsdcPerMillionTokens", "outputCostMicroUsdcPerMillionTokens", "maxTokens", "recipientAddress", "expiresAt", "invocationHash", "publicKey"]);
+        expect(Object.keys(inferenceVoucherPayload(voucher))).toEqual(["kind", "requestId", "invocationId", "maxAmount", "inputCostMicroUsdPerMillionTokens", "outputCostMicroUsdPerMillionTokens", "maxTokens", "recipientOrganizationId", "expiresAt", "invocationHash", "publicKey"]);
         expect(verifyData(inferenceVoucherPayload(voucher), publicKey, voucher.signature)).toBe(true);
         expect(Date.parse(voucher.expiresAt) - Date.now()).toBeGreaterThan(1000 * 60 * 5);
     });
