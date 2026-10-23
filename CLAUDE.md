@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Stellarium is a decentralized API platform built on [RequestScript](https://www.npmjs.com/package/requestscript). Nodes share `Resources` with peers. Paid resource calls are paid from organizations' prepaid USD balances through a centralized operator, which pays providers out through Stripe Connect. All amounts are integer micro-USD (1 USD = 1,000,000). The move from Solana to Stripe is in progress: `programs/escrow_program` is unused and due for deletion. See `AGENTS.md` for Turborepo guidance: read the installed `turbo` package's bundled docs before changing turbo config.
+Stellarium is a decentralized API platform built on [RequestScript](https://www.npmjs.com/package/requestscript). Nodes share `Resources` with peers. Paid resource calls are paid from organizations' prepaid USD balances through a centralized operator, which pays providers out through Stripe Connect. All amounts are integer micro-USD (1 USD = 1,000,000). See `AGENTS.md` for Turborepo guidance: read the installed `turbo` package's bundled docs before changing turbo config.
 
 ## Commands
 
@@ -21,7 +21,7 @@ pnpm --filter stellarium-ts exec vitest run src/tests/resource/invoker.test.ts -
 pnpm --filter stellarium-ts check-types
 ```
 
-CI (`.github/workflows/ci.yml`) runs `pnpm build`, `pnpm check-types` and `pnpm test` on Node 20, plus `cargo test` for the (unused) escrow program. `check-types` must run after `build`: the operator type-checks against `stellarium-ts`'s `dist/` declarations. Lint is not part of CI, and the operator has pre-existing biome errors.
+CI (`.github/workflows/ci.yml`) runs `pnpm build`, `pnpm check-types` and `pnpm test` on Node 20. `check-types` must run after `build`: the operator type-checks against `stellarium-ts`'s `dist/` declarations. Lint is not part of CI, and the operator has pre-existing biome errors.
 
 **Operator DB schema changes** (`apps/operator/src/db/schema.ts`) need a generated migration committed under `apps/operator/drizzle/`. The operator applies migrations itself at startup.
 ```sh
@@ -29,7 +29,7 @@ cd apps/operator && DATABASE_URL='postgresql://stellarium:local-only-password@12
 ```
 When it is ambiguous whether a column was renamed or newly created, drizzle-kit stops with `missing_hints`. Re-run with `--hints '[...]'` as the output instructs.
 
-**Full local stack** (Postgres, operator, two nodes, and the dashboard on port 3010): the README's "Running Locally" section, in three parts: paid calls on seeded credit, the dashboard with Clerk, and Stripe test mode end to end. The root `.env` holds the fixture nodes' public keys (`PROVIDER_SIGNING_PUBLIC_KEY`, `CALLER_SIGNING_PUBLIC_KEY`). The operator runs `seed:dev` (`apps/operator/src/seed.ts`) unless `SEED_DEV=0`, enrolling them in two organizations and crediting the caller. Each app's `.env` is baked into its image, so changing one needs `docker compose up -d --build <service>`. `docs/local-e2e.md` and the README's Payments sections still describe Solana.
+**Full local stack** (Postgres, operator, two nodes, and the dashboard on port 3010): the README's "Running Locally" section, in three parts: paid calls on seeded credit, the dashboard with Clerk, and Stripe test mode end to end. The root `.env` holds the fixture nodes' public keys (`PROVIDER_SIGNING_PUBLIC_KEY`, `CALLER_SIGNING_PUBLIC_KEY`). The operator runs `seed:dev` (`apps/operator/src/seed.ts`) unless `SEED_DEV=0`, enrolling them in two organizations and crediting the caller. Each app's `.env` is baked into its image, so changing one needs `docker compose up -d --build <service>`. Production setup (live Stripe, a production Clerk instance, webhook endpoints) is in `docs/production-deploy.md`.
 
 ## Architecture
 
