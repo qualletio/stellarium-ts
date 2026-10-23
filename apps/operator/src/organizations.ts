@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, lt, type SQL } from "drizzle-orm";
 import type { Database } from "./db/database.js";
-import { enrollmentTokensTable, nodesTable, organizationsTable } from "./db/schema.js";
+import { enrollmentTokensTable, nodesTable, organizationsTable, payoutsTable, receiptsTable, topUpsTable } from "./db/schema.js";
 import { newId, sha256Hex } from "./crypto.js";
 import { OperationError } from "./errors.js";
 import { accounts, adjustOrganization, lockOrganizations, type Organization, postLedgerTransaction } from "./ledger.js";
@@ -9,6 +9,12 @@ import { accounts, adjustOrganization, lockOrganizations, type Organization, pos
 export type Node = typeof nodesTable.$inferSelect;
 
 export const ENROLLMENT_TOKEN_LIFETIME_MS = 1000 * 60 * 60 * 24;
+
+/** Newest first. `before` is the last id of the previous page. */
+export interface Page {
+    limit: number;
+    before?: number;
+}
 
 /** Organizations, the node keys enrolled in them, and enrollment. */
 export class OrganizationService {
@@ -26,6 +32,17 @@ export class OrganizationService {
     async get(id: string): Promise<Organization | undefined> {
         const [organization] = await this.db.select().from(organizationsTable).where(eq(organizationsTable.id, id)).limit(1);
         return organization;
+    }
+
+    /** The organization for a Clerk organization, created on first use with the name `name` returns. */
+    async forClerkOrganization(clerkOrgId: string, name: () => Promise<string>): Promise<Organization> {
+        const existing = async () => (await this.db.select().from(organizationsTable).where(eq(organizationsTable.clerkOrgId, clerkOrgId)).limit(1))[0];
+        const found = await existing();
+        if (found) return found;
+        await this.db.insert(organizationsTable).values({ id: newId('org'), name: await name(), clerkOrgId })
+            .onConflictDoNothing({ target: organizationsTable.clerkOrgId });
+        // Another request may have created it first.
+        return (await existing())!;
     }
 
     async getNode(publicKey: string): Promise<Node | undefined> {
@@ -81,6 +98,40 @@ export class OrganizationService {
     /** Adds a node directly, without a token. For trusted callers such as the development seed. */
     async enroll(organizationId: string, publicKey: string, label?: string): Promise<void> {
         await this.db.insert(nodesTable).values({ publicKey, organizationId, label }).onConflictDoNothing();
+    }
+
+    async listNodes(organizationId: string): Promise<Node[]> {
+        return this.db.select().from(nodesTable).where(eq(nodesTable.organizationId, organizationId)).orderBy(desc(nodesTable.createdAt));
+    }
+
+    /** Revokes one of the organization's nodes. Its key stays taken, so it can't be enrolled again. */
+    async revokeNode(organizationId: string, publicKey: string): Promise<void> {
+        const [revoked] = await this.db.update(nodesTable).set({ revokedAt: new Date() })
+            .where(and(eq(nodesTable.publicKey, publicKey), eq(nodesTable.organizationId, organizationId), isNull(nodesTable.revokedAt)))
+            .returning();
+        if (!revoked && !(await this.getNode(publicKey))?.revokedAt) {
+            throw new OperationError(404, 'Node not found');
+        }
+    }
+
+    /** Receipts the organization paid (`payer`) or was paid (`provider`). */
+    async listReceipts(organizationId: string, as: 'payer' | 'provider', page: Page) {
+        const owner = as === 'payer' ? eq(receiptsTable.payerOrganizationId, organizationId) : eq(receiptsTable.recipientOrganizationId, organizationId);
+        return this.db.select().from(receiptsTable).where(this.paged(owner, receiptsTable.id, page)).orderBy(desc(receiptsTable.id)).limit(page.limit);
+    }
+
+    async listTopUps(organizationId: string, page: Page) {
+        return this.db.select().from(topUpsTable).where(this.paged(eq(topUpsTable.organizationId, organizationId), topUpsTable.id, page))
+            .orderBy(desc(topUpsTable.id)).limit(page.limit);
+    }
+
+    async listPayouts(organizationId: string, page: Page) {
+        return this.db.select().from(payoutsTable).where(this.paged(eq(payoutsTable.organizationId, organizationId), payoutsTable.id, page))
+            .orderBy(desc(payoutsTable.id)).limit(page.limit);
+    }
+
+    private paged(owner: SQL, idColumn: typeof receiptsTable.id | typeof topUpsTable.id | typeof payoutsTable.id, page: Page): SQL | undefined {
+        return page.before === undefined ? owner : and(owner, lt(idColumn, page.before));
     }
 
     /** Credits an organization's balance without a payment. */

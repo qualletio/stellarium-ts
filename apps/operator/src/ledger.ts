@@ -12,9 +12,21 @@ export const accounts = {
     revenue: 'platform:revenue',
     /** Credit granted without a payment, such as the local development seed. */
     promotions: 'platform:promotions',
+    /** Card money moving through Stripe: top-ups in, refunds and disputes out. */
+    stripe: 'platform:stripe',
+    /** Money transferred to organizations' Connect accounts. */
+    payouts: 'platform:payouts',
 } as const;
 
-export type LedgerKind = 'capture' | 'promotion';
+export type LedgerKind = 'capture' | 'promotion' | 'top_up' | 'refund' | 'dispute' | 'dispute_won' | 'payout' | 'payout_returned';
+
+/** What a ledger transaction records. */
+export interface LedgerReference {
+    receiptId?: number;
+    topUpId?: number;
+    payoutId?: number;
+    stripeObjectId?: string;
+}
 
 export interface LedgerEntry {
     account: string;
@@ -25,7 +37,7 @@ export interface LedgerEntry {
  * Appends one balanced ledger transaction. Throws, so the caller's database transaction rolls back,
  * if the entries don't sum to zero.
  */
-export async function postLedgerTransaction(tx: Transaction, kind: LedgerKind, entries: LedgerEntry[], receiptId?: number): Promise<void> {
+export async function postLedgerTransaction(tx: Transaction, kind: LedgerKind, entries: LedgerEntry[], reference: LedgerReference = {}): Promise<void> {
     const total = entries.reduce((sum, entry) => sum + BigInt(entry.amountMicroUsd), 0n);
     if (total !== 0n) {
         throw new Error(`Unbalanced ${kind} ledger transaction: entries sum to ${total}`);
@@ -33,7 +45,7 @@ export async function postLedgerTransaction(tx: Transaction, kind: LedgerKind, e
     const transactionId = crypto.randomUUID();
     await tx.insert(ledgerEntriesTable).values(entries
         .filter(entry => entry.amountMicroUsd !== 0)
-        .map(entry => ({ transactionId, kind, receiptId, ...entry })));
+        .map(entry => ({ transactionId, kind, ...reference, ...entry })));
 }
 
 /**

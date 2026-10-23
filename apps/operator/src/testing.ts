@@ -3,12 +3,15 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
+import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
 import { NODE_AUTH_SCHEME, operatorRequestPayload } from './auth/nodeAuth.js';
 import type { Database } from './db/database.js';
+import { ledgerEntriesTable, organizationsTable } from './db/schema.js';
 import { OrganizationService } from './organizations.js';
 import type { FixedPaymentSubmission, InferencePaymentSubmission } from './payments/types.js';
+import type { StripeEvent, StripeGateway } from './stripe/gateway.js';
 
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../drizzle');
 
@@ -107,4 +110,56 @@ export function signedInferenceVoucher(
 export function nodeAuthorization(keys: NodeKeys, method: string, path: string, body: unknown, timestamp = new Date().toISOString()): string {
     const signature = signJson(operatorRequestPayload(method, path, body, timestamp), keys.privateKey);
     return `${NODE_AUTH_SCHEME} ${Buffer.from(JSON.stringify({ publicKey: keys.publicKey, timestamp, signature })).toString('base64url')}`;
+}
+
+/** Records Stripe calls and returns made-up objects. Replace a method to simulate a failure. */
+export class FakeStripe implements StripeGateway {
+    readonly calls: { method: string, params: unknown }[] = [];
+    private next = 0;
+    private id(prefix: string) { return `${prefix}_${++this.next}`; }
+    private record(method: string, params: unknown) { this.calls.push({ method, params }); }
+
+    async createCustomer(params: { organizationId: string, name: string }) { this.record('createCustomer', params); return { id: this.id('cus') }; }
+    async createCheckoutSession(params: Parameters<StripeGateway['createCheckoutSession']>[0]) {
+        this.record('createCheckoutSession', params);
+        const id = this.id('cs');
+        return { id, url: `https://checkout.stripe.test/${id}` };
+    }
+    async createPortalSession(params: { customer: string, returnUrl: string }) { this.record('createPortalSession', params); return { url: 'https://billing.stripe.test/session' }; }
+    async createExpressAccount(params: { organizationId: string }) { this.record('createExpressAccount', params); return { id: this.id('acct') }; }
+    async createAccountLink(params: { account: string, refreshUrl: string, returnUrl: string }) { this.record('createAccountLink', params); return { url: `https://connect.stripe.test/${params.account}` }; }
+    async createLoginLink(account: string) { this.record('createLoginLink', account); return { url: `https://connect.stripe.test/login/${account}` }; }
+    createTransfer = async (params: Parameters<StripeGateway['createTransfer']>[0]): Promise<{ id: string }> => {
+        this.record('createTransfer', params);
+        return { id: `tr_${params.idempotencyKey}` };
+    };
+    constructEvent: StripeGateway['constructEvent'] = (payload) => JSON.parse(payload.toString()) as StripeEvent;
+}
+
+/** A Stripe event carrying `object`. */
+export function stripeEvent(type: string, object: Record<string, unknown>, account?: string): StripeEvent {
+    return { id: `evt_${crypto.randomUUID()}`, type, account, data: { object } };
+}
+
+export const BILLING_CONFIG = { dashboardUrl: 'https://platform.test', minimumTopUpCents: 1_000, maximumTopUpCents: 100_000 };
+
+/**
+ * What is wrong with the ledger: transactions that don't sum to zero, and organizations whose cached
+ * balance or payable balance differs from their ledger account. Empty when consistent.
+ */
+export async function ledgerProblems(db: Database): Promise<string[]> {
+    const problems: string[] = [];
+    const unbalanced = await db.select({ transactionId: ledgerEntriesTable.transactionId })
+        .from(ledgerEntriesTable).groupBy(ledgerEntriesTable.transactionId)
+        .having(sql`sum(${ledgerEntriesTable.amountMicroUsd}) <> 0`);
+    for (const { transactionId } of unbalanced) problems.push(`transaction ${transactionId} is unbalanced`);
+    const sums = new Map((await db.select({ account: ledgerEntriesTable.account, total: sql<string>`sum(${ledgerEntriesTable.amountMicroUsd})` })
+        .from(ledgerEntriesTable).groupBy(ledgerEntriesTable.account)).map(row => [row.account, Number(row.total)]));
+    for (const organization of await db.select().from(organizationsTable)) {
+        const balance = sums.get(`org:${organization.id}:balance`) ?? 0;
+        const payable = sums.get(`org:${organization.id}:payable`) ?? 0;
+        if (balance !== organization.balanceMicroUsd) problems.push(`${organization.id} balance ${organization.balanceMicroUsd} != ledger ${balance}`);
+        if (payable !== organization.payableMicroUsd) problems.push(`${organization.id} payable ${organization.payableMicroUsd} != ledger ${payable}`);
+    }
+    return problems;
 }
