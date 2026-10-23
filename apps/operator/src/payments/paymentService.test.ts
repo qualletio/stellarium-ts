@@ -1,12 +1,12 @@
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { CombinationResourceInvoker } from 'stellarium-ts';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { Database } from '../db/database.js';
-import { ledgerEntriesTable, nodesTable, organizationsTable, receiptsTable } from '../db/schema.js';
+import { nodesTable, organizationsTable, receiptsTable } from '../db/schema.js';
 import { OperationError } from '../errors.js';
 import type { OrganizationService } from '../organizations.js';
 import {
-    createTestDatabase, generateNodeKeys, type NodeKeys, PAYER_ORGANIZATION, PROVIDER_ORGANIZATION, seedOrganizations, signedInferenceVoucher, signedVoucher,
+    createTestDatabase, generateNodeKeys, ledgerProblems, type NodeKeys, PAYER_ORGANIZATION, PROVIDER_ORGANIZATION, seedOrganizations, signedInferenceVoucher, signedVoucher,
 } from '../testing.js';
 import { HOLD_GRACE_MS, PaymentService } from './paymentService.js';
 
@@ -38,20 +38,7 @@ describe('PaymentService', () => {
         return { balance: row!.balanceMicroUsd, held: row!.heldMicroUsd, payable: row!.payableMicroUsd };
     }
 
-    /** Every ledger transaction sums to zero, and the cached balances match the ledger. */
-    async function expectLedgerConsistent() {
-        const unbalanced = await db.select({ transactionId: ledgerEntriesTable.transactionId })
-            .from(ledgerEntriesTable).groupBy(ledgerEntriesTable.transactionId)
-            .having(sql`sum(${ledgerEntriesTable.amountMicroUsd}) <> 0`);
-        expect(unbalanced).toEqual([]);
-        for (const id of [PAYER_ORGANIZATION, PROVIDER_ORGANIZATION]) {
-            const sum = async (account: string) => Number((await db.select({ total: sql<string>`coalesce(sum(${ledgerEntriesTable.amountMicroUsd}), 0)` })
-                .from(ledgerEntriesTable).where(eq(ledgerEntriesTable.account, account)))[0]!.total);
-            const cached = await balances(id);
-            expect(cached.balance).toBe(await sum(`org:${id}:balance`));
-            expect(cached.payable).toBe(await sum(`org:${id}:payable`));
-        }
-    }
+    const expectLedgerConsistent = async () => expect(await ledgerProblems(db)).toEqual([]);
 
     describe('authorize', () => {
         test('accepts a voucher created by the stellarium-ts node and holds its amount', async () => {

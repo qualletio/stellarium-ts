@@ -110,8 +110,72 @@ export const ledgerEntriesTable = pgTable("ledger_entries", {
   amountMicroUsd: bigint({ mode: 'number' }).notNull(),
   kind: varchar({ length: 32 }).notNull(),
   receiptId: integer().references(() => receiptsTable.id),
+  topUpId: integer().references(() => topUpsTable.id),
+  payoutId: integer().references(() => payoutsTable.id),
+  // The Stripe object behind the entry, such as a refund's charge or a dispute.
+  stripeObjectId: varchar({ length: 255 }),
   createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
 }, (table) => [
   index("ledger_entries_account_index").on(table.account),
   index("ledger_entries_transactionId_index").on(table.transactionId),
 ]);
+
+/**
+ * - pending: a Checkout Session was created; nothing has been paid.
+ * - succeeded: paid and credited to the organization's balance.
+ */
+export const TOP_UP_STATUSES = ['pending', 'succeeded'] as const;
+export type TopUpStatus = typeof TOP_UP_STATUSES[number];
+
+/** One card payment that adds to an organization's balance, through Stripe Checkout. */
+export const topUpsTable = pgTable("top_ups", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: varchar({ length: 64 }).notNull().references(() => organizationsTable.id),
+  amountMicroUsd: bigint({ mode: 'number' }).notNull(),
+  status: varchar({ length: 16, enum: TOP_UP_STATUSES }).notNull().default('pending'),
+  checkoutSessionId: varchar({ length: 255 }).unique(),
+  paymentIntentId: varchar({ length: 255 }).unique(),
+  // Debited from the balance by refunds and open or lost disputes. Stripe reports cumulative amounts, so these record what was applied.
+  refundedMicroUsd: bigint({ mode: 'number' }).notNull().default(0),
+  disputedMicroUsd: bigint({ mode: 'number' }).notNull().default(0),
+  // The Clerk user who started it.
+  createdBy: varchar({ length: 255 }),
+  createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
+  updatedAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
+}, (table) => [
+  index("top_ups_organizationId_index").on(table.organizationId),
+]);
+
+/**
+ * - pending: claimed and debited from the payable balance; the transfer may not exist yet.
+ * - paid: the transfer to the organization's Connect account was created.
+ * - failed: Stripe refused the transfer. The amount was credited back to the payable balance.
+ * - reversed: the whole transfer was reversed (see `reversedCents` for partial reversals).
+ */
+export const PAYOUT_STATUSES = ['pending', 'paid', 'failed', 'reversed'] as const;
+export type PayoutStatus = typeof PAYOUT_STATUSES[number];
+
+/** One Stripe transfer of an organization's payable balance to its Connect account. */
+export const payoutsTable = pgTable("payouts", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  organizationId: varchar({ length: 64 }).notNull().references(() => organizationsTable.id),
+  // Whole cents; the sub-cent remainder stays payable.
+  amountCents: bigint({ mode: 'number' }).notNull(),
+  status: varchar({ length: 16, enum: PAYOUT_STATUSES }).notNull().default('pending'),
+  stripeTransferId: varchar({ length: 255 }).unique(),
+  // How much of the transfer Stripe has reversed. Reversed amounts are credited back to the payable balance.
+  reversedCents: bigint({ mode: 'number' }).notNull().default(0),
+  failureReason: varchar({ length: 1024 }),
+  createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
+  updatedAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
+}, (table) => [
+  index("payouts_organizationId_index").on(table.organizationId),
+  index("payouts_status_index").on(table.status),
+]);
+
+/** Stripe webhook events already handled, so a redelivery is ignored. */
+export const stripeEventsTable = pgTable("stripe_events", {
+  id: varchar({ length: 255 }).primaryKey(),
+  type: varchar({ length: 255 }).notNull(),
+  processedAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
+});

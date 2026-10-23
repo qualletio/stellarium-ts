@@ -158,7 +158,7 @@ export class PaymentService {
                 { account: accounts.balance(receipt.payerOrganizationId), amountMicroUsd: -charge },
                 { account: accounts.payable(receipt.recipientOrganizationId), amountMicroUsd: charge - fee },
                 { account: accounts.revenue, amountMicroUsd: fee },
-            ], receipt.id);
+            ], { receiptId: receipt.id });
             await adjustOrganization(tx, receipt.payerOrganizationId, { balance: -charge, held: -receipt.heldMicroUsd });
             await adjustOrganization(tx, receipt.recipientOrganizationId, { payable: charge - fee });
             await tx.update(receiptsTable).set({
