@@ -9,8 +9,9 @@ import { StellariumResource } from './resource/repository.js';
 import routes, { RateLimitConfig } from './routes.js';
 import { createService, type NodeConfig, type Service } from './service.js';
 import { StartupService } from './startup.js';
+import { OperatorClient } from './client/operatorClient.js';
 
-export const DEFAULT_COST_LIMIT_MICRO_USDC = 10_000;
+export const DEFAULT_COST_LIMIT_MICRO_USD = 10_000;
 export const DEFAULT_GRANT_REFRESH_INTERVAL_MS = 1000 * 60 * 5;
 
 export interface StellariumNodeOptions {
@@ -29,13 +30,18 @@ export interface StellariumNodeOptions {
     apiKey?: string;
     /** Defaults to `OPERATOR_URL`. */
     operatorUrl?: string;
-    /** Most this node pays for one remote call. Defaults to `COST_LIMIT_MICRO_USDC`, then 10,000 ($0.01). */
-    costLimitMicroUsdc?: number;
+    /**
+     * One-time token from the dashboard that enrolls this node in an organization. Defaults to
+     * `ENROLLMENT_TOKEN`. Only needed on a node's first start; an enrolled node ignores it.
+     */
+    enrollmentToken?: string;
+    /** Most this node pays for one remote call. Defaults to `COST_LIMIT_MICRO_USD`, then 10,000 ($0.01). */
+    costLimitMicroUsd?: number;
     /**
      * Most this node signs for in one remote inference call (the voucher's `maxAmount`).
-     * Defaults to `INFERENCE_COST_LIMIT_MICRO_USDC`, then to the resolved `costLimitMicroUsdc`.
+     * Defaults to `INFERENCE_COST_LIMIT_MICRO_USD`, then to the resolved `costLimitMicroUsd`.
      */
-    inferenceCostLimitMicroUsdc?: number;
+    inferenceCostLimitMicroUsd?: number;
     /** SQLite file. Defaults to `./requestscript.db`; use ':memory:' for tests. */
     databasePath?: string;
     /**
@@ -64,13 +70,13 @@ function hostsPaidFunctions(resources: StellariumResource[]): boolean {
 }
 
 export function resolveConfig(options: StellariumNodeOptions, resources: StellariumResource[] = []): NodeConfig {
-    const costLimit = options.costLimitMicroUsdc ?? (process.env.COST_LIMIT_MICRO_USDC ? Number(process.env.COST_LIMIT_MICRO_USDC) : DEFAULT_COST_LIMIT_MICRO_USDC);
+    const costLimit = options.costLimitMicroUsd ?? (process.env.COST_LIMIT_MICRO_USD ? Number(process.env.COST_LIMIT_MICRO_USD) : DEFAULT_COST_LIMIT_MICRO_USD);
     if (!Number.isSafeInteger(costLimit) || costLimit < 0) {
-        throw new Error('costLimitMicroUsdc must be a nonnegative integer');
+        throw new Error('costLimitMicroUsd must be a nonnegative integer');
     }
-    const inferenceCostLimit = options.inferenceCostLimitMicroUsdc ?? (process.env.INFERENCE_COST_LIMIT_MICRO_USDC ? Number(process.env.INFERENCE_COST_LIMIT_MICRO_USDC) : costLimit);
+    const inferenceCostLimit = options.inferenceCostLimitMicroUsd ?? (process.env.INFERENCE_COST_LIMIT_MICRO_USD ? Number(process.env.INFERENCE_COST_LIMIT_MICRO_USD) : costLimit);
     if (!Number.isSafeInteger(inferenceCostLimit) || inferenceCostLimit < 0) {
-        throw new Error('inferenceCostLimitMicroUsdc must be a nonnegative integer');
+        throw new Error('inferenceCostLimitMicroUsd must be a nonnegative integer');
     }
     for (const resource of resources) {
         resource.functions.forEach(validateInferenceFunction);
@@ -84,8 +90,8 @@ export function resolveConfig(options: StellariumNodeOptions, resources: Stellar
         operatorUrl: hostsPaidFunctions(resources)
             ? required('OPERATOR_URL', options.operatorUrl ?? process.env.OPERATOR_URL)
             : options.operatorUrl ?? process.env.OPERATOR_URL,
-        costLimitMicroUsdc: costLimit,
-        inferenceCostLimitMicroUsdc: inferenceCostLimit,
+        costLimitMicroUsd: costLimit,
+        inferenceCostLimitMicroUsd: inferenceCostLimit,
     };
 }
 
@@ -103,6 +109,16 @@ export class StellariumNode {
      */
     async start(fastify: FastifyInstance, options: StellariumNodeOptions): Promise<void> {
         const config = resolveConfig(options, this.resources);
+        if (hostsPaidFunctions(this.resources)) {
+            // Paid functions are paid to the node's organization, so the node must be enrolled before it serves them.
+            const enrollmentToken = options.enrollmentToken ?? process.env.ENROLLMENT_TOKEN;
+            try {
+                ({ organizationId: config.organizationId } = await new OperatorClient(config.operatorUrl, config.publicKey, config.privateKey).session(enrollmentToken));
+            } catch (error) {
+                const hint = enrollmentToken ? '' : '. Create an enrollment token for it at https://platform.stellarium.sh and set ENROLLMENT_TOKEN';
+                throw new Error(`${error instanceof Error ? error.message : String(error)}${hint}`, { cause: error });
+            }
+        }
         const db = await openDatabase(options.databasePath ?? DEFAULT_DATABASE_PATH);
         fastify.addHook('onClose', async () => db.close());
 

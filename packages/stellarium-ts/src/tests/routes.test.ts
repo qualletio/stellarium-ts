@@ -11,7 +11,7 @@ import { CombinationResourceInvoker, type InferencePaymentVoucher, inferenceVouc
 import { resourceAnnouncementPayload, type StellariumResource } from "../resource/repository.js";
 import routes from "../routes.js";
 import { createService, type NodeConfig, type Service } from "../service.js";
-import { COST, generateBase64KeyPair, INFERENCE_RATES, modelResource, RECIPIENT, temperatureSource, testConfig, weatherResource } from "./helpers.js";
+import { COST, generateBase64KeyPair, INFERENCE_RATES, modelResource, ORGANIZATION, temperatureSource, testConfig, weatherResource } from "./helpers.js";
 
 const parameters = [{ name: "city", value: "Oslo" }];
 const inMinutes = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
@@ -26,13 +26,17 @@ describe("routes", () => {
     let config: NodeConfig;
     let service: Service;
     let fastify: FastifyInstance;
-    let settlePayment: ReturnType<typeof vi.spyOn>;
+    let authorize: ReturnType<typeof vi.spyOn>;
+    let capture: ReturnType<typeof vi.spyOn>;
+    let release: ReturnType<typeof vi.spyOn>;
 
     beforeEach(async () => {
         db = await openDatabase(":memory:");
         config = testConfig();
         service = createService(db, [weather], config);
-        settlePayment = vi.spyOn(service.operatorClient, "settlePayment").mockResolvedValue(undefined);
+        authorize = vi.spyOn(service.operatorClient, "authorize").mockResolvedValue({ ok: true });
+        capture = vi.spyOn(service.operatorClient, "capture").mockResolvedValue(undefined);
+        release = vi.spyOn(service.operatorClient, "release").mockResolvedValue(undefined);
 
         fastify = Fastify();
         await fastify.register(routes, { prefix: "/v1", service });
@@ -50,7 +54,7 @@ describe("routes", () => {
 
     describe("POST /v1/run/resource", () => {
         function voucherFor(functionName = "temperature", overrides: Partial<Omit<PaymentVoucher, "signature">> = {}): PaymentVoucher {
-            const voucher = callerInvoker.createPaymentVoucher(RECIPIENT, COST, weather.path, weather.name, functionName, parameters);
+            const voucher = callerInvoker.createPaymentVoucher(ORGANIZATION, COST, weather.path, weather.name, functionName, parameters);
             if (Object.keys(overrides).length === 0) {
                 return voucher;
             }
@@ -67,14 +71,34 @@ describe("routes", () => {
             });
         }
 
-        test("runs a paid function with a valid voucher and settles it", async () => {
+        test("authorizes a paid function's voucher, runs it, then captures it", async () => {
             const paymentVoucher = voucherFor();
             const response = await runResource({ paymentVoucher });
 
             expect(response.statusCode).toBe(200);
             expect(response.json()).toEqual({ value: 12, error: null });
+            expect(authorize).toHaveBeenCalledExactlyOnceWith(paymentVoucher);
             await flushSettlement();
-            expect(settlePayment).toHaveBeenCalledExactlyOnceWith({ voucher: paymentVoucher });
+            expect(capture).toHaveBeenCalledExactlyOnceWith({ voucher: paymentVoucher });
+            expect(release).not.toHaveBeenCalled();
+        });
+
+        test.each([
+            [402, "Insufficient balance"],
+            [403, "Payer organization is frozen"],
+            [503, "Payment operator is unavailable"],
+        ])("answers the operator's %i refusal without running the function", async (status, error) => {
+            authorize.mockResolvedValueOnce({ ok: false, status, error });
+            const exec = vi.spyOn(weather.functions[0]!, "exec");
+
+            const response = await runResource({ paymentVoucher: voucherFor() });
+
+            expect(response.statusCode).toBe(status);
+            expect(response.json()).toEqual({ error });
+            expect(exec).not.toHaveBeenCalled();
+            await flushSettlement();
+            expect(capture).not.toHaveBeenCalled();
+            expect(release).not.toHaveBeenCalled();
         });
 
         test("refuses a voucher from a blocked caller, even for an unrestricted function", async () => {
@@ -85,7 +109,7 @@ describe("routes", () => {
             expect(response.statusCode).toBe(403);
             expect(response.json()).toEqual({ error: "Caller is blocked" });
             await flushSettlement();
-            expect(settlePayment).not.toHaveBeenCalled();
+            expect(capture).not.toHaveBeenCalled();
         });
 
         test("accepts a voucher that pays more than the cost", async () => {
@@ -99,12 +123,12 @@ describe("routes", () => {
 
             expect(response.statusCode).toBe(402);
             await flushSettlement();
-            expect(settlePayment).not.toHaveBeenCalled();
+            expect(capture).not.toHaveBeenCalled();
         });
 
         test.each([
             ["pays less than the cost", { amount: COST - 1 }],
-            ["pays a different recipient", { recipientAddress: "11111111111111111111111111111111" }],
+            ["pays a different recipient", { recipientOrganizationId: "org_other" }],
             ["has expired", { expiresAt: new Date(Date.now() - 1000).toISOString() }],
             ["has an unparseable expiry", { expiresAt: "not-a-date" }],
         ])("rejects a voucher that %s", async (_, overrides) => {
@@ -113,7 +137,7 @@ describe("routes", () => {
             expect(response.statusCode).toBe(400);
             expect(response.json()).toEqual({ error: "Invalid payment voucher" });
             await flushSettlement();
-            expect(settlePayment).not.toHaveBeenCalled();
+            expect(capture).not.toHaveBeenCalled();
         });
 
         test("rejects a voucher whose parameters were tampered with", async () => {
@@ -123,7 +147,7 @@ describe("routes", () => {
         });
 
         test("rejects a voucher issued for a different function", async () => {
-            const paymentVoucher = callerInvoker.createPaymentVoucher(RECIPIENT, COST, weather.path, weather.name, "humidity", parameters);
+            const paymentVoucher = callerInvoker.createPaymentVoucher(ORGANIZATION, COST, weather.path, weather.name, "humidity", parameters);
             const response = await runResource({ paymentVoucher });
 
             expect(response.statusCode).toBe(400);
@@ -155,7 +179,7 @@ describe("routes", () => {
             expect(response.statusCode).toBe(200);
             expect(response.json()).toEqual({ value: 80, error: null });
             await flushSettlement();
-            expect(settlePayment).not.toHaveBeenCalled();
+            expect(capture).not.toHaveBeenCalled();
         });
 
         test("rejects an unknown function without settling the voucher", async () => {
@@ -164,16 +188,18 @@ describe("routes", () => {
             expect(response.statusCode).toBe(400);
             expect(response.json()).toEqual({ error: "Function not found" });
             await flushSettlement();
-            expect(settlePayment).not.toHaveBeenCalled();
+            expect(capture).not.toHaveBeenCalled();
         });
 
-        test("does not settle when the invoke returns an error", async () => {
+        test("releases the hold when the invoke returns an error", async () => {
             vi.spyOn(service.resourceInvoker, "invoke").mockResolvedValueOnce({ value: null, error: { message: "boom" } });
-            const response = await runResource({ paymentVoucher: voucherFor() });
+            const paymentVoucher = voucherFor();
+            const response = await runResource({ paymentVoucher });
 
             expect(response.statusCode).toBe(200);
             await flushSettlement();
-            expect(settlePayment).not.toHaveBeenCalled();
+            expect(capture).not.toHaveBeenCalled();
+            expect(release).toHaveBeenCalledExactlyOnceWith(paymentVoucher);
         });
 
         test("rejects an unknown resource", async () => {
@@ -344,7 +370,7 @@ describe("routes", () => {
                 parameters: [{ name: "city", type: "string" }],
                 returnType: "string",
                 exec: async () => "sunny",
-                paymentManifest: { costMicroUsdc: 500, recipientAddress: RECIPIENT },
+                paymentManifest: { costMicroUsd: 500, recipientOrganizationId: ORGANIZATION },
             }],
         });
 
@@ -372,7 +398,7 @@ describe("routes", () => {
             const resources = (await fastify.inject({ method: "GET", url: "/v1/resources" })).json().resources;
             expect(resources.find((r: StellariumResource) => r.name === "Forecast")).toMatchObject({
                 baseUrl: peer.baseUrl,
-                functions: [{ name: "tomorrow", paymentManifest: { costMicroUsdc: 500, recipientAddress: RECIPIENT } }],
+                functions: [{ name: "tomorrow", paymentManifest: { costMicroUsd: 500, recipientOrganizationId: ORGANIZATION } }],
             });
         });
 
@@ -460,7 +486,7 @@ describe("restricted functions", () => {
         name: "Vault",
         functions: [
             { name: "open", parameters: [{ name: "city", type: "string" }], returnType: "int32", exec: async () => 7, restricted: true },
-            { name: "premium", parameters: [{ name: "city", type: "string" }], returnType: "int32", exec: async () => 9, restricted: true, paymentManifest: { costMicroUsdc: COST, recipientAddress: RECIPIENT } },
+            { name: "premium", parameters: [{ name: "city", type: "string" }], returnType: "int32", exec: async () => 9, restricted: true, paymentManifest: { costMicroUsd: COST, recipientOrganizationId: ORGANIZATION } },
         ],
     };
     const call = (functionName: string) => ({ resourcePath: "com.example", resourceName: "Vault", functionName, parameters });
@@ -475,7 +501,9 @@ describe("restricted functions", () => {
     beforeEach(async () => {
         db = await openDatabase(":memory:");
         service = createService(db, [restricted], testConfig());
-        vi.spyOn(service.operatorClient, "settlePayment").mockResolvedValue(undefined);
+        vi.spyOn(service.operatorClient, "authorize").mockResolvedValue({ ok: true });
+        vi.spyOn(service.operatorClient, "capture").mockResolvedValue(undefined);
+        vi.spyOn(service.operatorClient, "release").mockResolvedValue(undefined);
         callerDb = await openDatabase(":memory:");
         callerGrants = new GrantService(new GrantRepository(callerDb), { baseUrl: "http://caller", ...caller });
         grant = await service.grantService.issue(caller.publicKey, [{ resourcePath: "com.example", resourceName: "Vault" }], { lifetimeMs: 3_600_000 });
@@ -618,11 +646,11 @@ describe("restricted functions", () => {
     });
 
     test("checks the authorization before the voucher, and needs both for a paid function", async () => {
-        const paymentVoucher = callerInvoker.createPaymentVoucher(RECIPIENT, COST, "com.example", "Vault", "premium", parameters);
+        const paymentVoucher = callerInvoker.createPaymentVoucher(ORGANIZATION, COST, "com.example", "Vault", "premium", parameters);
         const unauthorized = await runResource({ ...call("premium"), paymentVoucher });
         expect(unauthorized.statusCode).toBe(403);
         await new Promise((resolve) => setTimeout(resolve, 10));
-        expect(service.operatorClient.settlePayment).not.toHaveBeenCalled();
+        expect(service.operatorClient.authorize).not.toHaveBeenCalled();
 
         const unpaid = await runResource({ ...call("premium"), authorization: callerGrants.authorize(grant, call("premium")) });
         expect(unpaid.statusCode).toBe(402);
@@ -718,17 +746,21 @@ describe("inference functions", () => {
     // "Hello world!" is 3 input tokens by the fixture's estimator. 3 at $3/M plus 1,000 at $15/M, rounded up.
     const parameters = [{ name: "prompt", value: "Hello world!" }, { name: "maxTokens", value: 1000 }];
     const MAX_AMOUNT = 15_009;
-    const manifest = { ...INFERENCE_RATES, recipientAddress: RECIPIENT };
+    const manifest = { ...INFERENCE_RATES, recipientOrganizationId: ORGANIZATION };
 
     let db: Database;
     let service: Service;
     let fastify: FastifyInstance;
-    let settlePayment: ReturnType<typeof vi.spyOn>;
+    let authorize: ReturnType<typeof vi.spyOn>;
+    let capture: ReturnType<typeof vi.spyOn>;
+    let release: ReturnType<typeof vi.spyOn>;
 
     beforeEach(async () => {
         db = await openDatabase(":memory:");
         service = createService(db, [weather, model], testConfig());
-        settlePayment = vi.spyOn(service.operatorClient, "settlePayment").mockResolvedValue(undefined);
+        authorize = vi.spyOn(service.operatorClient, "authorize").mockResolvedValue({ ok: true });
+        capture = vi.spyOn(service.operatorClient, "capture").mockResolvedValue(undefined);
+        release = vi.spyOn(service.operatorClient, "release").mockResolvedValue(undefined);
         fastify = Fastify();
         await fastify.register(routes, { prefix: "/v1", service });
         await fastify.ready();
@@ -806,7 +838,7 @@ describe("inference functions", () => {
             expect(response.statusCode).toBe(200);
             expect(response.json()).toEqual({ value: "echo: Hello world!", error: null, usage: { inputTokens: 3, outputTokens: 1000 } });
             await flushSettlement();
-            expect(settlePayment).toHaveBeenCalledExactlyOnceWith({ voucher: paymentVoucher, usage: { inputTokens: 3, outputTokens: 1000 } });
+            expect(capture).toHaveBeenCalledExactlyOnceWith({ voucher: paymentVoucher, usage: { inputTokens: 3, outputTokens: 1000 } });
         });
 
         test("refuses a voucher below the estimator's requirement without running inference", async () => {
@@ -818,14 +850,14 @@ describe("inference functions", () => {
             expect(response.json()).toMatchObject({ requiredMaxAmount: MAX_AMOUNT });
             expect(exec).not.toHaveBeenCalled();
             await flushSettlement();
-            expect(settlePayment).not.toHaveBeenCalled();
+            expect(capture).not.toHaveBeenCalled();
         });
 
         test.each([
-            ["a different input rate", { inputCostMicroUsdcPerMillionTokens: 1 }],
-            ["a different output rate", { outputCostMicroUsdcPerMillionTokens: 1 }],
+            ["a different input rate", { inputCostMicroUsdPerMillionTokens: 1 }],
+            ["a different output rate", { outputCostMicroUsdPerMillionTokens: 1 }],
             ["a maxTokens other than the call's", { maxTokens: 999 }],
-            ["a different recipient", { recipientAddress: "11111111111111111111111111111111" }],
+            ["a different recipient", { recipientOrganizationId: "org_other" }],
         ])("rejects a voucher with %s", async (_, overrides) => {
             const response = await call("/v1/run/resource", { paymentVoucher: voucherFor("complete", overrides) });
 
@@ -834,7 +866,7 @@ describe("inference functions", () => {
         });
 
         test("rejects a fixed voucher for an inference function, and an inference voucher for a fixed function", async () => {
-            const fixed = callerInvoker.createPaymentVoucher(RECIPIENT, MAX_AMOUNT, model.path, model.name, "complete", parameters);
+            const fixed = callerInvoker.createPaymentVoucher(ORGANIZATION, MAX_AMOUNT, model.path, model.name, "complete", parameters);
             expect((await call("/v1/run/resource", { paymentVoucher: fixed })).statusCode).toBe(400);
 
             const weatherParameters = [{ name: "city", value: "Oslo" }];
@@ -851,27 +883,31 @@ describe("inference functions", () => {
 
             expect(response.json().usage).toEqual({ inputTokens: 3, outputTokens: 1000 });
             await flushSettlement();
-            expect(settlePayment).toHaveBeenCalledExactlyOnceWith({ voucher: paymentVoucher, usage: { inputTokens: 3, outputTokens: 1000 } });
+            expect(capture).toHaveBeenCalledExactlyOnceWith({ voucher: paymentVoucher, usage: { inputTokens: 3, outputTokens: 1000 } });
         });
 
-        test("does not settle a call that charges nothing", async () => {
+        test("releases the hold of a call that charges nothing", async () => {
             vi.spyOn(model.functions[0]!, "exec").mockResolvedValue({ value: "", usage: { inputTokens: 0, outputTokens: 0 } });
+            const paymentVoucher = voucherFor();
 
-            const response = await call("/v1/run/resource", { paymentVoucher: voucherFor() });
+            const response = await call("/v1/run/resource", { paymentVoucher });
 
             expect(response.statusCode).toBe(200);
             await flushSettlement();
-            expect(settlePayment).not.toHaveBeenCalled();
+            expect(capture).not.toHaveBeenCalled();
+            expect(release).toHaveBeenCalledExactlyOnceWith(paymentVoucher);
         });
 
-        test("does not settle when the function doesn't report usage", async () => {
+        test("releases the hold when the function doesn't report usage", async () => {
             vi.spyOn(model.functions[0]!, "exec").mockResolvedValue("no usage");
+            const paymentVoucher = voucherFor();
 
-            const response = await call("/v1/run/resource", { paymentVoucher: voucherFor() });
+            const response = await call("/v1/run/resource", { paymentVoucher });
 
             expect(response.json().error.message).toContain("must return { value, usage");
             await flushSettlement();
-            expect(settlePayment).not.toHaveBeenCalled();
+            expect(capture).not.toHaveBeenCalled();
+            expect(release).toHaveBeenCalledExactlyOnceWith(paymentVoucher);
         });
     });
 

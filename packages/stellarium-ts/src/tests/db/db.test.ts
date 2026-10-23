@@ -20,7 +20,7 @@ describe("openDatabase", () => {
         await (await openDatabase(filename)).close();
         const db = await openDatabase(filename);
 
-        expect(await db.get("PRAGMA user_version")).toEqual({ user_version: 5 });
+        expect(await db.get("PRAGMA user_version")).toEqual({ user_version: 6 });
         await db.close();
     });
 
@@ -71,7 +71,7 @@ describe("openDatabase", () => {
         await reopened.close();
     });
 
-    test("rebuilds a version 4 manifest table so inference functions can omit cost_micro_usdc", async () => {
+    test("rebuilds a version 4 manifest table into the micro-USD, organization-recipient schema", async () => {
         const filename = path.join(dir, "v4.db");
         const old = await open({ filename, driver: sqlite3.Database });
         await old.exec(`
@@ -85,8 +85,8 @@ describe("openDatabase", () => {
         const db = await openDatabase(filename);
         const functionColumns = await db.all<{ name: string }[]>("PRAGMA table_info(resource_function)");
         expect(functionColumns.map(column => column.name)).toContain("kind");
-        await db.run(`INSERT INTO resource_function_payment_manifest (resource_function_id, input_cost_micro_usdc_per_million_tokens,
-            output_cost_micro_usdc_per_million_tokens, recipient_address, created_at, updated_at) VALUES (1, 3, 15, 'r', 'now', 'now')`);
+        await db.run(`INSERT INTO resource_function_payment_manifest (resource_function_id, input_cost_micro_usd_per_million_tokens,
+            output_cost_micro_usd_per_million_tokens, recipient_organization_id, created_at, updated_at) VALUES (1, 3, 15, 'r', 'now', 'now')`);
         await db.close();
     });
 });

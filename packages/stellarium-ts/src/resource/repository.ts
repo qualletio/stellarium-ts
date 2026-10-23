@@ -4,19 +4,22 @@ import { Database } from "sqlite";
 import type { StoredPeer } from "../peer/repository.js";
 import { isInferenceManifest } from "./inference.js";
 
-/** A flat price per call. */
+/**
+ * A flat price per call. `recipientOrganizationId` is filled in by the hosting node when it advertises
+ * the function, from the organization it is enrolled in; resource authors leave it out.
+ */
 export interface StellariumFixedPaymentManifest {
     id?: number;
-    costMicroUsdc: number;
-    recipientAddress: string;
+    costMicroUsd: number;
+    recipientOrganizationId?: string;
 }
 
 /** Per-token pricing for an inference function. Either rate may be 0. */
 export interface StellariumInferencePaymentManifest {
     id?: number;
-    inputCostMicroUsdcPerMillionTokens: number;
-    outputCostMicroUsdcPerMillionTokens: number;
-    recipientAddress: string;
+    inputCostMicroUsdPerMillionTokens: number;
+    outputCostMicroUsdPerMillionTokens: number;
+    recipientOrganizationId?: string;
 }
 
 export type StellariumResourceFunctionPaymentManifest = StellariumFixedPaymentManifest | StellariumInferencePaymentManifest;
@@ -93,7 +96,8 @@ export class ResourceRepository {
     // The connection is shared, so transactions are serialized to keep them from nesting.
     private writes: Promise<unknown> = Promise.resolve();
 
-    constructor(private readonly db: Database, private resources: StellariumResource[] = [], private readonly baseUrl: string = '') {}
+    /** `organizationId` is the operator organization this node is enrolled in, which is paid for its functions. */
+    constructor(private readonly db: Database, private resources: StellariumResource[] = [], private readonly baseUrl: string = '', private readonly organizationId?: string) {}
 
     private serialize<T>(work: () => Promise<T>): Promise<T> {
         const run = this.writes.then(work, work);
@@ -215,13 +219,13 @@ export class ResourceRepository {
             if (manifest) {
                 const inference = isInferenceManifest(manifest);
                 await this.db.run(
-                    'INSERT INTO resource_function_payment_manifest (resource_function_id, cost_micro_usdc, input_cost_micro_usdc_per_million_tokens, output_cost_micro_usdc_per_million_tokens, recipient_address, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    'INSERT INTO resource_function_payment_manifest (resource_function_id, cost_micro_usd, input_cost_micro_usd_per_million_tokens, output_cost_micro_usd_per_million_tokens, recipient_organization_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
                     [
                         functionId,
-                        inference ? null : manifest.costMicroUsdc,
-                        inference ? manifest.inputCostMicroUsdcPerMillionTokens : null,
-                        inference ? manifest.outputCostMicroUsdcPerMillionTokens : null,
-                        manifest.recipientAddress,
+                        inference ? null : manifest.costMicroUsd,
+                        inference ? manifest.inputCostMicroUsdPerMillionTokens : null,
+                        inference ? manifest.outputCostMicroUsdPerMillionTokens : null,
+                        manifest.recipientOrganizationId ?? null,
                         createdAt,
                         createdAt,
                     ]
@@ -272,8 +276,15 @@ export class ResourceRepository {
         }
     }
 
+    /** This node's resources, with its base URL and its organization as the recipient of every paid function. */
     async getInternalResources(): Promise<StellariumResource[]> {
-        return this.resources.map(r => ({ ...r, baseUrl: this.baseUrl }));
+        return this.resources.map(r => ({
+            ...r,
+            baseUrl: this.baseUrl,
+            functions: r.functions.map((fn: StellariumResourceFunction) => fn.paymentManifest
+                ? { ...fn, paymentManifest: { ...fn.paymentManifest, recipientOrganizationId: this.organizationId } }
+                : fn),
+        }));
     }
 
     /** Learned resources in insertion order. A negative `limit` means no limit. */
@@ -347,18 +358,18 @@ export class ResourceRepository {
         if (!result) {
             return undefined;
         }
-        if (result.cost_micro_usdc === null) {
+        if (result.cost_micro_usd === null) {
             return {
                 id: result.id,
-                inputCostMicroUsdcPerMillionTokens: result.input_cost_micro_usdc_per_million_tokens as number,
-                outputCostMicroUsdcPerMillionTokens: result.output_cost_micro_usdc_per_million_tokens as number,
-                recipientAddress: result.recipient_address as string,
+                inputCostMicroUsdPerMillionTokens: result.input_cost_micro_usd_per_million_tokens as number,
+                outputCostMicroUsdPerMillionTokens: result.output_cost_micro_usd_per_million_tokens as number,
+                recipientOrganizationId: result.recipient_organization_id ?? undefined,
             };
         }
         return {
             id: result.id,
-            costMicroUsdc: result.cost_micro_usdc as number,
-            recipientAddress: result.recipient_address as string,
+            costMicroUsd: result.cost_micro_usd as number,
+            recipientOrganizationId: result.recipient_organization_id ?? undefined,
         };
     }
 

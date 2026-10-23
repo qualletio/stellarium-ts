@@ -8,7 +8,7 @@ export interface PaymentVoucher {
     requestId: string;
     invocationId: string;
     amount: number;
-    recipientAddress: string;
+    recipientOrganizationId: string;
     signature: string;
     expiresAt: string;
     invocationHash: string;
@@ -25,10 +25,10 @@ export interface InferencePaymentVoucher {
     requestId: string;
     invocationId: string;
     maxAmount: number;
-    inputCostMicroUsdcPerMillionTokens: number;
-    outputCostMicroUsdcPerMillionTokens: number;
+    inputCostMicroUsdPerMillionTokens: number;
+    outputCostMicroUsdPerMillionTokens: number;
     maxTokens: number;
-    recipientAddress: string;
+    recipientOrganizationId: string;
     signature: string;
     expiresAt: string;
     invocationHash: string;
@@ -60,8 +60,8 @@ export function invocationHash(
  * Key order is part of the signed bytes.
  */
 export function paymentVoucherPayload(voucher: Omit<PaymentVoucher, "signature">) {
-    const { requestId, invocationId, amount, recipientAddress, expiresAt, invocationHash, publicKey } = voucher;
-    return { requestId, invocationId, amount, recipientAddress, expiresAt, invocationHash, publicKey };
+    const { requestId, invocationId, amount, recipientOrganizationId, expiresAt, invocationHash, publicKey } = voucher;
+    return { requestId, invocationId, amount, recipientOrganizationId, expiresAt, invocationHash, publicKey };
 }
 
 /**
@@ -69,8 +69,8 @@ export function paymentVoucherPayload(voucher: Omit<PaymentVoucher, "signature">
  * Key order is part of the signed bytes.
  */
 export function inferenceVoucherPayload(voucher: Omit<InferencePaymentVoucher, "signature">) {
-    const { kind, requestId, invocationId, maxAmount, inputCostMicroUsdcPerMillionTokens, outputCostMicroUsdcPerMillionTokens, maxTokens, recipientAddress, expiresAt, invocationHash, publicKey } = voucher;
-    return { kind, requestId, invocationId, maxAmount, inputCostMicroUsdcPerMillionTokens, outputCostMicroUsdcPerMillionTokens, maxTokens, recipientAddress, expiresAt, invocationHash, publicKey };
+    const { kind, requestId, invocationId, maxAmount, inputCostMicroUsdPerMillionTokens, outputCostMicroUsdPerMillionTokens, maxTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey } = voucher;
+    return { kind, requestId, invocationId, maxAmount, inputCostMicroUsdPerMillionTokens, outputCostMicroUsdPerMillionTokens, maxTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey };
 }
 
 export function isInferenceVoucher(voucher: PaymentVoucher | InferencePaymentVoucher): voucher is InferencePaymentVoucher {
@@ -117,15 +117,15 @@ export class CombinationResourceInvoker implements ResourceInvoker {
 
     /**
      * Without a `grantService`, calls to restricted remote functions fail.
-     * `inferenceCostLimitMicroUsdc` caps an inference voucher's `maxAmount`, and defaults to `costLimitMicroUsdc`.
+     * `inferenceCostLimitMicroUsd` caps an inference voucher's `maxAmount`, and defaults to `costLimitMicroUsd`.
      */
     constructor(
         private readonly resourceRepository: ResourceRepository,
-        private readonly costLimitMicroUsdc: number,
+        private readonly costLimitMicroUsd: number,
         private readonly publicKey: string,
         private readonly privateKey: string,
         private readonly grantService?: GrantService,
-        private readonly inferenceCostLimitMicroUsdc: number = costLimitMicroUsdc,
+        private readonly inferenceCostLimitMicroUsd: number = costLimitMicroUsd,
     ) {}
     /**
      * Invoke a function on a resource.
@@ -167,11 +167,14 @@ export class CombinationResourceInvoker implements ResourceInvoker {
 
             const manifest = resourceFunction.paymentManifest;
             const inference = isInferenceFunction(resourceFunction);
+            if (manifest && !manifest.recipientOrganizationId) {
+                return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: its payment manifest names no recipient organization` } };
+            }
             if (manifest && inference) {
                 console.log(`Resource function ${resource.name}.${functionName} is a paid inference function, creating payment voucher...`);
                 // Peers' manifests aren't validated on receipt.
-                if (!isInferenceManifest(manifest) || !Number.isSafeInteger(manifest.inputCostMicroUsdcPerMillionTokens) || manifest.inputCostMicroUsdcPerMillionTokens < 0
-                    || !Number.isSafeInteger(manifest.outputCostMicroUsdcPerMillionTokens) || manifest.outputCostMicroUsdcPerMillionTokens < 0) {
+                if (!isInferenceManifest(manifest) || !Number.isSafeInteger(manifest.inputCostMicroUsdPerMillionTokens) || manifest.inputCostMicroUsdPerMillionTokens < 0
+                    || !Number.isSafeInteger(manifest.outputCostMicroUsdPerMillionTokens) || manifest.outputCostMicroUsdPerMillionTokens < 0) {
                     return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: its payment manifest has no valid per-token pricing` } };
                 }
                 const maxTokens = parseMaxTokens(parameters);
@@ -186,8 +189,8 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 if (inferenceCharge(manifest, estimate.inputTokens, maxTokens) !== estimate.maxAmount) {
                     return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: the provider's estimate doesn't match its advertised rates` } };
                 }
-                if (estimate.maxAmount > this.inferenceCostLimitMicroUsdc) {
-                    throw new Error(`Function ${functionName} may cost up to ${estimate.maxAmount} micro-USDC, which exceeds the inference cost limit of ${this.inferenceCostLimitMicroUsdc} micro-USDC`);
+                if (estimate.maxAmount > this.inferenceCostLimitMicroUsd) {
+                    throw new Error(`Function ${functionName} may cost up to ${estimate.maxAmount} micro-USD, which exceeds the inference cost limit of ${this.inferenceCostLimitMicroUsd} micro-USD`);
                 }
                 requestBody.paymentVoucher = this.createInferenceVoucher(manifest, estimate.maxAmount, maxTokens, resource.path, resource.name, functionName, parameters);
             } else if (manifest) {
@@ -195,10 +198,10 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 if (isInferenceManifest(manifest)) {
                     return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: it has per-token pricing but isn't an inference function` } };
                 }
-                if (manifest.costMicroUsdc > this.costLimitMicroUsdc) {
-                    throw new Error(`Function ${functionName} cost ${manifest.costMicroUsdc} micro-USDC, which exceeds the cost limit of ${this.costLimitMicroUsdc} micro-USDC`);
+                if (manifest.costMicroUsd > this.costLimitMicroUsd) {
+                    throw new Error(`Function ${functionName} cost ${manifest.costMicroUsd} micro-USD, which exceeds the cost limit of ${this.costLimitMicroUsd} micro-USD`);
                 }
-                requestBody.paymentVoucher = this.createPaymentVoucher(manifest.recipientAddress, manifest.costMicroUsdc, resource.path, resource.name, functionName, parameters);
+                requestBody.paymentVoucher = this.createPaymentVoucher(manifest.recipientOrganizationId!, manifest.costMicroUsd, resource.path, resource.name, functionName, parameters);
             }
 
             // The voucher is created once and reused on every attempt, so the operator's
@@ -263,13 +266,13 @@ export class CombinationResourceInvoker implements ResourceInvoker {
         return { inputTokens: inputTokens!, maxAmount: maxAmount! };
     }
 
-    createPaymentVoucher(recipientAddress: string, amount: number, resourcePath: string, resourceName: string, functionName: string, parameters: ResourceFunctionCallParameter[]): PaymentVoucher {
+    createPaymentVoucher(recipientOrganizationId: string, amount: number, resourcePath: string, resourceName: string, functionName: string, parameters: ResourceFunctionCallParameter[]): PaymentVoucher {
         const requestId = crypto.randomUUID();
         const invocationId = crypto.randomUUID();
         const expiresAt = new Date(Date.now() + PAYMENT_VOUCHER_LIFETIME_MS).toISOString();
         const hash = invocationHash(resourcePath, resourceName, functionName, parameters);
-        const signature = signData(paymentVoucherPayload({ requestId, invocationId, amount, recipientAddress, expiresAt, invocationHash: hash, publicKey: this.publicKey }), this.privateKey);
-        return { requestId, invocationId, amount, recipientAddress, signature, expiresAt, invocationHash: hash, publicKey: this.publicKey };
+        const signature = signData(paymentVoucherPayload({ requestId, invocationId, amount, recipientOrganizationId, expiresAt, invocationHash: hash, publicKey: this.publicKey }), this.privateKey);
+        return { requestId, invocationId, amount, recipientOrganizationId, signature, expiresAt, invocationHash: hash, publicKey: this.publicKey };
     }
 
     createInferenceVoucher(manifest: StellariumInferencePaymentManifest, maxAmount: number, maxTokens: number, resourcePath: string, resourceName: string, functionName: string, parameters: ResourceFunctionCallParameter[]): InferencePaymentVoucher {
@@ -278,10 +281,10 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             requestId: crypto.randomUUID(),
             invocationId: crypto.randomUUID(),
             maxAmount,
-            inputCostMicroUsdcPerMillionTokens: manifest.inputCostMicroUsdcPerMillionTokens,
-            outputCostMicroUsdcPerMillionTokens: manifest.outputCostMicroUsdcPerMillionTokens,
+            inputCostMicroUsdPerMillionTokens: manifest.inputCostMicroUsdPerMillionTokens,
+            outputCostMicroUsdPerMillionTokens: manifest.outputCostMicroUsdPerMillionTokens,
             maxTokens,
-            recipientAddress: manifest.recipientAddress,
+            recipientOrganizationId: manifest.recipientOrganizationId!,
             expiresAt: new Date(Date.now() + INFERENCE_VOUCHER_LIFETIME_MS).toISOString(),
             invocationHash: invocationHash(resourcePath, resourceName, functionName, parameters),
             publicKey: this.publicKey,

@@ -1,18 +1,16 @@
-import type { PublicKey, Signer } from '@solana/web3.js';
 import type { Database } from './db/database.js';
-import { type EscrowConnection, EscrowService, type SettlementPolicy } from './escrow/escrowService.js';
-import { PaymentService } from './paymentService.js';
-import { ReceiptRepository } from './repository.js';
+import { OrganizationService } from './organizations.js';
+import { type PaymentPolicy, PaymentService } from './payments/paymentService.js';
 
 export interface Service {
-    escrowService: EscrowService;
-    paymentService: PaymentService;
+    organizations: OrganizationService;
+    payments: PaymentService;
 }
 
-export function createService(db: Database, escrowProgramId: PublicKey, authority: Signer, feeRecipient: PublicKey, mint: PublicKey, connection: EscrowConnection, policy: SettlementPolicy): Service {
-    const receipts = new ReceiptRepository(db);
+export function createService(db: Database, policy: PaymentPolicy): Service {
+    const organizations = new OrganizationService(db);
     return {
-        escrowService: new EscrowService(receipts, escrowProgramId, authority, feeRecipient, mint, connection, policy),
-        paymentService: new PaymentService(receipts),
+        organizations,
+        payments: new PaymentService(db, organizations, policy),
     };
 }

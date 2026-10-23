@@ -20,8 +20,7 @@ const weather: StellariumResource = {
         return city === "Oslo" ? 12 : 20;
       },
       paymentManifest: {
-        costMicroUsdc: 10000,
-        recipientAddress: process.env.RECIPIENT_ADDRESS ?? process.env.RECEIPIENT_ADDRESS!,
+        costMicroUsd: 10000,
       },
     },
   ],
@@ -50,9 +49,8 @@ const echo: StellariumResource = {
         return { value, usage: { inputTokens: countTokens(prompt(args)), outputTokens: countTokens(value) } };
       },
       paymentManifest: {
-        inputCostMicroUsdcPerMillionTokens: 3_000_000,
-        outputCostMicroUsdcPerMillionTokens: 15_000_000,
-        recipientAddress: process.env.RECIPIENT_ADDRESS ?? process.env.RECEIPIENT_ADDRESS!,
+        inputCostMicroUsdPerMillionTokens: 3_000_000,
+        outputCostMicroUsdPerMillionTokens: 15_000_000,
       },
     },
   ],

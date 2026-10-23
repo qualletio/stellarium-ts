@@ -20,10 +20,15 @@ export interface NodeConfig {
     apiKey?: string;
     /** Operator base URL, including `/v1`. Required when the node hosts paid functions. */
     operatorUrl?: string;
+    /**
+     * The operator organization this node is enrolled in, which is paid for its functions.
+     * `StellariumNode.start` asks the operator for it when the node hosts paid functions.
+     */
+    organizationId?: string;
     /** Most this node will pay for one remote call. */
-    costLimitMicroUsdc: number;
+    costLimitMicroUsd: number;
     /** Most this node will sign for in one remote inference call. */
-    inferenceCostLimitMicroUsdc: number;
+    inferenceCostLimitMicroUsd: number;
 }
 
 export interface Service {
@@ -42,15 +47,15 @@ export interface ServiceOptions {
 }
 
 export function createService(db: Database, resources: StellariumResource[], config: NodeConfig, options: ServiceOptions = {}): Service {
-    const resourceRepository = new ResourceRepository(db, resources, config.baseUrl);
+    const resourceRepository = new ResourceRepository(db, resources, config.baseUrl, config.organizationId);
 
     const resourceResolver = new CombinationResourceResolver(resourceRepository);
 
     const grantService = new GrantService(new GrantRepository(db), config, options.approveGrant);
 
-    const resourceInvoker = new CombinationResourceInvoker(resourceRepository, config.costLimitMicroUsdc, config.publicKey, config.privateKey, grantService, config.inferenceCostLimitMicroUsdc);
+    const resourceInvoker = new CombinationResourceInvoker(resourceRepository, config.costLimitMicroUsd, config.publicKey, config.privateKey, grantService, config.inferenceCostLimitMicroUsd);
 
-    const operatorClient = new OperatorClient(config.operatorUrl);
+    const operatorClient = new OperatorClient(config.operatorUrl, config.publicKey, config.privateKey);
 
     return {
         config,

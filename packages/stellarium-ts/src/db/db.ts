@@ -10,8 +10,10 @@ export const DEFAULT_DATABASE_PATH = './requestscript.db';
  * Version 3 added `resource.website` and the `description` columns of the resource tables.
  * Version 4 renamed `resource_function_payment_manifest.cost_lamports` to `cost_micro_usdc` (payments moved to USDC).
  * Version 5 added `resource_function.kind` and per-token inference pricing, which made `cost_micro_usdc` nullable.
+ * Version 6 moved payments to Stripe: `*_micro_usdc` columns became `*_micro_usd`, and `recipient_address`
+ * became `recipient_organization_id`.
  */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 /** Opens (or creates) the node database and brings its schema up to date. Pass ':memory:' for tests. */
 export async function openDatabase(filename: string = DEFAULT_DATABASE_PATH): Promise<Database> {
@@ -97,10 +99,11 @@ export async function createTables(db: Database) {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             resource_function_id INTEGER NOT NULL,
             -- Null for inference functions, which are priced per million tokens instead.
-            cost_micro_usdc INTEGER,
-            input_cost_micro_usdc_per_million_tokens INTEGER,
-            output_cost_micro_usdc_per_million_tokens INTEGER,
-            recipient_address TEXT NOT NULL,
+            cost_micro_usd INTEGER,
+            input_cost_micro_usd_per_million_tokens INTEGER,
+            output_cost_micro_usd_per_million_tokens INTEGER,
+            -- The hosting node's organization. Null only if a peer advertised the manifest without one.
+            recipient_organization_id TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
 

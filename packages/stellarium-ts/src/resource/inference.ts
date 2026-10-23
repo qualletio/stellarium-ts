@@ -20,12 +20,12 @@ export interface InferenceResult {
 
 /** The per-million-token rates a charge is computed from. */
 export interface InferenceRates {
-    inputCostMicroUsdcPerMillionTokens: number;
-    outputCostMicroUsdcPerMillionTokens: number;
+    inputCostMicroUsdPerMillionTokens: number;
+    outputCostMicroUsdPerMillionTokens: number;
 }
 
 export function isInferenceManifest(manifest: StellariumResourceFunctionPaymentManifest | undefined): manifest is StellariumInferencePaymentManifest {
-    return typeof manifest === 'object' && manifest !== null && 'inputCostMicroUsdcPerMillionTokens' in manifest;
+    return typeof manifest === 'object' && manifest !== null && 'inputCostMicroUsdPerMillionTokens' in manifest;
 }
 
 export function isInferenceFunction(fn: Pick<StellariumResourceFunction, 'kind'>): boolean {
@@ -37,13 +37,13 @@ function isNonnegativeSafeInteger(value: unknown): value is number {
 }
 
 /**
- * Micro-USDC owed for `inputTokens` and `outputTokens` at `rates`, rounded up.
+ * Micro-USD owed for `inputTokens` and `outputTokens` at `rates`, rounded up.
  * Computed exactly in BigInt. Throws if the charge isn't a safe integer.
  * The operator keeps a copy (apps/operator/src/inference.ts) that must stay in sync.
  */
 export function inferenceCharge(rates: InferenceRates, inputTokens: number, outputTokens: number): number {
-    const micros = BigInt(inputTokens) * BigInt(rates.inputCostMicroUsdcPerMillionTokens)
-        + BigInt(outputTokens) * BigInt(rates.outputCostMicroUsdcPerMillionTokens);
+    const micros = BigInt(inputTokens) * BigInt(rates.inputCostMicroUsdPerMillionTokens)
+        + BigInt(outputTokens) * BigInt(rates.outputCostMicroUsdPerMillionTokens);
     const charge = (micros + 999_999n) / 1_000_000n;
     if (charge > BigInt(Number.MAX_SAFE_INTEGER)) {
         throw new Error('Inference charge exceeds the largest safe integer');
@@ -93,9 +93,9 @@ export function validateInferenceFunction(fn: StellariumResourceFunction): void 
         return;
     }
     if (!isInferenceManifest(fn.paymentManifest)
-        || !isNonnegativeSafeInteger(fn.paymentManifest.inputCostMicroUsdcPerMillionTokens)
-        || !isNonnegativeSafeInteger(fn.paymentManifest.outputCostMicroUsdcPerMillionTokens)) {
-        throw new Error(`Inference function ${fn.name} must price input and output tokens as nonnegative integer micro-USDC per million tokens`);
+        || !isNonnegativeSafeInteger(fn.paymentManifest.inputCostMicroUsdPerMillionTokens)
+        || !isNonnegativeSafeInteger(fn.paymentManifest.outputCostMicroUsdPerMillionTokens)) {
+        throw new Error(`Inference function ${fn.name} must price input and output tokens as nonnegative integer micro-USD per million tokens`);
     }
     if (typeof fn.estimateInputTokens !== 'function') {
         throw new Error(`Paid inference function ${fn.name} must declare estimateInputTokens`);
