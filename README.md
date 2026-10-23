@@ -81,9 +81,10 @@ await node.start(fastify, {
 | `publicKey`         | `SIGNING_PUBLIC_KEY`                | This node's signing public key                           |
 | `privateKey`        | `SIGNING_PRIVATE_KEY`               | This node's signing private key                          |
 | `apiKey`            | `API_KEY`                           | Bearer token for `POST /v1/run`                          |
-| `operatorUrl`       | `OPERATOR_URL`                      | Operator to settle payments with                         |
-| `costLimitMicroUsdc` | `COST_LIMIT_MICRO_USDC`, then `10000` | Most this node pays for one remote call, in micro-USDC  |
-| `inferenceCostLimitMicroUsdc` | `INFERENCE_COST_LIMIT_MICRO_USDC`, then `costLimitMicroUsdc` | Most this node signs for in one remote inference call (its voucher's `maxAmount`) |
+| `operatorUrl`       | `OPERATOR_URL`                      | Operator that moves money for paid calls                 |
+| `enrollmentToken`   | `ENROLLMENT_TOKEN`                  | One-time token that enrolls this node in an organization ([Payments](#payments)) |
+| `costLimitMicroUsd` | `COST_LIMIT_MICRO_USD`, then `10000` | Most this node pays for one remote call, in micro-USD    |
+| `inferenceCostLimitMicroUsd` | `INFERENCE_COST_LIMIT_MICRO_USD`, then `costLimitMicroUsd` | Most this node signs for in one remote inference call (its voucher's `maxAmount`) |
 | `databasePath`      | `./requestscript.db`                | SQLite file. `:memory:` keeps everything in memory       |
 
 `start` resolves once the node is listening and, with `startingPeer`, once it has joined the network. It rejects if it can't listen, if a required setting is missing, or if bootstrapping fails.
@@ -97,8 +98,9 @@ Importing `StellariumNode` loads [dotenv](https://github.com/motdotla/dotenv), s
 | `SIGNING_PUBLIC_KEY`  | Required. The base64url ED25519 public key used to verify data for publishing to peers. Must be paired with the private key.                                                                      |
 | `API_KEY`             | Bearer token for `POST /v1/run`. When unset, `/v1/run` rejects every request.                                                                                                                     |
 | `OPERATOR_URL`        | Operator base URL including `/v1`. Required when the node hosts paid functions.                                                                                                                   |
-| `COST_LIMIT_MICRO_USDC` | Most this node pays for one remote call, in micro-USDC.                                                                                                                                         |
-| `INFERENCE_COST_LIMIT_MICRO_USDC` | Most this node signs for in one remote inference call, in micro-USDC. Defaults to the cost limit.                                                                                  |
+| `ENROLLMENT_TOKEN`    | One-time token from the [Stellarium Platform](https://platform.stellarium.sh) that enrolls this node in an organization at startup. Only needed until the node is enrolled.                       |
+| `COST_LIMIT_MICRO_USD` | Most this node pays for one remote call, in micro-USD.                                                                                                                                          |
+| `INFERENCE_COST_LIMIT_MICRO_USD` | Most this node signs for in one remote inference call, in micro-USD. Defaults to the cost limit.                                                                                    |
 
 Signing keys can be generated with the following script:
 
@@ -176,22 +178,28 @@ curl -X POST http://127.0.0.1:3000/v1/run \
 
 ### Payments
 
-A function with a `paymentManifest` (`costMicroUsdc`, `recipientAddress`) is paid. Payments are in USDC, and every amount is an integer number of micro-USDC (1 USDC = 1,000,000), so `costMicroUsdc: 10000` is $0.01. `recipientAddress` is the provider's Solana wallet, and it must already have a USDC associated token account: the operator pays into that account and won't create it. Until it exists, settlement fails with `422` after the call has run, so create it before hosting paid functions (`spl-token create-account <USDC_MINT> --owner <recipientAddress>`). A caller attaches a `paymentVoucher` signed with its key, as long as the cost is within its `costLimitMicroUsdc`. The hosting node runs the function only if the voucher:
+A function with a `paymentManifest` (`costMicroUsd`) is paid. Every amount is an integer number of micro-USD (1 USD = 1,000,000), so `costMicroUsd: 10000` is $0.01.
 
-- is bound to this exact call (resource, function and parameters),
-- pays at least `costMicroUsdc` to `recipientAddress`,
-- has not expired, and
-- has a valid signature.
+Callers pay from their **organization's** prepaid balance, bought by card, and providers are paid out through Stripe Connect. An operator service holds the balances and moves the money. Organizations manage credits, nodes and payouts on the [Stellarium Platform](https://platform.stellarium.sh).
 
-A paid call without a voucher responds `402`; an invalid voucher responds `400`. After the function runs without an error, the node sends the voucher to the operator to settle. Vouchers sent to free functions are ignored.
+A node joins an organization with a one-time enrollment token, created on the platform's Nodes page. Pass it as `enrollmentToken`, or set `ENROLLMENT_TOKEN`. The node presents it to the operator at startup, and after that needs only its signing key. A node that hosts paid functions refuses to start until it's enrolled, and it adds its organization to its paid functions' manifests as `recipientOrganizationId`. Resource authors don't name a recipient.
 
-The operator doesn't pay each voucher on-chain, since a call can cost less than a Solana transaction. It records the voucher as owed, as long as the caller's escrow covers it on top of everything the caller already owes, and pays a caller's vouchers to one provider together in a single withdrawal. That happens once the 20% protocol fee on their total is at least ten times the estimated transaction fee. Until then the vouchers stay owed, however old they are, and later calls raise the total.
+A caller attaches a `paymentVoucher` signed with its key, as long as the cost is within its `costLimitMicroUsd`. The hosting node runs the function only if:
+
+- the voucher is bound to this exact call (resource, function and parameters),
+- it pays at least `costMicroUsd` to the hosting node's organization,
+- it has not expired, and has a valid signature, and
+- the operator **authorizes** it, holding the amount on the caller organization's balance.
+
+A paid call without a voucher responds `402`; an invalid voucher responds `400`. If the operator refuses the hold, the function doesn't run and the caller gets the operator's status: `402` for an unenrolled caller or an insufficient balance, `403` for a revoked node or frozen organization, `422` if the caller and provider are the same organization or the provider can't receive payouts yet, and `503` if the operator can't be reached. After the call, the node **captures** the voucher, which charges the caller and credits the provider's organization less a 20% platform fee. If the function returned an error, it **releases** the hold instead. Vouchers sent to free functions are ignored.
+
+See [`apps/operator/README.md`](apps/operator/README.md) for the operator's routes, top-ups and payouts, and the [Payments](https://docs.stellarium.sh/concepts/payments) page of the docs for the full flow.
 
 ### Inference functions
 
 An inference function runs AI inference, so its cost depends on how many tokens a call uses. Declare one with `kind: "inference"`. It must take a `maxTokens: int32` parameter, the most output tokens the caller allows, and it may take any others. Its `exec` returns `{ value, usage: { inputTokens, outputTokens } }`. Scripts see only `value`.
 
-A paid inference function is priced per token rather than per call. Its `paymentManifest` has `inputCostMicroUsdcPerMillionTokens`, `outputCostMicroUsdcPerMillionTokens` and `recipientAddress`, and either rate may be `0`. It must also declare `estimateInputTokens`, which counts the input tokens a call will use. Like `exec`, the estimator runs only on the hosting node, so it can call a token-counting API such as Anthropic's. `start` throws if an inference function is declared without these.
+A paid inference function is priced per token rather than per call. Its `paymentManifest` has `inputCostMicroUsdPerMillionTokens` and `outputCostMicroUsdPerMillionTokens`, and either rate may be `0`. It must also declare `estimateInputTokens`, which counts the input tokens a call will use. Like `exec`, the estimator runs only on the hosting node, so it can call a token-counting API such as Anthropic's. `start` throws if an inference function is declared without these.
 
 ```typescript
 {
@@ -205,19 +213,18 @@ A paid inference function is priced per token rather than per call. Its `payment
     return { value: text, usage: { inputTokens, outputTokens } };
   },
   paymentManifest: {
-    inputCostMicroUsdcPerMillionTokens: 3_000_000,   // $3 per million input tokens
-    outputCostMicroUsdcPerMillionTokens: 15_000_000, // $15 per million output tokens
-    recipientAddress: "<provider wallet>",
+    inputCostMicroUsdPerMillionTokens: 3_000_000,   // $3 per million input tokens
+    outputCostMicroUsdPerMillionTokens: 15_000_000, // $15 per million output tokens
   },
 }
 ```
 
-A call's charge is `ceil((inputTokens × inputRate + outputTokens × outputRate) / 1,000,000)` micro-USDC. Both nodes and the operator are protected from bad estimates:
+A call's charge is `ceil((inputTokens × inputRate + outputTokens × outputRate) / 1,000,000)` micro-USD. Both nodes and the operator are protected from bad estimates:
 
 1. The caller posts the call to the provider's `POST /v1/run/resource/estimate`. The provider runs its estimator and answers `{ inputTokens, maxAmount }`, where `maxAmount` is the charge for those input tokens plus `maxTokens` output tokens.
-2. The caller checks that `maxAmount` follows from the advertised rates and is within its `inferenceCostLimitMicroUsdc`. It then signs an inference voucher (`kind: "inference"`) for `maxAmount`, both rates and `maxTokens`.
+2. The caller checks that `maxAmount` follows from the advertised rates and is within its `inferenceCostLimitMicroUsd`. It then signs an inference voucher (`kind: "inference"`) for `maxAmount`, both rates and `maxTokens`.
 3. The provider checks the voucher as it would a fixed one, plus that its rates match the manifest and its `maxTokens` matches the call. It runs the estimator again and refuses with `402` and `requiredMaxAmount` if the voucher doesn't cover it, so inference never runs unpaid.
-4. After the call, the provider sends the voucher and the reported usage to the operator, with output tokens capped at `maxTokens`. The operator charges the usage at the signed rates, never more than `maxAmount`, and settles it like any other voucher. A call that charges nothing isn't settled.
+4. The provider authorizes the voucher, which holds `maxAmount` on the caller's balance. After the call, it captures the reported usage, with output tokens capped at `maxTokens`. The operator charges the usage at the signed rates, never more than the hold. A call that charges nothing releases the hold.
 
 An inference function without a `paymentManifest` is free. It still needs `maxTokens`, but no estimator.
 
@@ -323,7 +330,6 @@ pnpm install
 pnpm build         # tsc to dist/; also runs before pack
 pnpm check-types   # after build: the operator checks against stellarium-ts's dist/ types
 pnpm test          # vitest; the operator's database tests use in-memory PGlite, so no Postgres is needed
-cargo test --manifest-path programs/escrow_program/Cargo.toml
 ```
 
 `pnpm build` emits `dist/`, which is what the package exports. Start a node from your own process with `StellariumNode`, as shown above.

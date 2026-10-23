@@ -45,19 +45,14 @@ Thumbs.db
 *.swp
 *.swo
 
-# Rust
-debug/
-target/
-**/*.rs.bk
-*.pdb
-**/mutants.out*/
-
-# Solana
+# Leftovers from the Solana escrow, removed in favor of Stripe. Kept ignored so old local keys
+# and validator ledgers are never committed; delete them locally.
 .keys/
-.learning/
-proof-artifacts/
-.local-ledger/
 test-ledger/
+.local-ledger/
+proof-artifacts/
+programs/
+.learning/
 
 # Turbo
 .turbo
