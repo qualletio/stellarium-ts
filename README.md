@@ -341,7 +341,7 @@ pnpm test          # vitest; the operator's database tests use in-memory PGlite,
 Docker Compose runs Postgres, the operator and the two fixture nodes. The guide has three parts, each building on the last:
 
 1. [Paid calls](#1-paid-calls): two nodes paying each other from seeded credit. Needs only Docker.
-2. [The dashboard](#2-the-dashboard): sign in, enroll nodes with tokens, and view balances. Needs a Clerk development instance.
+2. [The dashboard](#2-the-dashboard): sign in, enroll nodes with tokens, and view balances. Needs only Node and pnpm besides Docker.
 3. [Stripe end to end](#3-stripe-end-to-end): buy credits by card, onboard to Connect, and receive a payout, all in Stripe test mode.
 
 You need Docker, Node.js 20+ and pnpm. Install the workspace once with `pnpm install`.
@@ -412,28 +412,25 @@ The fixture provider also hosts a paid inference function. Try `return echo.comp
 
 #### 2. The dashboard
 
-The dashboard signs people in with [Clerk](https://clerk.com). Create a free application at [dashboard.clerk.com](https://dashboard.clerk.com), which gives you a development instance. Then:
-
-1. Turn on **Organizations** in the application's settings. Balances, nodes and payouts belong to organizations.
-2. On the **API keys** page, copy the publishable key, the secret key, and the **JWT public key** (PEM).
+The dashboard signs people in with [Better Auth](https://www.better-auth.com), which runs inside the operator: users, sessions, organizations and roles are tables in its Postgres. The dashboard forwards its `/api/auth/*` to the operator, so the session cookie is the dashboard's. Compose sets a local `BETTER_AUTH_SECRET`, so there is nothing to sign up for.
 
 Create `apps/dashboard/.env`:
 
 ```
 OPERATOR_URL=http://127.0.0.1:3001/v1
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...
-CLERK_SECRET_KEY=sk_test_...
-NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
-NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
 ```
 
-Create `apps/operator/.env` with the same instance's keys. The operator checks the dashboard's session tokens with them:
+Without `RESEND_API_KEY`, the operator doesn't send email: it logs each verification, password reset and invitation link instead. Find them with `docker compose logs operator | grep Email`. To send real email, or to offer GitHub sign-in, add to `apps/operator/.env`:
 
 ```
-CLERK_SECRET_KEY=sk_test_...
-# The JWT public key, so tokens are verified without a network call. Keep the PEM's line breaks as \n inside double quotes.
-CLERK_JWT_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+RESEND_API_KEY=re_...
+EMAIL_FROM="Stellarium <no-reply@your-verified-domain>"
+# A GitHub OAuth app with the callback URL http://localhost:3010/api/auth/callback/github
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
 ```
+
+and `GITHUB_SIGN_IN=true` to `apps/dashboard/.env`, so the sign-in page shows the button.
 
 To enroll the fixture nodes from the dashboard instead of the seed, add `SEED_DEV=0` to the root `.env`. Then reset the stack, so the seed's organizations are gone, and start the operator:
 
@@ -443,7 +440,7 @@ docker compose up -d --build postgres operator
 pnpm --filter dashboard dev
 ```
 
-The dashboard runs on port 3010, so it can sit beside the [registry](https://github.com/qualletio/stellarium-resource-registry), which uses 3000. Open http://localhost:3010 and sign up. Create two organizations from the organization switcher: one to pay for calls (say "Caller") and one to host the paid functions ("Weather Provider"). Then enroll each node in its organization:
+The dashboard runs on port 3010, so it can sit beside the [registry](https://github.com/qualletio/stellarium-resource-registry), which uses 3000. Open http://localhost:3010 (not 127.0.0.1: the operator accepts only `DASHBOARD_URL`'s origin) and sign up, then open the verification link from the operator's log. Create two organizations, the second from the organization switcher's **Create organization…**: one to pay for calls (say "Caller") and one to host the paid functions ("Weather Provider"). Then enroll each node in its organization:
 
 1. Select the organization, go to **Nodes**, and create an enrollment token. It is shown once and works once, within 24 hours.
 2. Add the `ENROLLMENT_TOKEN=...` line to that node's `.env`: `apps/local-resource-node/.env` for the provider and `apps/local-caller-node/.env` for the caller.
@@ -516,7 +513,7 @@ When you're done, remove the three `PAYOUT_*` lines from `apps/operator/.env` an
 
 #### Resetting
 
-Postgres has no volume, so `docker compose down` deletes every organization, balance and receipt. The next `docker compose up -d --build` starts fresh and reseeds, unless `SEED_DEV=0` is set. After a reset, nodes enrolled through the dashboard need new enrollment tokens. Clerk's users and organizations live in Clerk, and are linked to new operator organizations the first time you open the dashboard. Stripe's test data stays in your Stripe account.
+Postgres has no volume, so `docker compose down` deletes every organization, balance and receipt. The next `docker compose up -d --build` starts fresh and reseeds, unless `SEED_DEV=0` is set. After a reset, nodes enrolled through the dashboard need new enrollment tokens. Dashboard accounts and organizations live in the same database, so they go too: sign up again. Stripe's test data stays in your Stripe account.
 
 #### Troubleshooting
 
@@ -527,7 +524,8 @@ Postgres has no volume, so `docker compose down` deletes every organization, bal
 | The caller exits at startup with a connection error | It started before the provider was listening. Start it again with `docker compose up -d local-caller-node`. |
 | A paid call answers `Insufficient balance` | The caller's organization has no available credit. Buy credits, or use the seed. |
 | A paid call answers `can't receive payouts yet` | The provider's organization hasn't finished Connect onboarding. |
-| The dashboard shows "Something went wrong" right after you change ports or keys | The operator refused the session token. Reload: Clerk refreshes the token within a minute. |
+| Signing in or creating an organization answers `Invalid origin` | The dashboard's origin doesn't match the operator's `DASHBOARD_URL`. Open http://localhost:3010, not 127.0.0.1. |
+| No verification email arrives | Without `RESEND_API_KEY` emails are only logged: `docker compose logs operator \| grep Email`. |
 | Buy credits shows `Stripe is not configured on this operator` | `STRIPE_SECRET_KEY` isn't set in `apps/operator/.env`, or the operator wasn't rebuilt. |
 | A top-up succeeds in Stripe but the balance doesn't change | `stripe listen` isn't running, or its secret doesn't match `STRIPE_WEBHOOK_SECRET`. |
 | A payout fails with insufficient funds | The top-up used 4242 4242 4242 4242, whose funds aren't available yet. Use 4000 0000 0000 0077. |

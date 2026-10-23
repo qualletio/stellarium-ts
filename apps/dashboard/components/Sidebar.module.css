@@ -35,6 +35,96 @@
   padding: 0 4px;
 }
 
+.select {
+  width: 100%;
+  height: 34px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.select:focus {
+  border-color: var(--ink);
+  outline: none;
+}
+
+/* The account menu: avatar and name, opening upward to the email and sign-out. */
+.menu {
+  position: relative;
+  min-width: 0;
+}
+
+.menuButton {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 6px 4px 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+.menuButton::-webkit-details-marker {
+  display: none;
+}
+
+.avatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  background: var(--button);
+  color: var(--button-ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.menuPanel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.email {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.menuItem {
+  padding: 10px 12px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menuItem:hover {
+  background: var(--hover);
+}
+
 .nav {
   display: flex;
   flex-direction: column;
@@ -131,5 +221,13 @@
 
   .footer > a {
     display: none;
+  }
+
+  /* The bar is at the top, so the menu opens downward. */
+  .menuPanel {
+    top: calc(100% + 6px);
+    bottom: auto;
+    left: auto;
+    right: 0;
   }
 }

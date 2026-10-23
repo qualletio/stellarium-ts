@@ -26,8 +26,11 @@ services:
       SEED_DEV: ${SEED_DEV:-1}
       SEED_PROVIDER_PUBLIC_KEY: ${PROVIDER_SIGNING_PUBLIC_KEY:-}
       SEED_CALLER_PUBLIC_KEY: ${CALLER_SIGNING_PUBLIC_KEY:-}
-      # Stripe and Clerk keys are optional and come from apps/operator/.env, which the image includes like the
-      # nodes' .env files. Setting them here, even empty, would shadow that file.
+      # Signs dashboard session cookies. Local only: production needs its own secret.
+      BETTER_AUTH_SECRET: local-only-better-auth-secret-0123456789
+      # Stripe keys, RESEND_API_KEY/EMAIL_FROM and GitHub OAuth credentials are optional and come from apps/operator/.env,
+      # which the image includes like the nodes' .env files. Setting them here, even empty, would shadow that file.
+      # Without RESEND_API_KEY, verification and invitation links are in `docker compose logs operator`.
       DASHBOARD_URL: http://localhost:3010
     ports:
       - "127.0.0.1:3001:3001"

@@ -6,7 +6,8 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
-import { ClerkAuthenticator } from './auth/clerk.js';
+import type { AuthConfig } from './auth/betterAuth.js';
+import { LogMailer, ResendMailer } from './auth/email.js';
 import { DEFAULT_MAXIMUM_TOP_UP_CENTS, DEFAULT_MINIMUM_TOP_UP_CENTS } from './billing/billingService.js';
 import { DEFAULT_PLATFORM_FEE_BPS } from './payments/paymentService.js';
 import { DEFAULT_PAYOUT_POLICY } from './payouts/payoutService.js';
@@ -15,7 +16,7 @@ import { createService, type StripeConfig } from './service.js';
 import { StripeSdkGateway } from './stripe/gateway.js';
 
 const fastify = Fastify({
-  logger: { redact: ['req.headers.authorization', 'req.headers["stripe-signature"]'] },
+  logger: { redact: ['req.headers.authorization', 'req.headers.cookie', 'req.headers["stripe-signature"]'] },
 })
 
 const DAY_MS = 1000 * 60 * 60 * 24;
@@ -61,10 +62,28 @@ if (process.env.STRIPE_SECRET_KEY) {
   fastify.log.warn('STRIPE_SECRET_KEY is not set: top-ups, payout onboarding and payouts are disabled');
 }
 
-const dashboardAuthenticator = process.env.CLERK_SECRET_KEY
-  ? new ClerkAuthenticator({ secretKey: process.env.CLERK_SECRET_KEY, jwtKey: process.env.CLERK_JWT_KEY, authorizedParties: [dashboardUrl] })
-  : undefined;
-if (!dashboardAuthenticator) fastify.log.warn('CLERK_SECRET_KEY is not set: the dashboard API is disabled');
+// Dashboard sign-in and the dashboard API need a secret for session cookies.
+let auth: AuthConfig | undefined;
+if (process.env.BETTER_AUTH_SECRET) {
+  if (process.env.BETTER_AUTH_SECRET.length < 32) {
+    fastify.log.error('BETTER_AUTH_SECRET must be at least 32 characters');
+    process.exit(1);
+  }
+  const { RESEND_API_KEY, EMAIL_FROM, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET } = process.env;
+  if (RESEND_API_KEY && !EMAIL_FROM) {
+    fastify.log.error('EMAIL_FROM is required with RESEND_API_KEY');
+    process.exit(1);
+  }
+  if (!RESEND_API_KEY) fastify.log.warn('RESEND_API_KEY is not set: verification, password reset and invitation emails are logged instead of sent');
+  auth = {
+    secret: process.env.BETTER_AUTH_SECRET,
+    dashboardUrl,
+    mailer: RESEND_API_KEY ? new ResendMailer(RESEND_API_KEY, EMAIL_FROM!, fastify.log) : new LogMailer(fastify.log),
+    github: GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET ? { clientId: GITHUB_CLIENT_ID, clientSecret: GITHUB_CLIENT_SECRET } : undefined,
+  };
+} else {
+  fastify.log.warn('BETTER_AUTH_SECRET is not set: dashboard sign-in and the dashboard API are disabled');
+}
 
 const db = drizzle(process.env.DATABASE_URL!);
 const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../drizzle');
@@ -75,7 +94,7 @@ try {
   process.exit(1);
 }
 fastify.log.info('Applied database migrations');
-const service = createService(db, { platformFeeBps, stripe, dashboardAuthenticator });
+const service = createService(db, { platformFeeBps, stripe, auth });
 
 // Applies to every operator route. Limits are per client IP.
 await fastify.register(rateLimit, {

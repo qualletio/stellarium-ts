@@ -18,7 +18,7 @@ export default async function PayoutsPage({ searchParams }: PageProps<'/payouts'
   const query = await searchParams;
   const before = cursor(query.before);
   const [organization, payouts] = await Promise.all([getOrganization(), listPayouts(before)]);
-  const admin = organization.role === 'admin';
+  const admin = organization.admin;
 
   return (
     <>

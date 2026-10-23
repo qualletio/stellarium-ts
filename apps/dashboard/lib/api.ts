@@ -1,5 +1,7 @@
 import 'server-only';
-import { auth } from '@clerk/nextjs/server';
+import { headers } from 'next/headers';
+import { redirect } from 'next/navigation';
+import { cache } from 'react';
 
 // Wire types match the operator's dashboard routes (apps/operator/src/routes/dashboard.ts). Amounts are micro-USD.
 
@@ -7,6 +9,8 @@ export interface Organization {
   id: string;
   name: string;
   role?: string;
+  /** Owners and admins buy credits, set up payouts and manage nodes. */
+  admin: boolean;
   balanceMicroUsd: number;
   heldMicroUsd: number;
   availableMicroUsd: number;
@@ -58,9 +62,69 @@ export interface Node {
   revokedAt: string | null;
 }
 
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  image?: string | null;
+}
+
+export interface Session {
+  user: User;
+  session: { activeOrganizationId?: string | null };
+}
+
+export interface OrganizationListItem {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+export interface Member {
+  id: string;
+  role: string;
+  createdAt: string;
+  user: { id: string; name: string; email: string };
+}
+
+export interface Invitation {
+  id: string;
+  email: string;
+  role: string | null;
+  status: 'pending' | 'accepted' | 'rejected' | 'canceled';
+  expiresAt: string;
+}
+
+export interface FullOrganization extends OrganizationListItem {
+  members: Member[];
+  invitations: Invitation[];
+}
+
 export const PAGE_SIZE = 25;
 
-const OPERATOR_URL = (process.env.OPERATOR_URL ?? 'http://127.0.0.1:3001/v1').replace(/\/+$/, '');
+export const OPERATOR_URL = (process.env.OPERATOR_URL ?? 'http://127.0.0.1:3001/v1').replace(/\/+$/, '');
+
+/** The browser's cookies, which carry the Better Auth session the operator checks. */
+async function cookieHeader(): Promise<Record<string, string>> {
+  const cookie = (await headers()).get('cookie');
+  return cookie ? { cookie } : {};
+}
+
+/** Reads a Better Auth endpoint on the operator as the signed-in user. Null when it answers no content. */
+async function authGet<T>(path: string): Promise<T | null> {
+  const response = await fetch(`${OPERATOR_URL}/auth${path}`, { cache: 'no-store', headers: await cookieHeader() });
+  if (response.status === 401) return null;
+  if (!response.ok) throw new OperatorError(`GET /auth${path} returned ${response.status}`, response.status);
+  return response.json() as Promise<T | null>;
+}
+
+/** The signed-in user and their session, or null. Fetched once per render. */
+export const getSession = cache(() => authGet<Session>('/get-session'));
+
+export const listOrganizations = cache(async () => (await authGet<OrganizationListItem[]>('/organization/list')) ?? []);
+
+/** The active organization with its members and invitations. */
+export const getFullOrganization = () => authGet<FullOrganization>('/organization/get-full-organization');
 
 export class OperatorError extends Error {
   constructor(message: string, readonly status: number) {
@@ -71,16 +135,14 @@ export class OperatorError extends Error {
 
 /** Calls the operator as the signed-in user, acting on their active organization. Balances change constantly, so nothing is cached. */
 async function request<T>(method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown): Promise<T> {
-  const session = await auth();
-  const token = await session.getToken();
-  // The session ended between the layout's check and this call.
-  if (!token) return session.redirectToSignIn();
   const response = await fetch(`${OPERATOR_URL}${path}`, {
     method,
     cache: 'no-store',
-    headers: { Authorization: `Bearer ${token}`, ...(body !== undefined && { 'Content-Type': 'application/json' }) },
+    headers: { ...(await cookieHeader()), ...(body !== undefined && { 'Content-Type': 'application/json' }) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  // The session ended between the layout's check and this call.
+  if (response.status === 401) redirect('/sign-in');
   if (!response.ok) {
     const detail = await response.json().then((json: { error?: unknown }) => json?.error, () => undefined);
     throw new OperatorError(typeof detail === 'string' ? detail : `${method} ${path} returned ${response.status}`, response.status);

@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
-import { authenticateDashboard, type DashboardAuthenticator, requireAdmin } from '../auth/clerk.js';
+import { authenticateDashboard, type DashboardAuthenticator, isAdmin, requireAdmin } from '../auth/dashboardAuth.js';
 import type { BillingService } from '../billing/billingService.js';
 import { OperationError } from '../errors.js';
 import type { Organization } from '../ledger.js';
@@ -20,6 +20,7 @@ function summary(organization: Organization, role: string | undefined) {
         id: organization.id,
         name: organization.name,
         role,
+        admin: isAdmin(role),
         balanceMicroUsd: organization.balanceMicroUsd,
         heldMicroUsd: organization.heldMicroUsd,
         availableMicroUsd: organization.balanceMicroUsd - organization.heldMicroUsd,
@@ -31,8 +32,9 @@ function summary(organization: Organization, role: string | undefined) {
 }
 
 /**
- * The dashboard's API at platform.stellarium.sh. Requests carry a Clerk session token and act on
- * the session's active organization. Members can read; admins move money and manage nodes.
+ * The dashboard's API at platform.stellarium.sh. Requests carry the Better Auth session cookie, which the
+ * dashboard forwards, and act on the session's active organization. Members can read; owners and admins
+ * move money and manage nodes.
  */
 const dashboardRoutes: FastifyPluginAsync<RouteOptions & { authenticator: DashboardAuthenticator }> = async function (fastify, { service, authenticator }) {
     fastify.addHook('preHandler', authenticateDashboard(authenticator, service.organizations));
@@ -42,7 +44,7 @@ const dashboardRoutes: FastifyPluginAsync<RouteOptions & { authenticator: Dashbo
         return service.billing;
     };
 
-    fastify.get('/org', async (request) => summary(organization(request), request.dashboardSession!.role));
+    fastify.get('/org', async (request) => summary(organization(request), request.dashboardSession!.activeOrganization!.role));
 
     fastify.get<{ Querystring: PageQuery & { as: 'payer' | 'provider' } }>('/org/receipts', {
         schema: { querystring: { ...pageQuerySchema, required: ['as'], properties: { ...pageQuerySchema.properties, as: { enum: ['payer', 'provider'] } } } },

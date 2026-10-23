@@ -25,14 +25,18 @@ All amounts are integer micro-USD (1 USD = 1,000,000).
 - `PAYOUT_HOLD_DAYS`, `PAYOUT_INTERVAL_DAYS`, `PAYOUT_MIN_MICRO_USD`: captured
   payments become payable after the hold, an organization is paid at most once per
   interval, and smaller balances wait. Default 7 days, 7 days and 10000000 ($10).
-- `CLERK_SECRET_KEY`, `CLERK_JWT_KEY`: enable the dashboard API. With the JWT public
-  key (PEM), session tokens are verified without a network call.
+- `BETTER_AUTH_SECRET`: at least 32 characters. Enables dashboard sign-in (Better Auth,
+  at `/v1/auth/*`) and the dashboard API. It signs session cookies.
+- `RESEND_API_KEY`, `EMAIL_FROM`: send verification, password reset and invitation
+  emails through Resend. Without them, the emails are logged instead.
+- `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`: offer GitHub sign-in. The OAuth app's
+  callback URL is `<DASHBOARD_URL>/api/auth/callback/github`.
 - `DASHBOARD_URL`: the dashboard's origin, default `https://platform.stellarium.sh`.
-  It is the only CORS origin and the only accepted session-token `azp`, and Stripe
-  returns users to pages under it.
+  It is the only CORS origin and the only origin Better Auth accepts. Links in emails
+  point at it, and Stripe returns users to pages under it.
 
-The operator listens on port 3001. The authorization header is redacted from server
-logs.
+The operator listens on port 3001. The authorization and cookie headers are redacted
+from server logs.
 
 ## Organizations and nodes
 
@@ -112,10 +116,15 @@ voucher expires.
 
 ## Dashboard API
 
-Requests carry `Authorization: Bearer <Clerk session token>` and act on the session's
-active Clerk organization. The first request from a Clerk organization creates its
-operator organization. Members can read. Clerk `org:admin`s can also move money and
-manage nodes.
+Requests carry the Better Auth session cookie, which the dashboard forwards, and act on
+the session's active organization. The first request from a dashboard organization
+creates its operator organization, linked by `authOrganizationId`. Members can read.
+Owners and admins can also move money and manage nodes.
+
+Better Auth's own endpoints (sign-up, sign-in, organizations, invitations) are at
+`/v1/auth/*`, reached through the dashboard's `/api/auth/*`. They are exempt from the
+per-IP limit, since they all arrive from the dashboard, and Better Auth limits them per
+client by `X-Forwarded-For`.
 
 | Route | Who | |
 |---|---|---|
