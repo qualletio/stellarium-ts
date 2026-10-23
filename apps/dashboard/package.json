@@ -1,0 +1,27 @@
+{
+  "name": "dashboard",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "dev": "next dev --port 3010",
+    "start": "next start --port 3010",
+    "lint": "biome lint app components lib",
+    "check-types": "next typegen && tsc --noEmit"
+  },
+  "dependencies": {
+    "@clerk/nextjs": "^7.9.19",
+    "next": "16.4.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,14 @@
+.nav {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 14px;
+  font-size: 13px;
+}
+
+.nav a {
+  color: var(--accent);
+}
+
+.disabled {
+  color: var(--line);
+}

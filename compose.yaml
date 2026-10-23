@@ -21,18 +21,14 @@ services:
       target: operator
     environment:
       DATABASE_URL: postgresql://stellarium:local-only-password@postgres:5432/stellarium
-      # Enrolls the fixture nodes' keys (set in the repo root .env, matching each app's .env) and credits the caller.
-      SEED_DEV: "1"
-      SEED_PROVIDER_PUBLIC_KEY: ${PROVIDER_SIGNING_PUBLIC_KEY:?set PROVIDER_SIGNING_PUBLIC_KEY in .env}
-      SEED_CALLER_PUBLIC_KEY: ${CALLER_SIGNING_PUBLIC_KEY:?set CALLER_SIGNING_PUBLIC_KEY in .env}
-      # Optional. Without Stripe keys, top-ups and payouts are off and balances come from the seed;
-      # without Clerk keys, the dashboard API is off. Use Stripe test-mode keys locally.
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
-      STRIPE_CONNECT_WEBHOOK_SECRET: ${STRIPE_CONNECT_WEBHOOK_SECRET:-}
-      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
-      CLERK_JWT_KEY: ${CLERK_JWT_KEY:-}
-      DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:3000}
+      # Enrolls the fixture nodes' keys (set in the repo root .env, matching each app's .env) in two seed
+      # organizations and credits the caller. Set SEED_DEV=0 in the root .env to enroll them from the dashboard instead.
+      SEED_DEV: ${SEED_DEV:-1}
+      SEED_PROVIDER_PUBLIC_KEY: ${PROVIDER_SIGNING_PUBLIC_KEY:-}
+      SEED_CALLER_PUBLIC_KEY: ${CALLER_SIGNING_PUBLIC_KEY:-}
+      # Stripe and Clerk keys are optional and come from apps/operator/.env, which the image includes like the
+      # nodes' .env files. Setting them here, even empty, would shadow that file.
+      DASHBOARD_URL: http://localhost:3010
     ports:
       - "127.0.0.1:3001:3001"
     depends_on:

@@ -1,0 +1,104 @@
+/* Theme tokens, shared with stellarium.sh. `data-theme` is set before paint by the script in layout.tsx. */
+:root {
+  color-scheme: light;
+  --ink: #102b31;
+  --paper: #fafaf7;
+  --panel: #f1f2ee;
+  --lime: #d6f36a;
+  --on-lime: #102b31;
+  --line: rgba(16, 43, 49, 0.14);
+  --muted: #4a6267;
+  --accent: #5d7a1e;
+  --hover: rgba(16, 43, 49, 0.06);
+  --item-hover: rgba(16, 43, 49, 0.05);
+  --button: #102b31;
+  --button-ink: #fff;
+  --button-hover: #244a52;
+  --focus: #8bb512;
+  /* Dashboard-only: statuses and the sidebar. */
+  --danger: #b3261e;
+  --danger-dim: rgba(179, 38, 30, 0.08);
+  --warning: #9a5800;
+  --warning-dim: rgba(154, 88, 0, 0.09);
+  --success-dim: rgba(93, 122, 30, 0.12);
+  --sidebar: #f1f2ee;
+  --skeleton: rgba(16, 43, 49, 0.07);
+  --sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ink: #e6ece6;
+  --paper: #0a181b;
+  --panel: #0e2125;
+  --line: rgba(230, 236, 230, 0.13);
+  --muted: #9db3b4;
+  --accent: #bada68;
+  --hover: rgba(230, 236, 230, 0.07);
+  --item-hover: rgba(230, 236, 230, 0.06);
+  --button: #d6f36a;
+  --button-ink: #102b31;
+  --button-hover: #e4f88f;
+  --danger: #ff8a80;
+  --danger-dim: rgba(255, 138, 128, 0.1);
+  --warning: #ffb454;
+  --warning-dim: rgba(255, 180, 84, 0.1);
+  --success-dim: rgba(186, 218, 104, 0.12);
+  --sidebar: #0c1d21;
+  --skeleton: rgba(230, 236, 230, 0.08);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  min-height: 100vh;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

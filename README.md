@@ -308,16 +308,15 @@ Resources are bound with `const <name>: <path>.<ResourceName>` and called with n
 
 This repository uses `pnpm` and is organized as a monorepo.
 
-For local Solana, PostgreSQL, operator, and paid two-node testing, see the
-[local end-to-end runbook](docs/local-e2e.md). It includes the current source
-blockers, local identity and secret setup, and transaction/balance verification.
+To run the operator, the dashboard and two paid nodes on your machine, including card payments and payouts in Stripe test mode, see [Running Locally](#running-locally).
 
 ### Modules
 
 - packages/stellarium-ts: the main package for stellarium-ts, helps run a Stellarium node using Typescript.
-- apps/operator: the centralized operator that interacts with the Solana blockchain and stores receipt records.
+- apps/operator: the centralized operator. It holds organizations' prepaid balances, moves money for paid calls, and handles Stripe top-ups and Connect payouts.
+- apps/dashboard: the console at platform.stellarium.sh, where organizations buy credits, enroll nodes and set up payouts.
 - apps/local-caller-node: a node for running locally that has no resources. Syncs to the local-resource-node.
-- apps/local-resource-node: a node for running locally with a monetized resource.
+- apps/local-resource-node: a node for running locally with a paid resource.
 
 ```sh
 pnpm install
@@ -333,267 +332,199 @@ cargo test --manifest-path programs/escrow_program/Cargo.toml
 
 ### Running Locally
 
-Install Solana using their guide: https://solana.com/docs/intro/installation
+Docker Compose runs Postgres, the operator and the two fixture nodes. The guide has three parts, each building on the last:
 
-Start the local validator in its own terminal.
+1. [Paid calls](#1-paid-calls): two nodes paying each other from seeded credit. Needs only Docker.
+2. [The dashboard](#2-the-dashboard): sign in, enroll nodes with tokens, and view balances. Needs a Clerk development instance.
+3. [Stripe end to end](#3-stripe-end-to-end): buy credits by card, onboard to Connect, and receive a payout, all in Stripe test mode.
+
+You need Docker, Node.js 20+ and pnpm. Install the workspace once with `pnpm install`.
+
+| Service             | Port | URL                       |
+| ------------------- | ---- | ------------------------- |
+| Operator            | 3001 | http://localhost:3001/v1  |
+| local-resource-node | 3002 | http://localhost:3002     |
+| local-caller-node   | 3003 | http://localhost:3003     |
+| Dashboard           | 3010 | http://localhost:3010     |
+
+Each app's `.env` is copied into its image, so after changing one, rebuild that service with `docker compose up -d --build <service>`. A restart isn't enough.
+
+#### 1. Paid calls
+
+Generate signing keys for the two nodes. This writes each node's `.env`, and a root `.env` with their public keys, which the operator's seed reads. It refuses to overwrite existing files:
 
 ```sh
-solana-test-validator
-```
-
-Point the Solana CLI at your localnet:
-
-```sh
-solana config set -ul
-```
-
-Generate Keys for Solana:
-
-```sh
-umask 077
-mkdir -p .keys/local-e2e
-solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/operator.json
-solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/program.json
-solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/recipient.json
-solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/protocol-fee.json
-solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/usdc-mint.json
-
 node --input-type=module <<'JS'
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
-const require = createRequire(new URL('./apps/operator/package.json', `file://${process.cwd()}/`));
-const { PublicKey, Keypair } = require('@solana/web3.js');
-const address = name => Keypair.fromSecretKey(Uint8Array.from(JSON.parse(
-  readFileSync(`.keys/local-e2e/${name}.json`, 'utf8')))).publicKey.toBase58();
-const common = {
-  SOLANA_RPC_URL: 'http://127.0.0.1:8899',
-  ESCROW_PROGRAM_ID: address('program'),
-  AUTHORITY_ADDRESS: address('operator'),
-  RECIPIENT_ADDRESS: address('recipient'),
-  PROTOCOL_FEE_RECIPIENT: address('protocol-fee'),
-  USDC_MINT: address('usdc-mint'),
-};
-for (const [role, port] of [['caller', 3000], ['provider', 3002]]) {
+import { writeFileSync } from 'node:fs';
+const write = (file, values) => writeFileSync(file,
+  Object.entries(values).map(([key, value]) => `${key}=${value}`).join('\n') + '\n', { mode: 0o600, flag: 'wx' });
+const publicKeys = {};
+for (const [role, app] of [['PROVIDER', 'local-resource-node'], ['CALLER', 'local-caller-node']]) {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
-  const spki = publicKey.export({ format: 'der', type: 'spki' });
-  const raw = Buffer.from(publicKey.export({ format: 'jwk' }).x, 'base64url');
-  const values = { ...common, BASE_URL: `http://127.0.0.1:${port}`,
-    OPERATOR_URL: 'http://127.0.0.1:3001/v1',
-    SIGNING_PUBLIC_KEY: spki.toString('base64url'),
-    SIGNING_PRIVATE_KEY: privateKey.export({format: 'der', type: 'pkcs8'}).toString('base64url'),
-    USER_ADDRESS: new PublicKey(raw).toBase58() };
-  writeFileSync(`.keys/local-e2e/${role}.env`, Object.entries(values)
-    .map(([key, value]) => `${key}=${value}`).join('\n') + '\n', { mode: 0o600, flag: 'wx' });
+  const keys = {
+    SIGNING_PUBLIC_KEY: publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'),
+    SIGNING_PRIVATE_KEY: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64url'),
+  };
+  write(`apps/${app}/.env`, { ...keys, API_KEY: randomBytes(24).toString('base64url') });
+  publicKeys[`${role}_SIGNING_PUBLIC_KEY`] = keys.SIGNING_PUBLIC_KEY;
 }
-const values = { ...common,
-  DATABASE_URL: 'postgresql://stellarium:local-only-password@127.0.0.1:5433/stellarium',
-  // Nominal: prices a settlement transaction at 1 micro-USDC, so a single paid call settles.
-  SOL_PRICE_USDC: '0.0001',
-  PRIVATE_KEY: readFileSync('.keys/local-e2e/operator.json', 'utf8').trim() };
-writeFileSync('.keys/local-e2e/operator.env', Object.entries(values)
-  .map(([key, value]) => `${key}=${value}`).join('\n') + '\n', { mode: 0o600, flag: 'wx' });
-console.log('Local fixture configuration written; no secrets printed.');
+write('.env', publicKeys);
+console.log('Wrote apps/local-resource-node/.env, apps/local-caller-node/.env and .env');
 JS
 ```
 
-Generate a caller wallet that funds the user's escrow:
-
-```sh
-solana-keygen new --no-bip39-passphrase --silent --outfile .keys/local-e2e/caller.json
-```
-
-Configure the escrow program. The operator key is the escrow authority: it signs
-withdrawals and is the program's upgrade authority. Each user signs and pays for
-their own escrow's setup. Escrows hold
-USDC: locally, a test mint you create stands in for it. Each escrow withdrawal pays
-20% of the amount to the protocol fee wallet and the remaining 80% to the resource
-provider. Print the three addresses:
-
-```sh
-solana-keygen pubkey .keys/local-e2e/operator.json
-solana-keygen pubkey .keys/local-e2e/protocol-fee.json
-solana-keygen pubkey .keys/local-e2e/usdc-mint.json
-```
-
-In `programs/escrow_program/src/lib.rs`, set the constants to those addresses:
-
-```rust
-pub const ESCROW_AUTHORITY: Option<Pubkey> =
-    Some(solana_program::pubkey!("YOUR_OPERATOR_ADDRESS"));
-pub const PROTOCOL_FEE_RECIPIENT: Option<Pubkey> =
-    Some(solana_program::pubkey!("YOUR_PROTOCOL_FEE_ADDRESS"));
-pub const USDC_MINT: Option<Pubkey> =
-    Some(solana_program::pubkey!("YOUR_USDC_MINT_ADDRESS"));
-```
-
-On devnet or mainnet, set `USDC_MINT` to the real USDC mint
-(`4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` on devnet,
-`EPjFWdd5AufqSSqeM2qZzJpgyyhwJaZgw7tFFtbs2Mn` on mainnet).
-
-If `ESCROW_AUTHORITY` is unset, setup and withdrawals fail with custom program
-error `0`; if it is a different wallet than the operator, they fail with error `1`.
-If `PROTOCOL_FEE_RECIPIENT` is unset, withdrawals fail with error `2`. If
-`USDC_MINT` is unset they fail with error `4`, and with error `5` when the operator
-uses another mint.
-
-Build the Escrow program:
-
-```sh
-cargo build-sbf --manifest-path programs/escrow_program/Cargo.toml \
-  --sbf-out-dir programs/escrow_program/target/deploy
-```
-
-Fund the wallets with SOL for transaction fees. The operator pays for the program
-deploy and the protocol fee wallet's USDC token account. The caller node's
-`USER_ADDRESS` (in `.keys/local-e2e/caller.env`) pays its escrow's rent:
-
-```sh
-solana airdrop 100 "$(solana-keygen pubkey .keys/local-e2e/operator.json)"
-solana airdrop 5 "$(solana-keygen pubkey .keys/local-e2e/caller.json)"
-solana airdrop 1 "$(sed -n 's/^USER_ADDRESS=//p' .keys/local-e2e/caller.env)"
-```
-
-Deploy the Escrow program with the operator as fee payer and upgrade authority:
-
-```sh
-solana program deploy \
-  --keypair .keys/local-e2e/operator.json \
-  --upgrade-authority .keys/local-e2e/operator.json \
-  --program-id .keys/local-e2e/program.json \
-  programs/escrow_program/target/deploy/escrow_program.so
-solana program show "$(solana-keygen pubkey .keys/local-e2e/program.json)"
-```
-
-The program ID is the address of `.keys/local-e2e/program.json`. Its upgrade
-authority should be the operator address.
-
-Create the test USDC mint (6 decimals, like USDC) and mint 100 of it to the caller wallet:
-
-```sh
-spl-token create-token --decimals 6 \
-  --fee-payer .keys/local-e2e/operator.json \
-  --mint-authority "$(solana-keygen pubkey .keys/local-e2e/operator.json)" \
-  .keys/local-e2e/usdc-mint.json
-USDC_MINT="$(solana-keygen pubkey .keys/local-e2e/usdc-mint.json)"
-CALLER="$(solana-keygen pubkey .keys/local-e2e/caller.json)"
-spl-token create-account "$USDC_MINT" --owner "$CALLER" \
-  --fee-payer .keys/local-e2e/operator.json
-spl-token mint "$USDC_MINT" 100 --recipient-owner "$CALLER" \
-  --mint-authority .keys/local-e2e/operator.json \
-  --fee-payer .keys/local-e2e/operator.json
-```
-
-Create the provider recipient's USDC token account. The operator only pays into an
-existing one; without it, every settlement fails with `422`:
-
-```sh
-spl-token create-account "$USDC_MINT" \
-  --owner "$(solana-keygen pubkey .keys/local-e2e/recipient.json)" \
-  --fee-payer .keys/local-e2e/operator.json
-```
-
-Create a `.env` file in each app directory. The generated files in
-`.keys/local-e2e/` (`operator.env`, `caller.env`, `provider.env`) hold the
-values to copy.
-
-`apps/local-caller-node/.env`:
-
-```
-SIGNING_PUBLIC_KEY=
-SIGNING_PRIVATE_KEY=
-USER_ADDRESS=
-PORT=
-API_KEY=SET_THIS_TO_ANYTHING
-```
-
-`apps/local-resource-node/.env`:
-
-```
-SIGNING_PUBLIC_KEY=
-SIGNING_PRIVATE_KEY=
-USER_ADDRESS=
-RECIPIENT_ADDRESS=
-PORT=
-API_KEY=SET_THIS_TO_ANYTHING
-```
-
-`apps/operator/.env`:
-
-```
-ESCROW_PROGRAM_ID=
-PROTOCOL_FEE_RECIPIENT=
-USDC_MINT=
-PRIVATE_KEY=
-PORT=
-SOL_PRICE_USDC=0.0001
-```
-
-`SOL_PRICE_USDC` prices settlement transaction fees. The nominal local value lets a
-single paid call settle; use the real SOL price anywhere else.
-
-`PROTOCOL_FEE_RECIPIENT` and `USDC_MINT` must be the same addresses compiled into the
-escrow program. If the fee recipient doesn't match, withdrawals fail with custom
-program error `3`.
-
-Start the services:
+Start everything:
 
 ```sh
 docker compose up -d --build
 ```
 
-Initialize the caller's escrow account. `POST /v1/escrow` returns an unsigned
-transaction; the caller signs it with its node key and pays the rent:
+On startup the operator runs its development seed (`apps/operator/src/seed.ts`). It creates two organizations, `org_local_provider` and `org_local_caller`, and enrolls each node's key in one of them. It marks the provider as able to receive payouts, and gives the caller $10 of credit. The seed is safe to rerun: restarts don't add more credit.
+
+Make a paid call from the caller. `com.example.Weather.temperature` costs $0.01:
 
 ```sh
-cd apps/operator
-node --env-file=../../.keys/local-e2e/caller.env --input-type=module <<'JS'
-import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
-// The node's Ed25519 key is its escrow user: the PKCS#8 DER ends with the 32-byte seed.
-const user = Keypair.fromSeed(Buffer.from(process.env.SIGNING_PRIVATE_KEY, 'base64url').subarray(-32));
-const response = await fetch('http://localhost:3001/v1/escrow', {
-  method: 'POST', headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ user: user.publicKey.toBase58() }) });
-const result = await response.json();
-if (!response.ok) throw new Error(JSON.stringify(result));
-if (result.status === 'unsigned') {
-  const transaction = VersionedTransaction.deserialize(Buffer.from(result.transaction, 'base64'));
-  transaction.sign([user]);
-  const connection = new Connection(process.env.SOLANA_RPC_URL, 'confirmed');
-  const signature = await connection.sendTransaction(transaction);
-  const { blockhash, lastValidBlockHeight } = result;
-  const { value } = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
-  if (value.err) throw new Error(`Escrow creation failed: ${signature}`);
-}
-console.log({ escrowAddress: result.escrowAddress, escrowTokenAddress: result.escrowTokenAddress });
-JS
-cd ../..
+CALLER_API_KEY="$(sed -n 's/^API_KEY=//p' apps/local-caller-node/.env)"
+curl -s -X POST http://localhost:3003/v1/run \
+  -H "Authorization: Bearer $CALLER_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"source": "request GetTemperature {\n  const weather: com.example.Weather\n\n  return weather.temperature(city: \"Oslo\")\n}"}'
 ```
-
-Copy the escrow token address value. The escrow PDA owns this USDC token
-account, and deposits go to it. A 422 means `USER_ADDRESS` holds too little SOL.
-
-Fund the escrow with 1 USDC:
-
-```sh
-ESCROW_TOKEN_ADDRESS=YOUR_ESCROW_TOKEN_ADDRESS
-spl-token transfer "$USDC_MINT" 1 "$ESCROW_TOKEN_ADDRESS" \
-  --owner .keys/local-e2e/caller.json \
-  --fee-payer .keys/local-e2e/caller.json
-spl-token balance --address "$ESCROW_TOKEN_ADDRESS"
-```
-
-Run a request. If it fails, check each `.env` file, then rerun `docker compose up -d --build`.
-
-POST `localhost:3003/v1/run`
-
-Authorization header: `Bearer YOUR_CALLER_API_KEY`
 
 ```json
-{
-  "source": "request MyRequest { \n\n const weather: com.example.Weather \n\n return weather.temperature(city: \"Oslo\") }"
-}
+{ "returnValue": { "value": 12, "error": null } }
 ```
+
+The provider held $0.01 of the caller's credit before running the function, then captured it. Check the balances in Postgres. The caller has $9.99, and the provider is owed $0.008 after the 20% platform fee:
+
+```sh
+docker compose exec postgres psql -U stellarium -d stellarium \
+  -c 'select id, "balanceMicroUsd", "heldMicroUsd", "payableMicroUsd" from organizations'
+```
+
+The fixture provider also hosts a paid inference function. Try `return echo.complete(prompt: "Hello world!", maxTokens: 10)` with `const echo: com.example.Echo`. It holds the most the call can cost and charges only the tokens it used.
+
+#### 2. The dashboard
+
+The dashboard signs people in with [Clerk](https://clerk.com). Create a free application at [dashboard.clerk.com](https://dashboard.clerk.com), which gives you a development instance. Then:
+
+1. Turn on **Organizations** in the application's settings. Balances, nodes and payouts belong to organizations.
+2. On the **API keys** page, copy the publishable key, the secret key, and the **JWT public key** (PEM).
+
+Create `apps/dashboard/.env`:
+
+```
+OPERATOR_URL=http://127.0.0.1:3001/v1
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...
+CLERK_SECRET_KEY=sk_test_...
+NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
+NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
+```
+
+Create `apps/operator/.env` with the same instance's keys. The operator checks the dashboard's session tokens with them:
+
+```
+CLERK_SECRET_KEY=sk_test_...
+# The JWT public key, so tokens are verified without a network call. Keep the PEM's line breaks as \n inside double quotes.
+CLERK_JWT_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+```
+
+To enroll the fixture nodes from the dashboard instead of the seed, add `SEED_DEV=0` to the root `.env`. Then reset the stack, so the seed's organizations are gone, and start the operator:
+
+```sh
+docker compose down
+docker compose up -d --build postgres operator
+pnpm --filter dashboard dev
+```
+
+The dashboard runs on port 3010, so it can sit beside the [registry](https://github.com/qualletio/stellarium-resource-registry), which uses 3000. Open http://localhost:3010 and sign up. Create two organizations from the organization switcher: one to pay for calls (say "Caller") and one to host the paid functions ("Weather Provider"). Then enroll each node in its organization:
+
+1. Select the organization, go to **Nodes**, and create an enrollment token. It is shown once and works once, within 24 hours.
+2. Add the `ENROLLMENT_TOKEN=...` line to that node's `.env`: `apps/local-resource-node/.env` for the provider and `apps/local-caller-node/.env` for the caller.
+3. Start the provider first, since the caller bootstraps from it:
+
+```sh
+docker compose up -d --build local-resource-node
+docker compose up -d --build local-caller-node
+```
+
+Each node presents its token at startup and joins its organization. After that it needs only its signing key, so the used token can stay in its `.env`. A provider that isn't enrolled refuses to start and says how to enroll it.
+
+The provider's paid calls are refused until its organization can receive payouts ("Organization ... can't receive payouts yet"), and the caller has no credit yet. Part 3 sets up both.
+
+#### 3. Stripe end to end
+
+In the [Stripe dashboard](https://dashboard.stripe.com), turn on **Test mode**. Then:
+
+1. Under **Developers → API keys**, copy the **Secret key** (`sk_test_...`).
+2. Under **Settings → Connect**, finish **Get started** as a platform or marketplace. Connect is needed to create the providers' Express accounts.
+3. Under **Settings → Billing → Customer portal**, click **Activate test link**. The dashboard's **Manage in Stripe** button opens this portal.
+
+Forward Stripe's webhooks to the operator with the [Stripe CLI](https://docs.stripe.com/stripe-cli). Keep this running in its own terminal:
+
+```sh
+stripe login
+stripe listen --forward-to localhost:3001/v1/stripe/webhook --forward-connect-to localhost:3001/v1/stripe/connect-webhook
+```
+
+It prints a webhook signing secret (`whsec_...`). One `stripe listen` signs both streams, so the same secret goes in both variables. Add these to `apps/operator/.env`:
+
+```
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_CONNECT_WEBHOOK_SECRET=whsec_...
+# For testing only: pay out every maintenance pass (30 seconds), with no hold, from one cent.
+# The defaults are a 7-day hold, weekly payouts and a $10 minimum.
+PAYOUT_HOLD_DAYS=0
+PAYOUT_INTERVAL_DAYS=0
+PAYOUT_MIN_MICRO_USD=10000
+```
+
+Rebuild the operator so it picks them up:
+
+```sh
+docker compose up -d --build operator
+```
+
+Buy credits as the caller. Select the caller organization in the dashboard and go to **Credits**. Enter an amount and click **Buy credits**, then pay on Stripe Checkout with:
+
+- Card: **4000 0000 0000 0077**, with any future expiry and any CVC. Unlike 4242 4242 4242 4242, its funds are available in your platform balance immediately. Transfers to providers need available funds, so with 4242 the payout fails for insufficient funds.
+
+After Stripe redirects you back, the balance updates within a few seconds, once the `checkout.session.completed` webhook arrives through `stripe listen`.
+
+Set up payouts as the provider. Select the provider organization, go to **Payouts → Set up payouts**, and complete Stripe's test-mode Express onboarding:
+
+- Phone **000 000 0000**, with SMS code **000000**.
+- An individual with any name, address and date of birth (over 18), and SSN last four **0000**.
+- For the bank account, choose **Test (OAuth)** and pick the **Success** account. If an "enter bank details manually" link is offered instead, use routing number **110000000** and account number **000123456789**.
+
+Back on the Payouts page, the status changes to **Ready** when the `account.updated` webhook arrives.
+
+Make a few paid calls from the caller with the `curl` command in part 1. On the next maintenance pass, the operator transfers the provider's earnings, in whole cents, to its Express account. The remainder stays payable until a later payout. You can see the payout in three places:
+
+- The provider's **Payouts** page in the dashboard.
+- The caller's **Usage** page, where each call shows what it was charged.
+- Stripe: `stripe transfers list --limit 1`.
+
+When you're done, remove the three `PAYOUT_*` lines from `apps/operator/.env` and rebuild the operator. Otherwise it pays out every 30 seconds.
+
+#### Resetting
+
+Postgres has no volume, so `docker compose down` deletes every organization, balance and receipt. The next `docker compose up -d --build` starts fresh and reseeds, unless `SEED_DEV=0` is set. After a reset, nodes enrolled through the dashboard need new enrollment tokens. Clerk's users and organizations live in Clerk, and are linked to new operator organizations the first time you open the dashboard. Stripe's test data stays in your Stripe account.
+
+#### Troubleshooting
+
+| Symptom | Cause |
+| --- | --- |
+| The operator exits with `SEED_PROVIDER_PUBLIC_KEY is required` | The root `.env` is missing the nodes' public keys. Rerun the key script in part 1, or set `SEED_DEV=0`. |
+| The provider exits with `Node is not enrolled in an organization` | Seeding is off and its `.env` has no valid `ENROLLMENT_TOKEN`. Create one on the dashboard's Nodes page. |
+| The caller exits at startup with a connection error | It started before the provider was listening. Start it again with `docker compose up -d local-caller-node`. |
+| A paid call answers `Insufficient balance` | The caller's organization has no available credit. Buy credits, or use the seed. |
+| A paid call answers `can't receive payouts yet` | The provider's organization hasn't finished Connect onboarding. |
+| The dashboard shows "Something went wrong" right after you change ports or keys | The operator refused the session token. Reload: Clerk refreshes the token within a minute. |
+| Buy credits shows `Stripe is not configured on this operator` | `STRIPE_SECRET_KEY` isn't set in `apps/operator/.env`, or the operator wasn't rebuilt. |
+| A top-up succeeds in Stripe but the balance doesn't change | `stripe listen` isn't running, or its secret doesn't match `STRIPE_WEBHOOK_SECRET`. |
+| A payout fails with insufficient funds | The top-up used 4242 4242 4242 4242, whose funds aren't available yet. Use 4000 0000 0000 0077. |
 
 ### Contributing
 
