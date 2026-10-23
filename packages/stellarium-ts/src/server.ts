@@ -109,9 +109,10 @@ export class StellariumNode {
      */
     async start(fastify: FastifyInstance, options: StellariumNodeOptions): Promise<void> {
         const config = resolveConfig(options, this.resources);
-        if (hostsPaidFunctions(this.resources)) {
-            // Paid functions are paid to the node's organization, so the node must be enrolled before it serves them.
-            const enrollmentToken = options.enrollmentToken ?? process.env.ENROLLMENT_TOKEN;
+        const enrollmentToken = options.enrollmentToken ?? process.env.ENROLLMENT_TOKEN;
+        // Paid functions are paid to the node's organization, so a provider must be enrolled before it serves them.
+        // A node that only calls paid functions enrolls the same way, so its vouchers draw on its organization's balance.
+        if (hostsPaidFunctions(this.resources) || enrollmentToken) {
             try {
                 ({ organizationId: config.organizationId } = await new OperatorClient(config.operatorUrl, config.publicKey, config.privateKey).session(enrollmentToken));
             } catch (error) {

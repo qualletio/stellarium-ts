@@ -49,6 +49,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
     const submissions: unknown[] = [];
     const authorizations: unknown[] = [];
     const releases: unknown[] = [];
+    const sessions: unknown[] = [];
     /** What the fake operator answers to the next authorizations; undefined places the hold. */
     let refuseAuthorization: { status: number, error: string } | undefined;
     const callerKeys = generateBase64KeyPair();
@@ -92,6 +93,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
         submissions.length = 0;
         authorizations.length = 0;
         releases.length = 0;
+        sessions.length = 0;
         refuseAuthorization = undefined;
 
         const operator = Fastify();
@@ -100,6 +102,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
             if (!String(request.headers.authorization).startsWith("Stellarium ")) {
                 return reply.status(401).send({ error: "Unsigned request" });
             }
+            sessions.push(request.body);
             return { organizationId: ORGANIZATION };
         });
         operator.post("/v1/payments/authorize", async (request, reply) => {
@@ -259,6 +262,16 @@ describe("two-node network", { timeout: 15_000 }, () => {
         expect(result.returnValue.error.message).toContain("exceeds the cost limit");
         expect(settlements).toEqual([]);
         expect(authorizations).toEqual([]);
+    });
+
+    test("a caller with an enrollment token enrolls at startup; one without doesn't contact the operator", async () => {
+        sessions.length = 0;
+        await startCaller({ operatorUrl, enrollmentToken: "enr_caller" });
+        expect(sessions).toEqual([{ enrollmentToken: "enr_caller" }]);
+
+        sessions.length = 0;
+        await startCaller({ operatorUrl, databasePath: path.join(dir, "caller-2.db") });
+        expect(sessions).toEqual([]);
     });
 
     test("the provider refuses to run a call the operator won't hold, and the caller sees why", async () => {
