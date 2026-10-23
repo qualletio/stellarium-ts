@@ -21,9 +21,9 @@ export class OrganizationService {
     constructor(private readonly db: Database) {}
 
     /** `id` defaults to a new random one. Returns undefined, creating nothing, if an organization with `id` exists. */
-    async create(name: string, options: { id?: string, clerkOrgId?: string } = {}): Promise<Organization | undefined> {
+    async create(name: string, options: { id?: string, authOrganizationId?: string } = {}): Promise<Organization | undefined> {
         const [organization] = await this.db.insert(organizationsTable)
-            .values({ id: options.id ?? newId('org'), name, clerkOrgId: options.clerkOrgId })
+            .values({ id: options.id ?? newId('org'), name, authOrganizationId: options.authOrganizationId })
             .onConflictDoNothing({ target: organizationsTable.id })
             .returning();
         return organization;
@@ -34,13 +34,18 @@ export class OrganizationService {
         return organization;
     }
 
-    /** The organization for a Clerk organization, created on first use with the name `name` returns. */
-    async forClerkOrganization(clerkOrgId: string, name: () => Promise<string>): Promise<Organization> {
-        const existing = async () => (await this.db.select().from(organizationsTable).where(eq(organizationsTable.clerkOrgId, clerkOrgId)).limit(1))[0];
+    /** The organization for a dashboard organization, created on first use with its `name`. */
+    async forAuthOrganization(authOrganizationId: string, name: string): Promise<Organization> {
+        const existing = async () => (await this.db.select().from(organizationsTable).where(eq(organizationsTable.authOrganizationId, authOrganizationId)).limit(1))[0];
         const found = await existing();
+        // Follows renames in the dashboard.
+        if (found && found.name !== name) {
+            const [renamed] = await this.db.update(organizationsTable).set({ name, updatedAt: new Date() }).where(eq(organizationsTable.id, found.id)).returning();
+            return renamed;
+        }
         if (found) return found;
-        await this.db.insert(organizationsTable).values({ id: newId('org'), name: await name(), clerkOrgId })
-            .onConflictDoNothing({ target: organizationsTable.clerkOrgId });
+        await this.db.insert(organizationsTable).values({ id: newId('org'), name, authOrganizationId })
+            .onConflictDoNothing({ target: organizationsTable.authOrganizationId });
         // Another request may have created it first.
         return (await existing())!;
     }

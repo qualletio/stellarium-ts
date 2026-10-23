@@ -1,10 +1,9 @@
-import { currentUser } from '@clerk/nextjs/server';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { OrgAlerts } from '@/components/OrgAlerts';
 import { ReceiptTable } from '@/components/ReceiptTable';
 import ui from '@/components/ui.module.css';
-import { getOrganization, listReceipts } from '@/lib/api';
+import { getOrganization, getSession, listReceipts } from '@/lib/api';
 import { formatUsd } from '@/lib/format';
 import { DOCS_URL } from '@/lib/site';
 import styles from './page.module.css';
@@ -18,13 +17,14 @@ const GET_STARTED = [
 ];
 
 export default async function OverviewPage() {
-  const [organization, user, recent] = await Promise.all([getOrganization(), currentUser(), listReceipts('payer')]);
-  const admin = organization.role === 'admin';
+  const [organization, session, recent] = await Promise.all([getOrganization(), getSession(), listReceipts('payer')]);
+  const firstName = session?.user.name.trim().split(/\s+/)[0];
+  const admin = organization.admin;
 
   return (
     <>
       <header className={ui.header}>
-        <h1 className={ui.title}>{user?.firstName ? `Welcome back, ${user.firstName}` : 'Overview'}</h1>
+        <h1 className={ui.title}>{firstName ? `Welcome back, ${firstName}` : 'Overview'}</h1>
         <div className={ui.actions}>
           <a href={DOCS_URL} target="_blank" rel="noreferrer" className={ui.buttonSecondary}>Docs</a>
           {admin && <Link href="/nodes" className={ui.buttonSecondary}>Enroll a node</Link>}

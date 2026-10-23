@@ -1,4 +1,4 @@
-import { bigint, boolean, index, integer, pgTable, timestamp, unique, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, boolean, index, integer, pgTable, text, timestamp, unique, uuid, varchar } from "drizzle-orm/pg-core";
 
 // Amounts are micro-USD (1 USD = 1,000,000). Integer columns would overflow above ~$2,147.
 // Drizzle supplies timestamps in UTC. now() would use the session's time zone, which drizzle reads back as UTC.
@@ -10,8 +10,8 @@ import { bigint, boolean, index, integer, pgTable, timestamp, unique, uuid, varc
 export const organizationsTable = pgTable("organizations", {
   // `org_` plus random characters. Vouchers name the recipient by this id.
   id: varchar({ length: 64 }).primaryKey(),
-  // Null for organizations created outside the dashboard, such as the local development seed.
-  clerkOrgId: varchar({ length: 255 }).unique(),
+  // The dashboard organization it belongs to. Null for organizations created outside the dashboard, such as the local development seed.
+  authOrganizationId: text().unique().references(() => authOrganizationsTable.id),
   name: varchar({ length: 255 }).notNull(),
   stripeCustomerId: varchar({ length: 255 }).unique(),
   stripeAccountId: varchar({ length: 255 }).unique(),
@@ -47,7 +47,7 @@ export const enrollmentTokensTable = pgTable("enrollment_tokens", {
   tokenHash: varchar({ length: 64 }).primaryKey(),
   organizationId: varchar({ length: 64 }).notNull().references(() => organizationsTable.id),
   label: varchar({ length: 255 }),
-  // The Clerk user who created it. Null for tokens created outside the dashboard.
+  // The dashboard user who created it. Null for tokens created outside the dashboard.
   createdBy: varchar({ length: 255 }),
   expiresAt: timestamp().notNull(),
   usedAt: timestamp(),
@@ -138,7 +138,7 @@ export const topUpsTable = pgTable("top_ups", {
   // Debited from the balance by refunds and open or lost disputes. Stripe reports cumulative amounts, so these record what was applied.
   refundedMicroUsd: bigint({ mode: 'number' }).notNull().default(0),
   disputedMicroUsd: bigint({ mode: 'number' }).notNull().default(0),
-  // The Clerk user who started it.
+  // The dashboard user who started it.
   createdBy: varchar({ length: 255 }),
   createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
   updatedAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
@@ -179,3 +179,98 @@ export const stripeEventsTable = pgTable("stripe_events", {
   type: varchar({ length: 255 }).notNull(),
   processedAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
 });
+
+// Dashboard sign-in, organizations and roles, managed by Better Auth (src/auth/betterAuth.ts). Field names are
+// Better Auth's. Its ids are random strings it generates.
+
+export const authUsersTable = pgTable("auth_users", {
+  id: text().primaryKey(),
+  name: text().notNull(),
+  email: text().notNull().unique(),
+  emailVerified: boolean().notNull().default(false),
+  image: text(),
+  createdAt: timestamp().notNull().defaultNow(),
+  updatedAt: timestamp().notNull().defaultNow(),
+});
+
+export const authSessionsTable = pgTable("auth_sessions", {
+  id: text().primaryKey(),
+  token: text().notNull().unique(),
+  userId: text().notNull().references(() => authUsersTable.id, { onDelete: 'cascade' }),
+  expiresAt: timestamp().notNull(),
+  ipAddress: text(),
+  userAgent: text(),
+  // The organization the dashboard acts on.
+  activeOrganizationId: text(),
+  createdAt: timestamp().notNull().defaultNow(),
+  updatedAt: timestamp().notNull().defaultNow(),
+}, (table) => [
+  index("auth_sessions_userId_index").on(table.userId),
+]);
+
+/** A user's sign-in methods: `credential` (a password hash) or an OAuth provider. */
+export const authAccountsTable = pgTable("auth_accounts", {
+  id: text().primaryKey(),
+  accountId: text().notNull(),
+  providerId: text().notNull(),
+  userId: text().notNull().references(() => authUsersTable.id, { onDelete: 'cascade' }),
+  accessToken: text(),
+  refreshToken: text(),
+  idToken: text(),
+  accessTokenExpiresAt: timestamp(),
+  refreshTokenExpiresAt: timestamp(),
+  scope: text(),
+  password: text(),
+  createdAt: timestamp().notNull().defaultNow(),
+  updatedAt: timestamp().notNull().defaultNow(),
+}, (table) => [
+  index("auth_accounts_userId_index").on(table.userId),
+]);
+
+/** Email verification and password reset tokens. */
+export const authVerificationsTable = pgTable("auth_verifications", {
+  id: text().primaryKey(),
+  identifier: text().notNull(),
+  value: text().notNull(),
+  expiresAt: timestamp().notNull(),
+  createdAt: timestamp().notNull().defaultNow(),
+  updatedAt: timestamp().notNull().defaultNow(),
+}, (table) => [
+  index("auth_verifications_identifier_index").on(table.identifier),
+]);
+
+/** A dashboard organization. Its balances, nodes and payouts are on the `organizations` row that references it. */
+export const authOrganizationsTable = pgTable("auth_organizations", {
+  id: text().primaryKey(),
+  name: text().notNull(),
+  slug: text().notNull().unique(),
+  logo: text(),
+  metadata: text(),
+  createdAt: timestamp().notNull(),
+});
+
+/** `owner` (the creator), `admin` or `member`. Owners and admins move money and manage nodes; members read. */
+export const authMembersTable = pgTable("auth_members", {
+  id: text().primaryKey(),
+  organizationId: text().notNull().references(() => authOrganizationsTable.id, { onDelete: 'cascade' }),
+  userId: text().notNull().references(() => authUsersTable.id, { onDelete: 'cascade' }),
+  role: text().notNull().default('member'),
+  createdAt: timestamp().notNull(),
+}, (table) => [
+  index("auth_members_organizationId_index").on(table.organizationId),
+  index("auth_members_userId_index").on(table.userId),
+]);
+
+export const authInvitationsTable = pgTable("auth_invitations", {
+  id: text().primaryKey(),
+  organizationId: text().notNull().references(() => authOrganizationsTable.id, { onDelete: 'cascade' }),
+  email: text().notNull(),
+  role: text(),
+  status: text().notNull().default('pending'),
+  expiresAt: timestamp().notNull(),
+  inviterId: text().notNull().references(() => authUsersTable.id, { onDelete: 'cascade' }),
+  createdAt: timestamp().notNull().defaultNow(),
+}, (table) => [
+  index("auth_invitations_organizationId_index").on(table.organizationId),
+  index("auth_invitations_email_index").on(table.email),
+]);

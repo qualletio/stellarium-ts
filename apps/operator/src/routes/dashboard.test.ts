@@ -1,9 +1,9 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import Stripe from 'stripe';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import type { DashboardAuthenticator, DashboardSession } from '../auth/clerk.js';
+import type { DashboardAuthenticator, DashboardSession } from '../auth/dashboardAuth.js';
 import type { Database } from '../db/database.js';
-import { OperationError } from '../errors.js';
+import { authOrganizationsTable } from '../db/schema.js';
 import type { OrganizationService } from '../organizations.js';
 import { DEFAULT_PAYOUT_POLICY } from '../payouts/payoutService.js';
 import { createService, type Service } from '../service.js';
@@ -11,15 +11,14 @@ import { StripeSdkGateway } from '../stripe/gateway.js';
 import { BILLING_CONFIG, createTestDatabase, FakeStripe, generateNodeKeys, seedOrganizations, signedVoucher } from '../testing.js';
 import routes from './index.js';
 
-/** Accepts tokens of the form `<userId>:<clerkOrgId>:<role>`. */
+/** Accepts a `session=<userId>:<organizationId>:<role>` cookie. The organization is named `Org <id>`. */
 class FakeAuthenticator implements DashboardAuthenticator {
-    async verify(token: string): Promise<DashboardSession> {
-        const [userId, clerkOrgId, ...role] = token.split(':');
-        if (!userId) throw new OperationError(401, 'Invalid session token');
-        // Like ClerkAuthenticator, drops the `org:` prefix of Clerk's role keys.
-        return { userId, clerkOrgId: clerkOrgId || undefined, role: role.join(':').replace(/^org:/, '') || undefined };
+    async verify(headers: Headers): Promise<DashboardSession | undefined> {
+        const token = headers.get('cookie')?.match(/(?:^|; )session=([^;]*)/)?.[1];
+        const [userId, organizationId, role] = token?.split(':') ?? [];
+        if (!userId) return undefined;
+        return { userId, activeOrganization: organizationId ? { id: organizationId, name: `Org ${organizationId}`, role: role ?? 'member' } : undefined };
     }
-    async organizationName(clerkOrgId: string) { return `Clerk ${clerkOrgId}`; }
 }
 
 const WEBHOOK_SECRET = 'whsec_platform';
@@ -51,6 +50,8 @@ describe('dashboard and Stripe routes', () => {
 
     beforeEach(async () => {
         ({ db, close } = await createTestDatabase());
+        // The dashboard organization the fake sessions act in.
+        await db.insert(authOrganizationsTable).values({ id: 'acme', name: 'Org acme', slug: 'acme', createdAt: new Date() });
     });
 
     afterEach(async () => {
@@ -58,27 +59,27 @@ describe('dashboard and Stripe routes', () => {
         await close();
     });
 
-    const as = (token: string) => ({ authorization: `Bearer ${token}` });
-    const admin = as('user_admin:clerk_acme:org:admin');
-    const member = as('user_member:clerk_acme:org:member');
+    const as = (token: string) => ({ cookie: `theme=dark; session=${token}` });
+    const admin = as('user_admin:acme:admin');
+    const member = as('user_member:acme:member');
 
     describe('dashboard', () => {
         beforeEach(() => start());
 
-        test('creates the organization for a Clerk organization on first use, then reuses it', async () => {
+        test('creates the organization for a dashboard organization on first use, then reuses it', async () => {
             const first = await fastify.inject({ method: 'GET', url: '/v1/org', headers: member });
             const second = await fastify.inject({ method: 'GET', url: '/v1/org', headers: admin });
 
             expect(first.statusCode).toBe(200);
             expect(first.json()).toMatchObject({
-                id: expect.stringMatching(/^org_/), name: 'Clerk clerk_acme', role: 'member',
+                id: expect.stringMatching(/^org_/), name: 'Org acme', role: 'member', admin: false,
                 balanceMicroUsd: 0, availableMicroUsd: 0, payableMicroUsd: 0, payoutsEnabled: false, payoutOnboardingStarted: false, frozen: false,
             });
             expect(second.json().id).toBe(first.json().id);
         });
 
         test.each([
-            ['no token', {}, 401],
+            ['no session', {}, 401],
             ['no active organization', as('user_1::'), 403],
         ])('refuses a request with %s', async (_, headers, status) => {
             expect((await fastify.inject({ method: 'GET', url: '/v1/org', headers })).statusCode).toBe(status);
@@ -95,6 +96,13 @@ describe('dashboard and Stripe routes', () => {
                 const response = await fastify.inject({ method, url, payload, headers: member });
                 expect(response.statusCode, `${method} ${url}`).toBe(403);
             }
+        });
+
+        test('counts owners as admins', async () => {
+            const response = await fastify.inject({ method: 'POST', url: '/v1/org/enrollment-tokens', payload: {}, headers: as('user_owner:acme:owner') });
+
+            expect(response.statusCode).toBe(200);
+            expect((await fastify.inject({ method: 'GET', url: '/v1/org', headers: as('user_owner:acme:owner') })).json()).toMatchObject({ role: 'owner', admin: true });
         });
 
         test('an admin starts a top-up, opens the portal and Connect onboarding', async () => {

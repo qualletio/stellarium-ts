@@ -1,9 +1,11 @@
 'use client';
 
-import { OrganizationSwitcher, UserButton } from '@clerk/nextjs';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import type { OrganizationListItem, User } from '@/lib/api';
 import { DOCS_URL } from '@/lib/site';
+import { AccountMenu } from './AccountMenu';
+import { OrganizationSwitcher } from './OrganizationSwitcher';
 import styles from './Sidebar.module.css';
 import { StarMark } from './StarMark';
 import { ThemeToggle } from './ThemeToggle';
@@ -31,7 +33,7 @@ const GROUPS = [
 
 const isActive = (pathname: string, href: string) => (href === '/' ? pathname === '/' : pathname === href || pathname.startsWith(`${href}/`));
 
-export function Sidebar() {
+export function Sidebar({ user, organizations, activeOrganizationId }: { user: User; organizations: OrganizationListItem[]; activeOrganizationId: string }) {
   const pathname = usePathname();
   return (
     <aside className={styles.sidebar}>
@@ -41,7 +43,7 @@ export function Sidebar() {
       </Link>
 
       <div className={styles.switcher}>
-        <OrganizationSwitcher hidePersonal afterSelectOrganizationUrl="/" afterCreateOrganizationUrl="/" afterLeaveOrganizationUrl="/select-organization" />
+        <OrganizationSwitcher organizations={organizations} activeOrganizationId={activeOrganizationId} />
       </div>
 
       <nav className={styles.nav} aria-label="Main">
@@ -67,8 +69,7 @@ export function Sidebar() {
           Documentation <span aria-hidden="true">↗</span>
         </a>
         <div className={styles.account}>
-          {/* Avatar first, then the name, as in the Claude Console. */}
-          <UserButton showName appearance={{ elements: { userButtonBox: { flexDirection: 'row-reverse' } } }} />
+          <AccountMenu user={user} />
           <ThemeToggle />
         </div>
       </div>

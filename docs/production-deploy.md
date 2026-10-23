@@ -6,9 +6,9 @@ This guide runs Stellarium's payment stack for real money:
 - **The operator** (`apps/operator`): holds balances, moves money for paid calls, and talks to Stripe.
 - **The dashboard** (`apps/dashboard`): the console at platform.stellarium.sh.
 - **Stripe**, in live mode: card top-ups through Checkout, and payouts through Connect Express (US only).
-- **Clerk**, a production instance: dashboard sign-in, organizations and roles.
+- **Resend**: the dashboard's verification, password reset and invitation emails. Sign-in itself is Better Auth, inside the operator.
 
-Do the whole procedure with Stripe in test mode and a Clerk development instance first. The README's [Running Locally](../README.md#running-locally) guide walks through that end to end.
+Do the whole procedure with Stripe in test mode first. The README's [Running Locally](../README.md#running-locally) guide walks through that end to end.
 
 ## 1. Secrets
 
@@ -16,9 +16,9 @@ Do the whole procedure with Stripe in test mode and a Clerk development instance
 | --- | --- | --- |
 | `STRIPE_SECRET_KEY` (`sk_live_...`) | Operator | Moves real money. Use a restricted key if you prefer, with write access to Checkout Sessions, Customers, Customer Portal sessions, Accounts, Account Links, Login Links and Transfers. |
 | `STRIPE_WEBHOOK_SECRET`, `STRIPE_CONNECT_WEBHOOK_SECRET` | Operator | The signing secrets of the two webhook endpoints in step 6. They are different in production. |
-| `CLERK_SECRET_KEY` | Operator and dashboard | The production instance's secret key. |
-| `CLERK_JWT_KEY` | Operator | The production instance's JWT public key (PEM). Lets the operator verify session tokens without a network call. |
-| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Dashboard | Public, but specific to the production instance. |
+| `BETTER_AUTH_SECRET` | Operator | Signs dashboard session cookies. Generate one with `openssl rand -base64 32`. Changing it signs everyone out. |
+| `RESEND_API_KEY` | Operator | Sends the dashboard's emails. |
+| `GITHUB_CLIENT_SECRET` | Operator | Optional, for GitHub sign-in. |
 | `DATABASE_URL` | Operator | Contains the database password. |
 
 Keep them in your platform's secrets manager, not in files.
@@ -39,14 +39,12 @@ The webhook endpoints need the operator's public URL, so they come in step 6.
 
 **Platform balance and payouts.** Transfers to providers are paid from the platform's *available* Stripe balance. Card payments become available a few days after capture (Stripe shows your account's schedule). The operator's default 7-day hold on earnings covers that. If you shorten the hold, a transfer can fail for insufficient funds; the operator returns its amount to the provider's earnings and retries in a later week.
 
-## 3. Clerk
+## 3. Email and sign-in
 
-In the [Clerk dashboard](https://dashboard.clerk.com):
+Dashboard accounts, sessions, organizations and invitations are [Better Auth](https://www.better-auth.com) tables in the operator's database. People sign in with an email and password, which they must verify, or with GitHub if you configure it. An organization's creator is its `owner`; owners and `admin`s can buy credits, manage nodes, set up payouts and invite people, and `member`s can view.
 
-1. Create a production instance for the application, on the domain `platform.stellarium.sh`. Add the DNS records Clerk lists and wait for them to verify.
-2. Turn on **Organizations**. Balances, nodes and payouts belong to organizations. Clerk's `org:admin` role can buy credits, manage nodes and set up payouts; `org:member` can view.
-3. Configure the sign-in methods you want (email, Google, GitHub and so on). Social providers need their own production OAuth credentials.
-4. On the **API keys** page, copy the publishable key, the secret key and the JWT public key.
+1. In [Resend](https://resend.com), verify a sending domain (for example `stellarium.sh`) and create an API key. Without one the operator only logs emails, so nobody can verify an account.
+2. Optional: create a GitHub OAuth app with the callback URL `https://platform.stellarium.sh/api/auth/callback/github`.
 
 ## 4. Database
 
@@ -67,8 +65,10 @@ Configure it with environment variables:
 | `DATABASE_URL` | Managed PostgreSQL URL (add `?sslmode=require` if your provider needs it). |
 | `STRIPE_SECRET_KEY` | From step 2. |
 | `STRIPE_WEBHOOK_SECRET`, `STRIPE_CONNECT_WEBHOOK_SECRET` | From step 6. The operator refuses to start with a Stripe key but without these. |
-| `CLERK_SECRET_KEY`, `CLERK_JWT_KEY` | From step 3. |
-| `DASHBOARD_URL` | `https://platform.stellarium.sh`. The only CORS origin and the only accepted session-token `azp`. Stripe sends users back to pages under it. |
+| `BETTER_AUTH_SECRET` | From step 1. |
+| `RESEND_API_KEY`, `EMAIL_FROM` | From step 3. `EMAIL_FROM` is an address on the verified domain, such as `Stellarium <no-reply@stellarium.sh>`. |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Optional, from step 3. |
+| `DASHBOARD_URL` | `https://platform.stellarium.sh`. The only CORS origin and the only origin Better Auth accepts. Links in emails, and Stripe, send users to pages under it. |
 | `PLATFORM_FEE_BPS` | Optional. The platform's share of each captured payment, in basis points. Defaults to 2000 (20%). |
 | `MIN_TOP_UP_CENTS`, `MAX_TOP_UP_CENTS` | Optional. Default 1000 ($10) and 100000 ($1,000). |
 | `PAYOUT_HOLD_DAYS`, `PAYOUT_INTERVAL_DAYS`, `PAYOUT_MIN_MICRO_USD` | Optional. Default 7, 7 and 10000000 ($10). Never use the test-mode overrides from the local guide. |
@@ -83,7 +83,7 @@ docker run -d --name operator --restart unless-stopped -p 127.0.0.1:3001:3001 \
 
 The operator serves plain HTTP on port 3001. Put it behind a TLS reverse proxy (Caddy, nginx, or a cloud load balancer), on its own host name, for example `operator.stellarium.sh`. Run one instance: its maintenance loop (releasing expired holds, retrying and running payouts) runs in every process.
 
-**Rate limiting behind a proxy.** `apps/operator/src/server.ts` creates Fastify without `trustProxy`, so behind a proxy every request appears to come from the proxy, and the per-IP limit becomes a global one. Enable `trustProxy` or raise `RATE_LIMIT_MAX` before going live.
+**Rate limiting behind a proxy.** `apps/operator/src/server.ts` creates Fastify without `trustProxy`, so behind a proxy every request appears to come from the proxy, and the per-IP limit becomes a global one. Enable `trustProxy` or raise `RATE_LIMIT_MAX` before going live. The auth routes (`/v1/auth/*`) skip that limit: Better Auth limits them itself, per client IP from `X-Forwarded-For`, which the dashboard sets. Have the proxy in front of the operator overwrite that header rather than append to it, so clients can't choose their own address.
 
 Nodes that host paid functions use `OPERATOR_URL=https://<operator host>/v1`.
 
@@ -105,17 +105,16 @@ Deploy `apps/dashboard` as a Next.js app on the domain `platform.stellarium.sh`,
 | Variable | Value |
 | --- | --- |
 | `OPERATOR_URL` | `https://<operator host>/v1`. Read on the server only. |
-| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` | From step 3. |
-| `NEXT_PUBLIC_CLERK_SIGN_IN_URL`, `NEXT_PUBLIC_CLERK_SIGN_UP_URL` | `/sign-in` and `/sign-up`. |
+| `GITHUB_SIGN_IN` | `true` if the operator has GitHub credentials. |
 
-`NEXT_PUBLIC_*` values are compiled into the client bundle, so set them before building.
+The dashboard forwards `/api/auth/*` to the operator, so it holds no auth secrets of its own.
 
 ## 8. Smoke test
 
 Use small amounts and a real card.
 
 1. Liveness: `curl https://<operator host>/v1/` returns `{"hello":"world"}`.
-2. Sign up at https://platform.stellarium.sh and create two organizations, a caller and a provider.
+2. Sign up at https://platform.stellarium.sh, verify your email from the message Resend delivers, and create two organizations, a caller and a provider.
 3. **Credits** (caller): buy $10. The balance updates within seconds, and the payment appears in Stripe. If it doesn't, check the platform webhook endpoint's deliveries in Stripe.
 4. **Payouts** (provider): set up payouts with real details. The status shows **Ready** when `account.updated` arrives on the Connect endpoint.
 5. **Nodes**: create an enrollment token in each organization and start a node with it (`ENROLLMENT_TOKEN`, `OPERATOR_URL`).
@@ -131,4 +130,4 @@ The first payout goes out once the provider's earnings, after the 7-day hold, re
   - `Payout has been pending too long to retry safely`: a transfer may or may not exist in Stripe. Check Stripe for a transfer with the payout's `payoutId` metadata before doing anything.
 - **Disputes:** respond in Stripe. An open dispute takes the disputed amount off the organization's balance, and a won dispute returns it. The platform absorbs lost disputes.
 - **Back up the database,** and test restoring it.
-- **Rotate keys** in Stripe and Clerk, then update the operator's and dashboard's environment and restart them. Rotating a webhook endpoint's secret needs the matching operator variable updated at the same time.
+- **Rotate keys** in Stripe and Resend (and `BETTER_AUTH_SECRET`, which signs everyone out), then update the operator's and dashboard's environment and restart them. Rotating a webhook endpoint's secret needs the matching operator variable updated at the same time.

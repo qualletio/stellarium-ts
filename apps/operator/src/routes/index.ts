@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { OperationError } from '../errors.js';
 import type { Service } from '../service.js';
+import authRoutes from './auth.js';
 import dashboardRoutes from './dashboard.js';
 import nodeRoutes from './nodes.js';
 import paymentRoutes from './payments.js';
@@ -29,6 +30,9 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, { serv
 
     await fastify.register(nodeRoutes, { service });
     await fastify.register(paymentRoutes, { service });
+    if (service.auth) {
+        await fastify.register(authRoutes, { auth: service.auth });
+    }
     if (service.dashboardAuthenticator) {
         await fastify.register(dashboardRoutes, { service, authenticator: service.dashboardAuthenticator });
     }

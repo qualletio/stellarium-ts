@@ -1,18 +1,19 @@
 # Stellarium Platform dashboard
 
-The console at platform.stellarium.sh. Organization members see their prepaid balance, usage and payouts. Admins buy credits, enroll nodes and set up payouts. It is a Next.js App Router app with CSS Modules (no Tailwind) and Clerk for sign-in, organizations and roles. Its look follows stellarium.sh.
+The console at platform.stellarium.sh. Organization members see their prepaid balance, usage and payouts. Admins buy credits, enroll nodes and set up payouts. It is a Next.js App Router app with CSS Modules (no Tailwind). Sign-in, organizations and roles are [Better Auth](https://www.better-auth.com), hosted by the operator. Its look follows stellarium.sh.
 
 ## Running locally
 
-1. Start the operator with `CLERK_SECRET_KEY` (and `CLERK_JWT_KEY`) from the same Clerk instance and `DASHBOARD_URL=http://localhost:3010`. Top-ups and payouts also need its Stripe keys. See `apps/operator/README.md`.
-2. Copy `.env.example` to `.env.local` and fill in the Clerk keys.
+1. Start the operator with `BETTER_AUTH_SECRET` and `DASHBOARD_URL=http://localhost:3010` (`docker compose up` sets both). Top-ups and payouts also need its Stripe keys. See `apps/operator/README.md`.
+2. Copy `.env.example` to `.env.local`.
 3. `pnpm --filter dashboard dev`, then open http://localhost:3010. (Port 3010, so it can run beside the registry, which uses 3000.)
 
-In Clerk, enable Organizations. Clerk's `org:admin` role can buy credits, open the billing portal, set up payouts and manage nodes. `org:member` can view.
+An organization's creator is its `owner`. Owners and `admin`s can buy credits, open the billing portal, set up payouts, manage nodes and invite people. `member`s can view.
 
 ## How it's built
 
-- Data is fetched in server components through `lib/api.ts` (`server-only`), which calls the operator with the user's Clerk session token. Mutations are Server Actions in `lib/actions.ts`. Actions that go to Stripe redirect to the URL the operator returns.
-- `proxy.ts` (Next 16's middleware) requires a signed-in user everywhere but sign-in and sign-up. The `(console)` layout requires an active organization and sends the user to `/select-organization` otherwise.
-- Theme tokens are stellarium.sh's, in `app/globals.css` under `:root[data-theme]`. The theme is set before paint by the script in `app/layout.tsx` and shares stellarium.sh's `theme` storage key. Clerk's components take the same tokens through `appearance.variables`.
+- Better Auth runs in the operator at `/v1/auth/*`. `app/api/auth/[...all]/route.ts` forwards the browser's `/api/auth/*` there, so its cookies are set on the dashboard's domain. Client components call it through `lib/auth-client.ts`: sign-in and sign-up, password reset, the organization switcher, accepting invitations, and managing members on the settings page. Without `RESEND_API_KEY` on the operator, emails' links are in its log.
+- Data is fetched in server components through `lib/api.ts` (`server-only`), which calls the operator with the browser's session cookie. Mutations are Server Actions in `lib/actions.ts`. Actions that go to Stripe redirect to the URL the operator returns.
+- `proxy.ts` (Next 16's middleware) sends visitors without a session cookie to `/sign-in`, except on the sign-in, sign-up and password pages. The `(console)` layout checks the session and requires an active organization, sending the user to `/select-organization` otherwise.
+- Theme tokens are stellarium.sh's, in `app/globals.css` under `:root[data-theme]`. The theme is set before paint by the script in `app/layout.tsx` and shares stellarium.sh's `theme` storage key.
 - Shared building blocks (headers, sections, cards, tables, buttons, badges, fields, skeletons) are in `components/ui.module.css`. Each component has its own module beside it.

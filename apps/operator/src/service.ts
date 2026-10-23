@@ -1,4 +1,5 @@
-import type { DashboardAuthenticator } from './auth/clerk.js';
+import { type Auth, type AuthConfig, createAuth } from './auth/betterAuth.js';
+import { BetterAuthAuthenticator, type DashboardAuthenticator } from './auth/dashboardAuth.js';
 import { type BillingConfig, BillingService } from './billing/billingService.js';
 import type { Database } from './db/database.js';
 import { OrganizationService } from './organizations.js';
@@ -18,7 +19,9 @@ export interface StripeConfig {
 export interface ServiceConfig extends PaymentPolicy {
     /** Without it, top-ups, onboarding and payouts are unavailable: balances come only from promotions. */
     stripe?: StripeConfig;
-    /** Without it, the dashboard API isn't served. */
+    /** Without it, neither sign-in nor the dashboard API is served. */
+    auth?: AuthConfig;
+    /** Replaces the Better Auth sessions `auth` enables, in tests. */
     dashboardAuthenticator?: DashboardAuthenticator;
 }
 
@@ -29,6 +32,7 @@ export interface Service {
     payouts?: PayoutService;
     webhooks?: StripeWebhookService;
     stripe?: StripeConfig;
+    auth?: Auth;
     dashboardAuthenticator?: DashboardAuthenticator;
 }
 
@@ -39,6 +43,10 @@ export function createService(db: Database, config: ServiceConfig): Service {
         payments: new PaymentService(db, organizations, config),
         dashboardAuthenticator: config.dashboardAuthenticator,
     };
+    if (config.auth) {
+        service.auth = createAuth(db, config.auth);
+        service.dashboardAuthenticator ??= new BetterAuthAuthenticator(service.auth, db);
+    }
     if (config.stripe) {
         service.stripe = config.stripe;
         service.billing = new BillingService(db, config.stripe.gateway, config.stripe.billing);

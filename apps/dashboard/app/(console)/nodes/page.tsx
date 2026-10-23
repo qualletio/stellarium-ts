@@ -11,7 +11,7 @@ export const metadata: Metadata = { title: 'Nodes' };
 
 export default async function NodesPage() {
   const [organization, nodes] = await Promise.all([getOrganization(), listNodes()]);
-  const admin = organization.role === 'admin';
+  const admin = organization.admin;
 
   return (
     <>

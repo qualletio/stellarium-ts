@@ -1,4 +1,3 @@
-import { ClerkProvider } from '@clerk/nextjs';
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
 import { SITE_DESCRIPTION, SITE_NAME } from '@/lib/site';
@@ -19,33 +18,14 @@ export const metadata: Metadata = {
 // Runs before first paint so the saved (or system) theme applies without a flash. Same key as stellarium.sh.
 const themeScript = `(function(){try{var t=localStorage.getItem("${THEME_STORAGE_KEY}");if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t)}catch(e){}})()`;
 
-/** Clerk's components (sign-in, org switcher, members) drawn with the site's tokens, so they follow the theme. */
-const clerkAppearance = {
-  variables: {
-    colorPrimary: 'var(--button)',
-    colorPrimaryForeground: 'var(--button-ink)',
-    colorBackground: 'var(--paper)',
-    colorForeground: 'var(--ink)',
-    colorMutedForeground: 'var(--muted)',
-    colorInput: 'var(--paper)',
-    colorInputForeground: 'var(--ink)',
-    colorBorder: 'var(--line)',
-    colorDanger: 'var(--danger)',
-    fontFamily: 'var(--sans)',
-    borderRadius: '0',
-  },
-};
-
 export default function RootLayout({ children }: LayoutProps<'/'>) {
   return (
-    <ClerkProvider appearance={clerkAppearance}>
-      <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`} suppressHydrationWarning>
-        <head>
-          {/* biome-ignore lint/security/noDangerouslySetInnerHtml: static theme bootstrap, no user input */}
-          <script dangerouslySetInnerHTML={{ __html: themeScript }} />
-        </head>
-        <body>{children}</body>
-      </html>
-    </ClerkProvider>
+    <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`} suppressHydrationWarning>
+      <head>
+        {/* biome-ignore lint/security/noDangerouslySetInnerHtml: static theme bootstrap, no user input */}
+        <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+      </head>
+      <body>{children}</body>
+    </html>
   );
 }

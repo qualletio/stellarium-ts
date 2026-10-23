@@ -20,7 +20,7 @@ export default async function BillingPage({ searchParams }: PageProps<'/billing'
   const query = await searchParams;
   const before = cursor(query.before);
   const [organization, topUps] = await Promise.all([getOrganization(), listTopUps(before)]);
-  const admin = organization.role === 'admin';
+  const admin = organization.admin;
 
   return (
     <>
