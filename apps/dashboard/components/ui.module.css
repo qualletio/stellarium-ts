@@ -371,6 +371,20 @@
   margin: 0;
 }
 
+/* A checkbox and its label, level with the inputs beside it. */
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.check input {
+  accent-color: var(--accent);
+}
+
 .error {
   color: var(--danger);
   font-size: 13px;

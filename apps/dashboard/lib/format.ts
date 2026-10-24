@@ -9,6 +9,10 @@ export const formatUsd = (microUsd: number) => usdFormat.format(microUsd / MICRO
 /** `84` → "$0.000084". For per-call charges, which are often fractions of a cent. */
 export const formatPreciseUsd = (microUsd: number) => preciseUsdFormat.format(microUsd / MICRO_USD_PER_USD);
 
+/** A node's token price: "Free", or "$2.50 per million tokens". */
+export const formatTokenPrice = (microUsdPerMillionTokens: number) =>
+  microUsdPerMillionTokens === 0 ? 'Free' : `${formatPreciseUsd(microUsdPerMillionTokens)} per million tokens`;
+
 export const formatCents = (cents: number) => usdFormat.format(cents / 100);
 
 // UTC, so server-rendered dates don't depend on the server's time zone. Pages say so.

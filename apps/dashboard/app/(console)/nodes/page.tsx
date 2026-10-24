@@ -1,17 +1,20 @@
 import type { Metadata } from 'next';
 import { CopyButton } from '@/components/CopyButton';
 import { EnrollmentForm } from '@/components/EnrollmentForm';
+import { ListingForm } from '@/components/ListingForm';
 import { RevokeButton } from '@/components/RevokeButton';
 import { StatusBadge } from '@/components/StatusBadge';
 import ui from '@/components/ui.module.css';
+import { revokeNodeAction } from '@/lib/actions';
 import { getOrganization, listNodes } from '@/lib/api';
-import { formatDate, shortKey } from '@/lib/format';
+import { formatDate, formatTokenPrice, shortKey } from '@/lib/format';
 
 export const metadata: Metadata = { title: 'Nodes' };
 
 export default async function NodesPage() {
   const [organization, nodes] = await Promise.all([getOrganization(), listNodes()]);
   const admin = organization.admin;
+  const active = nodes.filter((node) => !node.revokedAt);
 
   return (
     <>
@@ -51,6 +54,7 @@ export default async function NodesPage() {
                   <th>Node</th>
                   <th>Public key</th>
                   <th>Enrolled</th>
+                  <th>Listing</th>
                   <th>Status</th>
                   {admin && <th aria-label="Actions" />}
                 </tr>
@@ -67,9 +71,12 @@ export default async function NodesPage() {
                     </td>
                     <td>{formatDate(node.createdAt)}</td>
                     <td>
+                      {node.listed ? formatTokenPrice(node.priceMicroUsdPerMillionTokens) : <span className={ui.secondary}>Not listed</span>}
+                    </td>
+                    <td>
                       {node.revokedAt ? <StatusBadge status="revoked" /> : <StatusBadge status="active" />}
                     </td>
-                    {admin && <td className={ui.numeric}>{!node.revokedAt && <RevokeButton publicKey={node.publicKey} />}</td>}
+                    {admin && <td className={ui.numeric}>{!node.revokedAt && <RevokeButton action={revokeNodeAction} name="publicKey" value={node.publicKey} />}</td>}
                   </tr>
                 ))}
               </tbody>
@@ -77,6 +84,24 @@ export default async function NodesPage() {
           </div>
         )}
       </section>
+
+      {active.length > 0 && (
+        <section className={ui.section}>
+          <div className={ui.sectionHead}>
+            <div>
+              <h2 className={ui.sectionTitle}>Listings</h2>
+              <p className={ui.description}>
+                A listed node shows on Explore, and other organizations can create API clients that run scripts on it. They pay your price
+                for each million script tokens their runs execute, plus your paid functions' prices. You earn both less the 20% platform fee.
+                Your own API clients always run free. Listing checks that the node&apos;s URL answers with its key.
+              </p>
+            </div>
+          </div>
+          {admin
+            ? active.map((node) => <ListingForm key={node.publicKey} node={node} />)
+            : <p className={ui.note}>Only organization admins can list nodes.</p>}
+        </section>
+      )}
     </>
   );
 }
