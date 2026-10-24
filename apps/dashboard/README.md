@@ -8,7 +8,9 @@ The console at platform.stellarium.sh. Organization members see their prepaid ba
 2. Copy `.env.example` to `.env.local`.
 3. `pnpm --filter dashboard dev`, then open http://localhost:3010. (Port 3010, so it can run beside the registry, which uses 3000.)
 
-An organization's creator is its `owner`. Owners and `admin`s can buy credits, open the billing portal, set up payouts, manage nodes and invite people. `member`s can view.
+An organization's creator is its `owner`. Owners and `admin`s can buy credits, open the billing portal, set up payouts, manage and list nodes, create API clients and invite people. `member`s can view.
+
+A listed node appears on **Explore** with its price per million script tokens. **API clients** run scripts on one node: one of the organization's own, for free, or a listed one, paid from the balance. A new client's secret is shown once, with an example that exchanges it for a run token at the operator. Set `PUBLIC_OPERATOR_URL` when the operator's public URL differs from `OPERATOR_URL`, so the example uses it. **Usage** shows billed runs beside paid calls.
 
 ## How it's built
 

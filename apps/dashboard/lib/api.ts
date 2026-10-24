@@ -58,8 +58,62 @@ export interface Payout {
 export interface Node {
   publicKey: string;
   label: string | null;
+  /** The URL the node reported to the operator. Listing needs it. */
+  baseUrl: string | null;
+  name: string | null;
+  description: string | null;
+  priceMicroUsdPerMillionTokens: number;
+  listed: boolean;
+  /** When the node's `/v1/self` last answered with its key. */
+  verifiedAt: string | null;
   createdAt: string;
   revokedAt: string | null;
+}
+
+/** A node any organization's API clients can run scripts on. */
+export interface Listing {
+  publicKey: string;
+  name: string | null;
+  description: string | null;
+  baseUrl: string | null;
+  priceMicroUsdPerMillionTokens: number;
+  organizationId: string;
+  organizationName: string;
+  verifiedAt: string | null;
+}
+
+/** Credentials that run scripts on one node, paid from the organization's balance. The secret is never returned after creation. */
+export interface ApiClient {
+  id: string;
+  organizationId: string;
+  nodePublicKey: string;
+  label: string | null;
+  maxRunCostMicroUsd: number;
+  monthlyCapMicroUsd: number | null;
+  createdBy: string | null;
+  createdAt: string;
+  revokedAt: string | null;
+  /** What its runs have cost or still hold this calendar month (UTC). */
+  monthToDateMicroUsd: number;
+}
+
+/** One script an API client ran on another organization's node. Its paid calls are receipts. */
+export interface Run {
+  id: number;
+  runId: string;
+  clientId: string;
+  payerOrganizationId: string;
+  recipientOrganizationId: string;
+  nodePublicKey: string;
+  status: 'held' | 'captured' | 'released';
+  priceMicroUsdPerMillionTokens: number;
+  maxTokens: number;
+  holdMicroUsd: number;
+  tokens: number | null;
+  amountMicroUsd: number | null;
+  feeMicroUsd: number | null;
+  createdAt: string;
+  capturedAt: string | null;
 }
 
 export interface User {
@@ -134,7 +188,7 @@ export class OperatorError extends Error {
 }
 
 /** Calls the operator as the signed-in user, acting on their active organization. Balances change constantly, so nothing is cached. */
-async function request<T>(method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown): Promise<T> {
+async function request<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
   const response = await fetch(`${OPERATOR_URL}${path}`, {
     method,
     cache: 'no-store',
@@ -175,3 +229,31 @@ export const createEnrollmentToken = (label?: string) =>
   request<{ token: string; expiresAt: string }>('POST', '/org/enrollment-tokens', label ? { label } : {});
 
 export const revokeNode = (publicKey: string) => request<{ revoked: boolean }>('DELETE', `/org/nodes/${encodeURIComponent(publicKey)}`);
+
+export interface ListingUpdate {
+  name?: string;
+  description?: string | null;
+  priceMicroUsdPerMillionTokens?: number;
+  listed?: boolean;
+}
+
+export const updateListing = (publicKey: string, update: ListingUpdate) =>
+  request<{ node: Node }>('PATCH', `/org/nodes/${encodeURIComponent(publicKey)}`, update).then((r) => r.node);
+
+export const listListings = () => request<{ listings: Listing[] }>('GET', '/listings').then((r) => r.listings);
+
+export const listClients = () => request<{ clients: ApiClient[] }>('GET', '/org/clients').then((r) => r.clients);
+
+export interface NewApiClient {
+  nodePublicKey: string;
+  label?: string;
+  maxRunCostMicroUsd?: number;
+  monthlyCapMicroUsd?: number | null;
+}
+
+export const createClient = (client: NewApiClient) => request<{ client: Omit<ApiClient, 'monthToDateMicroUsd'>; clientSecret: string }>('POST', '/org/clients', client);
+
+export const revokeClient = (id: string) => request<{ revoked: boolean }>('DELETE', `/org/clients/${encodeURIComponent(id)}`);
+
+export const listRuns = (as: 'payer' | 'provider', before?: number) =>
+  request<{ runs: Run[] }>('GET', `/org/runs?as=${as}&${page(before)}`).then((r) => r.runs);
