@@ -31,6 +31,8 @@ export interface NodeConfig {
     costLimitMicroUsd: number;
     /** Most this node will sign for in one remote inference call. */
     inferenceCostLimitMicroUsd: number;
+    /** SQLite file the node opens. */
+    databasePath?: string;
 }
 
 export interface Service {

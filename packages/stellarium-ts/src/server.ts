@@ -42,7 +42,7 @@ export interface StellariumNodeOptions {
      * Defaults to `INFERENCE_COST_LIMIT_MICRO_USD`, then to the resolved `costLimitMicroUsd`.
      */
     inferenceCostLimitMicroUsd?: number;
-    /** SQLite file. Defaults to `./requestscript.db`; use ':memory:' for tests. */
+    /** SQLite file. Defaults to `DATABASE_PATH`, then `./requestscript.db`; use ':memory:' for tests. */
     databasePath?: string;
     /**
      * Grant chains addressed to this node, stored at start. Each is root first. A stored renewal
@@ -92,6 +92,7 @@ export function resolveConfig(options: StellariumNodeOptions, resources: Stellar
             : options.operatorUrl ?? process.env.OPERATOR_URL,
         costLimitMicroUsd: costLimit,
         inferenceCostLimitMicroUsd: inferenceCostLimit,
+        databasePath: options.databasePath ?? process.env.DATABASE_PATH ?? DEFAULT_DATABASE_PATH,
     };
 }
 
@@ -131,7 +132,7 @@ export class StellariumNode {
                 fastify.log.warn(`No session with the operator, so this node can't be listed: ${error instanceof Error ? error.message : String(error)}`);
             });
         }
-        const db = await openDatabase(options.databasePath ?? DEFAULT_DATABASE_PATH);
+        const db = await openDatabase(config.databasePath);
         fastify.addHook('onClose', async () => db.close());
 
         const service = createService(db, this.resources, config, { approveGrant: options.approveGrant });

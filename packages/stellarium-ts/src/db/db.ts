@@ -1,3 +1,5 @@
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import sqlite3 from 'sqlite3';
 import { open, type Database } from 'sqlite';
 
@@ -17,6 +19,9 @@ const SCHEMA_VERSION = 6;
 
 /** Opens (or creates) the node database and brings its schema up to date. Pass ':memory:' for tests. */
 export async function openDatabase(filename: string = DEFAULT_DATABASE_PATH): Promise<Database> {
+    if (filename !== ':memory:') {
+        mkdirSync(dirname(filename), { recursive: true });
+    }
     const db = await open({ filename, driver: sqlite3.Database });
     await createTables(db);
     return db;

@@ -85,7 +85,7 @@ await node.start(fastify, {
 | `enrollmentToken`   | `ENROLLMENT_TOKEN`                  | One-time token that enrolls this node in an organization ([Payments](#payments)) |
 | `costLimitMicroUsd` | `COST_LIMIT_MICRO_USD`, then `10000` | Most this node pays for one remote call, in micro-USD    |
 | `inferenceCostLimitMicroUsd` | `INFERENCE_COST_LIMIT_MICRO_USD`, then `costLimitMicroUsd` | Most this node signs for in one remote inference call (its voucher's `maxAmount`) |
-| `databasePath`      | `./requestscript.db`                | SQLite file. `:memory:` keeps everything in memory       |
+| `databasePath`      | `DATABASE_PATH`, then `./requestscript.db` | SQLite file. `:memory:` keeps everything in memory |
 
 `start` resolves once the node is listening and, with `startingPeer`, once it has joined the network. It rejects if it can't listen, if a required setting is missing, or if bootstrapping fails.
 
@@ -101,6 +101,7 @@ Importing `StellariumNode` loads [dotenv](https://github.com/motdotla/dotenv), s
 | `ENROLLMENT_TOKEN`    | One-time token from the [Stellarium Platform](https://platform.stellarium.sh) that enrolls this node in an organization at startup. Only needed until the node is enrolled.                       |
 | `COST_LIMIT_MICRO_USD` | Most this node pays for one remote call, in micro-USD.                                                                                                                                          |
 | `INFERENCE_COST_LIMIT_MICRO_USD` | Most this node signs for in one remote inference call, in micro-USD. Defaults to the cost limit.                                                                                    |
+| `DATABASE_PATH`       | SQLite file the node keeps peers, learned resources and grants in. Defaults to `./requestscript.db`. In a container, point it at a persistent volume, for example `/data/requestscript.db`. |
 
 Signing keys can be generated with the following script:
 

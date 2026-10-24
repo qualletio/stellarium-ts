@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { DEFAULT_COST_LIMIT_MICRO_USD, resolveConfig } from "../server.js";
+import { DEFAULT_DATABASE_PATH } from "../db/db.js";
 import { modelResource, weatherResource } from "./helpers.js";
 
 describe("resolveConfig", () => {
@@ -33,6 +34,15 @@ describe("resolveConfig", () => {
 
     test.each([-1, 1.5, Number.NaN])("rejects a cost limit of %s", (costLimitMicroUsd) => {
         expect(() => resolveConfig({ ...keys, costLimitMicroUsd })).toThrow("costLimitMicroUsd");
+    });
+
+    test("reads the database path from its option, then DATABASE_PATH, then the default", () => {
+        vi.stubEnv("DATABASE_PATH", undefined);
+        expect(resolveConfig(keys).databasePath).toBe(DEFAULT_DATABASE_PATH);
+
+        vi.stubEnv("DATABASE_PATH", "/data/requestscript.db");
+        expect(resolveConfig(keys).databasePath).toBe("/data/requestscript.db");
+        expect(resolveConfig({ ...keys, databasePath: ":memory:" }).databasePath).toBe(":memory:");
     });
 
     test("requires the signing keys and base URL", () => {
