@@ -3,15 +3,21 @@
 //
 //   SEED_PROVIDER_PUBLIC_KEY / SEED_CALLER_PUBLIC_KEY   the nodes' SIGNING_PUBLIC_KEY values
 //   SEED_CALLER_CREDIT_MICRO_USD                        promotional credit for the caller, once (default $10)
+//   SEED_PROVIDER_BASE_URL                              lists the provider's node at this URL, at $1 per million script tokens
+//   SEED_CLIENT_SECRET                                  the secret of the caller's API client for the provider's node, cli_local_caller
 import 'dotenv/config';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
+import { sha256Hex } from './crypto.js';
+import { apiClientsTable, nodesTable } from './db/schema.js';
 import { OrganizationService } from './organizations.js';
 
 export const SEED_PROVIDER_ORGANIZATION_ID = 'org_local_provider';
 export const SEED_CALLER_ORGANIZATION_ID = 'org_local_caller';
+export const SEED_CLIENT_ID = 'cli_local_caller';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -38,6 +44,20 @@ if (await organizations.create('Local caller', { id: SEED_CALLER_ORGANIZATION_ID
   await organizations.grantPromotion(SEED_CALLER_ORGANIZATION_ID, credit);
 }
 await organizations.enroll(SEED_CALLER_ORGANIZATION_ID, callerPublicKey, 'local-caller-node');
+
+// Stands in for listing it on the dashboard. The node reports the same URL at startup, so it stays listed.
+const providerBaseUrl = process.env.SEED_PROVIDER_BASE_URL;
+if (providerBaseUrl) {
+  await db.update(nodesTable)
+    .set({ baseUrl: providerBaseUrl, name: 'Local resource node', priceMicroUsdPerMillionTokens: 1_000_000, listed: true, verifiedAt: new Date() })
+    .where(eq(nodesTable.publicKey, providerPublicKey));
+}
+const clientSecret = process.env.SEED_CLIENT_SECRET;
+if (clientSecret) {
+  await db.insert(apiClientsTable)
+    .values({ id: SEED_CLIENT_ID, secretHash: sha256Hex(clientSecret), organizationId: SEED_CALLER_ORGANIZATION_ID, nodePublicKey: providerPublicKey, label: 'local', maxRunCostMicroUsd: 1_000_000 })
+    .onConflictDoUpdate({ target: apiClientsTable.id, set: { secretHash: sha256Hex(clientSecret), revokedAt: null } });
+}
 
 console.log(`Seeded ${SEED_PROVIDER_ORGANIZATION_ID} and ${SEED_CALLER_ORGANIZATION_ID}`);
 await db.$client.end();

@@ -1,7 +1,7 @@
 import { operatorAuthorization } from "./operatorAuth.js";
 
 // Wire formats match PaymentVoucher and InferencePaymentVoucher in resource/invoker.ts,
-// and PaymentSubmission in apps/operator/src/routes/payments.ts.
+// and the voucher types in apps/operator/src/payments/types.ts.
 export type PaymentSubmission = FixedPaymentSubmission | InferencePaymentSubmission;
 
 export interface FixedPaymentVoucher {
@@ -14,6 +14,7 @@ export interface FixedPaymentVoucher {
     expiresAt: string;
     invocationHash: string;
     publicKey: string;
+    runId?: string;
 }
 
 export interface InferenceVoucher {
@@ -29,6 +30,7 @@ export interface InferenceVoucher {
     expiresAt: string;
     invocationHash: string;
     publicKey: string;
+    runId?: string;
 }
 
 export interface FixedPaymentSubmission {
@@ -46,6 +48,17 @@ export interface InferencePaymentSubmission {
 
 /** Whether the operator placed a hold for a voucher. A refusal carries the operator's status and error. */
 export type AuthorizeResult = { ok: true } | { ok: false, status: number, error: string };
+
+/** What a node sends to authorize a script run billed to an API client. Matches apps/operator/src/runs/runService.ts. */
+export interface RunAuthorizationRequest {
+    /** The run token the caller presented. */
+    token: string;
+    runId: string;
+    source: string;
+}
+
+/** The operator's hold for a run: up to `heldMicroUsd` for the script's tokens and its paid calls together. */
+export type RunAuthorizeResult = { ok: true, heldMicroUsd: number, maxTokens: number } | { ok: false, status: number, error: string };
 
 export const OPERATOR_MAX_RETRIES = 5;
 /** Authorization runs while the caller waits, so it gives up much sooner than capture and release. */
@@ -122,8 +135,9 @@ export class OperatorClient {
      * enrolls the node first; a node that is already enrolled ignores the token. Throws if the node is
      * not enrolled or the operator refuses.
      */
-    async session(enrollmentToken?: string): Promise<{ organizationId: string }> {
-        const response = await this.post('/nodes/session', enrollmentToken ? { enrollmentToken } : {}, OPERATOR_MAX_RETRIES, OPERATOR_BASE_DELAY_MS);
+    async session(enrollmentToken?: string, baseUrl?: string): Promise<{ organizationId: string }> {
+        const body = { ...(enrollmentToken ? { enrollmentToken } : {}), ...(baseUrl ? { baseUrl } : {}) };
+        const response = await this.post('/nodes/session', body, OPERATOR_MAX_RETRIES, OPERATOR_BASE_DELAY_MS);
         if (!response.ok) {
             throw new Error(`Operator refused this node's session: ${await errorMessage(response)}`);
         }
@@ -135,15 +149,42 @@ export class OperatorClient {
      * running the paid function. An unreachable operator is reported as a 503 refusal.
      */
     async authorize(voucher: FixedPaymentVoucher | InferenceVoucher): Promise<AuthorizeResult> {
+        const result = await this.hold('/payments/authorize', { voucher });
+        return result.ok ? { ok: true } : result;
+    }
+
+    /**
+     * Asks the operator to hold a script run's cost on the paying API client's organization, before running
+     * it. An unreachable operator is reported as a 503 refusal.
+     */
+    async authorizeRun(request: RunAuthorizationRequest): Promise<RunAuthorizeResult> {
+        const result = await this.hold('/runs/authorize', request);
+        if (!result.ok) return result;
+        const { heldMicroUsd, maxTokens } = result.body as { heldMicroUsd: number, maxTokens: number };
+        return { ok: true, heldMicroUsd, maxTokens };
+    }
+
+    /** Charges a held run for the tokens its script executed, and releases the rest of its hold. */
+    async captureRun(request: { runId: string, tokens: number }): Promise<void> {
+        await this.settle('/runs/capture', request);
+    }
+
+    /** Releases a held run without charging it, for a script this node failed to run. */
+    async releaseRun(request: { runId: string }): Promise<void> {
+        await this.settle('/runs/release', request);
+    }
+
+    /** Authorization runs while the caller waits, so it retries briefly and reports an unreachable operator as 503. */
+    private async hold(path: string, body: unknown): Promise<{ ok: true, body: unknown } | { ok: false, status: number, error: string }> {
         let response: Response;
         try {
-            response = await this.post('/payments/authorize', { voucher }, AUTHORIZE_MAX_RETRIES, AUTHORIZE_BASE_DELAY_MS);
+            response = await this.post(path, body, AUTHORIZE_MAX_RETRIES, AUTHORIZE_BASE_DELAY_MS);
         } catch (error) {
-            console.error('Failed to reach the operator to authorize a payment', error);
+            console.error(`Failed to reach the operator for ${path}`, error);
             return { ok: false, status: 503, error: 'Payment operator is unavailable' };
         }
         if (response.ok) {
-            return { ok: true };
+            return { ok: true, body: await response.json().catch(() => undefined) };
         }
         // Retries ran out on a transient failure: the caller may try again later.
         const status = RETRYABLE_STATUSES.has(response.status) ? 503 : response.status;

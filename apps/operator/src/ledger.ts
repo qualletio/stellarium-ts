@@ -18,11 +18,12 @@ export const accounts = {
     payouts: 'platform:payouts',
 } as const;
 
-export type LedgerKind = 'capture' | 'promotion' | 'top_up' | 'refund' | 'dispute' | 'dispute_won' | 'payout' | 'payout_returned';
+export type LedgerKind = 'capture' | 'run_capture' | 'promotion' | 'top_up' | 'refund' | 'dispute' | 'dispute_won' | 'payout' | 'payout_returned';
 
 /** What a ledger transaction records. */
 export interface LedgerReference {
     receiptId?: number;
+    runId?: number;
     topUpId?: number;
     payoutId?: number;
     stripeObjectId?: string;

@@ -94,7 +94,10 @@ try {
   process.exit(1);
 }
 fastify.log.info('Applied database migrations');
-const service = createService(db, { platformFeeBps, stripe, auth });
+// API clients' run tokens are signed with this key, and nodes verify them against /v1/.well-known/jwks.json.
+const runTokenPrivateKey = process.env.RUN_TOKEN_PRIVATE_KEY || undefined;
+if (!runTokenPrivateKey) fastify.log.warn('RUN_TOKEN_PRIVATE_KEY is not set: API clients can\'t get run tokens');
+const service = createService(db, { platformFeeBps, stripe, auth, runTokenPrivateKey });
 
 // Applies to every operator route. Limits are per client IP.
 await fastify.register(rateLimit, {
@@ -102,7 +105,7 @@ await fastify.register(rateLimit, {
   timeWindow: process.env.RATE_LIMIT_TIME_WINDOW ?? '1 minute',
 });
 // Only the dashboard calls the operator from a browser.
-await fastify.register(cors, { origin: dashboardUrl, methods: ['GET', 'POST', 'DELETE'] });
+await fastify.register(cors, { origin: dashboardUrl, methods: ['GET', 'POST', 'PATCH', 'DELETE'] });
 fastify.register(routes, { prefix: '/v1', service });
 
 // Releases holds that providers never captured or released, then retries and runs payouts. One pass at a time.
@@ -114,6 +117,8 @@ const maintenanceTimer = setInterval(async () => {
   try {
     const released = await service.payments.releaseExpiredHolds();
     if (released > 0) fastify.log.info({ released }, 'Released expired holds');
+    const releasedRuns = await service.runs.releaseExpiredRuns();
+    if (releasedRuns > 0) fastify.log.info({ releasedRuns }, 'Released expired runs');
     if (service.payouts) {
       const { stale, ...retried } = await service.payouts.reconcilePending();
       if (retried.paid + retried.failed > 0) fastify.log.info(retried, 'Retried pending payouts');

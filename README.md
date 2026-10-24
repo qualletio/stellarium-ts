@@ -80,8 +80,8 @@ await node.start(fastify, {
 | `baseUrl`           | `BASE_URL`                          | URL peers use to reach this node                         |
 | `publicKey`         | `SIGNING_PUBLIC_KEY`                | This node's signing public key                           |
 | `privateKey`        | `SIGNING_PRIVATE_KEY`               | This node's signing private key                          |
-| `apiKey`            | `API_KEY`                           | Bearer token for `POST /v1/run`                          |
-| `operatorUrl`       | `OPERATOR_URL`                      | Operator that moves money for paid calls                 |
+| `apiKey`            | `API_KEY`                           | Bearer token for `POST /v1/run` and the admin routes     |
+| `operatorUrl`       | `OPERATOR_URL`                      | Operator that moves money for paid calls and issues [run tokens](#api-clients-and-run-tokens) |
 | `enrollmentToken`   | `ENROLLMENT_TOKEN`                  | One-time token that enrolls this node in an organization ([Payments](#payments)) |
 | `costLimitMicroUsd` | `COST_LIMIT_MICRO_USD`, then `10000` | Most this node pays for one remote call, in micro-USD    |
 | `inferenceCostLimitMicroUsd` | `INFERENCE_COST_LIMIT_MICRO_USD`, then `costLimitMicroUsd` | Most this node signs for in one remote inference call (its voucher's `maxAmount`) |
@@ -96,8 +96,8 @@ Importing `StellariumNode` loads [dotenv](https://github.com/motdotla/dotenv), s
 | `BASE_URL`            | Required. Public URL prefix stored on resources this node hosts. Peers call `{BASE_URL}/v1/run/resource`. Set it to this node's origin, for example `http://127.0.0.1:3000`. Do not include `/v1` |
 | `SIGNING_PRIVATE_KEY` | Required. The base64url encoded ED25519 private key used to sign data for publishing to peers and payment vouchers.                                                                               |
 | `SIGNING_PUBLIC_KEY`  | Required. The base64url ED25519 public key used to verify data for publishing to peers. Must be paired with the private key.                                                                      |
-| `API_KEY`             | Bearer token for `POST /v1/run`. When unset, `/v1/run` rejects every request.                                                                                                                     |
-| `OPERATOR_URL`        | Operator base URL including `/v1`. Required when the node hosts paid functions.                                                                                                                   |
+| `API_KEY`             | Bearer token for `POST /v1/run` and the `/v1/admin` routes. When unset, `/v1/run` accepts only run tokens, and the admin routes reject every request.                                          |
+| `OPERATOR_URL`        | Operator base URL including `/v1`. Required when the node hosts paid functions, and to accept [run tokens](#api-clients-and-run-tokens).                                                         |
 | `ENROLLMENT_TOKEN`    | One-time token from the [Stellarium Platform](https://platform.stellarium.sh) that enrolls this node in an organization at startup. Only needed until the node is enrolled.                       |
 | `COST_LIMIT_MICRO_USD` | Most this node pays for one remote call, in micro-USD.                                                                                                                                          |
 | `INFERENCE_COST_LIMIT_MICRO_USD` | Most this node signs for in one remote inference call, in micro-USD. Defaults to the cost limit.                                                                                    |
@@ -149,7 +149,7 @@ Routes are mounted at `/v1`.
 | `PUT /v1/peers`                               | Signed peer announcement  | Add or update a peer                                                                                                           |
 | `GET /v1/resources`                           | —                         | One page of resources registered here, then resources learned from peers: `{ "resources", "nextOffset" }`                      |
 | `PUT /v1/all-resources`                       | Signed resource broadcast | Store a peer's resources                                                                                                       |
-| `POST /v1/run`                                | `{ "source": "..." }`     | Run one `request` script. Requires `Authorization: Bearer <API_KEY>`                                                           |
+| `POST /v1/run`                                | `{ "source": "..." }`     | Run one `request` script. Requires `Authorization: Bearer <API_KEY>` or a [run token](#api-clients-and-run-tokens)             |
 | `POST /v1/run/resource`                       | One function call         | Called by peers to run a function hosted here                                                                                  |
 | `POST /v1/run/resource/estimate`              | One function call         | Called by peers to price a call to a paid inference function hosted here: `{ "inputTokens", "maxAmount" }`                     |
 | `POST /v1/grants/request`                     | Signed grant request      | Ask for a new grant, decided by the node's `approveGrant` hook: `{ "grants" }`                                                 |
@@ -163,7 +163,7 @@ Routes are mounted at `/v1`.
 
 `GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, `website`, `description`, and functions (`name`, `returnType`, `description`, `parameters` with their `name`, `type` and `description`, `paymentManifest` for paid functions, `restricted: true` for functions that need a grant, and `kind: "inference"` for [inference functions](#inference-functions)). `website` and all descriptions are optional and appear only when the node registering the resource sets them. A node drops a description from a peer that isn't a string, and a `website` that isn't an `http` or `https` URL. Function implementations stay on the node that hosts them.
 
-`POST /v1/run` takes a JSON body whose `source` is the script. The declaration must be a `request`. A successful run responds `200` with `{ "returnValue": ... }`. Each resource call in the script evaluates to `{ "value", "error" }`, so a script can handle a failed call. A missing or wrong API key responds `401`. A script that doesn't parse, or is not a request, responds `400` with `{ "error": "Invalid script" }`. Any other failure responds `500` with `{ "error": "Internal server error" }`.
+`POST /v1/run` takes a JSON body whose `source` is the script. The declaration must be a `request`. A successful run responds `200` with `{ "returnValue": ..., "usage": { "tokens": ... } }`, where `tokens` counts the [script tokens](https://github.com/qualletio/requestscript-js#token-metering) the run executed. Each resource call in the script evaluates to `{ "value", "error" }`, so a script can handle a failed call. A missing or wrong API key or run token responds `401`. A script that doesn't parse, or is not a request, responds `400` with `{ "error": "Invalid script" }`. A script that fails while running, for example dividing by zero, responds `422` with `{ "error": "Script failed", "details", "usage" }`. Any other failure responds `500` with `{ "error": "Internal server error" }`.
 
 ```sh
 curl -X POST http://127.0.0.1:3000/v1/run \
@@ -173,8 +173,34 @@ curl -X POST http://127.0.0.1:3000/v1/run \
 ```
 
 ```json
-{ "returnValue": { "value": 12, "error": null } }
+{ "returnValue": { "value": 12, "error": null }, "usage": { "tokens": 17 } }
 ```
+
+### API clients and run tokens
+
+Anyone can run scripts on a node without knowing its API key, using an **API client** from the [Stellarium Platform](https://platform.stellarium.sh). An organization creates a client for one node: one of its own, or another organization's **listed** node. A listed node sets a price per million script tokens, or is free. A client exchanges its id and secret for a run token, which lasts 15 minutes:
+
+```sh
+curl -X POST "$OPERATOR_URL/oauth/token" \
+  -d grant_type=client_credentials -d client_id="$CLIENT_ID" -d client_secret="$CLIENT_SECRET"
+# { "access_token": "eyJ…", "token_type": "Bearer", "expires_in": 900 }
+
+curl -X POST https://node.example.com/v1/run \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -d '{"source": "…"}'
+```
+
+The node verifies the token against the operator's published keys. The token names the node as its audience, so no other node accepts it.
+
+- **The node's own organization** runs free, as with the API key.
+- **Another organization** is billed from its balance:
+  1. Before the script runs, the node asks the operator to authorize the run. The operator holds up to the client's maximum run cost.
+  2. Every paid function the script calls draws on that hold: remote ones, and this node's own. Each is charged at its manifest price.
+  3. After the script, the run is charged for the tokens it executed at the node's price. Branches the script didn't take cost nothing. The rest of the hold is released.
+
+  If the operator refuses the run, the node answers with the operator's status and doesn't run the script: `402` for an insufficient balance or a reached monthly cap, for example. A script that fails partway is charged for what it executed.
+
+A node reports its `BASE_URL` to the operator whenever it has an `OPERATOR_URL`. An organization admin lists it on the platform's Nodes page, which checks that `{BASE_URL}/v1/self` answers with the node's key.
 
 ### Payments
 
@@ -398,7 +424,7 @@ curl -s -X POST http://localhost:3003/v1/run \
 ```
 
 ```json
-{ "returnValue": { "value": 12, "error": null } }
+{ "returnValue": { "value": 12, "error": null }, "usage": { "tokens": 17 } }
 ```
 
 The provider held $0.01 of the caller's credit before running the function, then captured it. Check the balances in Postgres. The caller has $9.99, and the provider is owed $0.008 after the 20% platform fee:
@@ -409,6 +435,19 @@ docker compose exec postgres psql -U stellarium -d stellarium \
 ```
 
 The fixture provider also hosts a paid inference function. Try `return echo.complete(prompt: "Hello world!", maxTokens: 10)` with `const echo: com.example.Echo`. It holds the most the call can cost and charges only the tokens it used.
+
+The seed also lists the provider's node at $1 per million script tokens, and gives the caller's organization an [API client](#api-clients-and-run-tokens) for it. Run the same script directly on the provider, as that client, without either node's API key:
+
+```sh
+TOKEN="$(curl -s -X POST http://localhost:3001/v1/oauth/token \
+  -d grant_type=client_credentials -d client_id=cli_local_caller -d client_secret=cs_local-only-client-secret \
+  | node -pe 'JSON.parse(require("fs").readFileSync(0)).access_token')"
+curl -s -X POST http://localhost:3002/v1/run \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"source": "request GetTemperature {\n  const weather: com.example.Weather\n\n  return weather.temperature(city: \"Oslo\")\n}"}'
+```
+
+The caller's organization pays $0.01 for the temperature, plus 17 tokens at $1 per million. The provider's organization is owed both, less the fee. The run is in the `runs` table.
 
 #### 2. The dashboard
 

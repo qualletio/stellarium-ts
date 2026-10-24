@@ -17,6 +17,7 @@ Do the whole procedure with Stripe in test mode first. The README's [Running Loc
 | `STRIPE_SECRET_KEY` (`sk_live_...`) | Operator | Moves real money. Use a restricted key if you prefer, with write access to Checkout Sessions, Customers, Customer Portal sessions, Accounts, Account Links, Login Links and Transfers. |
 | `STRIPE_WEBHOOK_SECRET`, `STRIPE_CONNECT_WEBHOOK_SECRET` | Operator | The signing secrets of the two webhook endpoints in step 6. They are different in production. |
 | `BETTER_AUTH_SECRET` | Operator | Signs dashboard session cookies. Generate one with `openssl rand -base64 32`. Changing it signs everyone out. |
+| `RUN_TOKEN_PRIVATE_KEY` | Operator | Signs API clients' run tokens. An Ed25519 key in the format of a node's `SIGNING_PRIVATE_KEY` (generate one with the README's key script). Changing it invalidates outstanding tokens, which last 15 minutes. Nodes refetch the new public key when they see an unknown key id. |
 | `RESEND_API_KEY` | Operator | Sends the dashboard's emails. |
 | `GITHUB_CLIENT_SECRET` | Operator | Optional, for GitHub sign-in. |
 | `DATABASE_URL` | Operator | Contains the database password. |
@@ -66,6 +67,7 @@ Configure it with environment variables:
 | `STRIPE_SECRET_KEY` | From step 2. |
 | `STRIPE_WEBHOOK_SECRET`, `STRIPE_CONNECT_WEBHOOK_SECRET` | From step 6. The operator refuses to start with a Stripe key but without these. |
 | `BETTER_AUTH_SECRET` | From step 1. |
+| `RUN_TOKEN_PRIVATE_KEY` | From step 1. Without it, API clients can't get run tokens. |
 | `RESEND_API_KEY`, `EMAIL_FROM` | From step 3. `EMAIL_FROM` is an address on the verified domain, such as `Stellarium <no-reply@stellarium.sh>`. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Optional, from step 3. |
 | `DASHBOARD_URL` | `https://platform.stellarium.sh`. The only CORS origin and the only origin Better Auth accepts. Links in emails, and Stripe, send users to pages under it. |
@@ -85,7 +87,9 @@ The operator serves plain HTTP on port 3001. Put it behind a TLS reverse proxy (
 
 **Rate limiting behind a proxy.** `apps/operator/src/server.ts` creates Fastify without `trustProxy`, so behind a proxy every request appears to come from the proxy, and the per-IP limit becomes a global one. Enable `trustProxy` or raise `RATE_LIMIT_MAX` before going live. The auth routes (`/v1/auth/*`) skip that limit: Better Auth limits them itself, per client IP from `X-Forwarded-For`, which the dashboard sets. Have the proxy in front of the operator overwrite that header rather than append to it, so clients can't choose their own address.
 
-Nodes that host paid functions use `OPERATOR_URL=https://<operator host>/v1`.
+Nodes that host paid functions, or accept run tokens, use `OPERATOR_URL=https://<operator host>/v1`.
+
+Listing a node makes the operator fetch the node's reported `{BASE_URL}/v1/self` from its own network. That URL comes from the node. If the operator can reach internal services, restrict its egress so it can reach only public addresses.
 
 ## 6. Stripe webhooks
 
@@ -119,7 +123,8 @@ Use small amounts and a real card.
 4. **Payouts** (provider): set up payouts with real details. The status shows **Ready** when `account.updated` arrives on the Connect endpoint.
 5. **Nodes**: create an enrollment token in each organization and start a node with it (`ENROLLMENT_TOKEN`, `OPERATOR_URL`).
 6. Make a paid call from the caller's node. The caller's **Usage** page shows the charge, and the provider's earnings grow by 80% of it.
-7. Refund the test top-up in Stripe if you like. The caller's balance drops by the refunded amount.
+7. **API clients**: list the provider's node with a price, create an API client for it in the caller organization, exchange it at `https://<operator host>/v1/oauth/token`, and run a script on the provider's node with the token. The run appears in both organizations' runs.
+8. Refund the test top-up in Stripe if you like. The caller's balance drops by the refunded amount.
 
 The first payout goes out once the provider's earnings, after the 7-day hold, reach $10.
 

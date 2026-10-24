@@ -26,8 +26,13 @@ services:
       SEED_DEV: ${SEED_DEV:-1}
       SEED_PROVIDER_PUBLIC_KEY: ${PROVIDER_SIGNING_PUBLIC_KEY:-}
       SEED_CALLER_PUBLIC_KEY: ${CALLER_SIGNING_PUBLIC_KEY:-}
+      # Lists the provider's node and gives the caller's organization an API client for it (cli_local_caller). Local only.
+      SEED_PROVIDER_BASE_URL: http://local-resource-node:3002
+      SEED_CLIENT_SECRET: cs_local-only-client-secret
       # Signs dashboard session cookies. Local only: production needs its own secret.
       BETTER_AUTH_SECRET: local-only-better-auth-secret-0123456789
+      # Signs API clients' run tokens (an Ed25519 PKCS#8 key, base64url). Local only: production needs its own key.
+      RUN_TOKEN_PRIVATE_KEY: MC4CAQAwBQYDK2VwBCIEIF3fP6TT6BvfrSEi_gSWQ0bRJ9iHucuxcV-XRxMeQC7O
       # Stripe keys, RESEND_API_KEY/EMAIL_FROM and GitHub OAuth credentials are optional and come from apps/operator/.env,
       # which the image includes like the nodes' .env files. Setting them here, even empty, would shadow that file.
       # Without RESEND_API_KEY, verification and invitation links are in `docker compose logs operator`.

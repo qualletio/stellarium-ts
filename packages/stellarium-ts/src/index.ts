@@ -15,12 +15,15 @@ export {
     inferenceVoucherPayload,
     invocationHash,
     paymentVoucherPayload,
+    type RunContext,
     type InferenceEstimate,
     type InferencePaymentVoucher,
     type PaymentVoucher,
 } from './resource/invoker.js';
 export { inferenceCharge, MAX_TOKENS_PARAMETER, type InferenceResult, type InferenceUsage } from './resource/inference.js';
-export type { FixedPaymentVoucher, InferencePaymentSubmission, InferenceVoucher, PaymentSubmission } from './client/operatorClient.js';
+export type { FixedPaymentVoucher, InferencePaymentSubmission, InferenceVoucher, PaymentSubmission, RunAuthorizationRequest } from './client/operatorClient.js';
+// Run token verification, so the operator can test its tokens against the real verifier.
+export { RUN_TOKEN_ISSUER, RunTokenVerifier, type RunTokenClaims } from './client/runTokens.js';
 // The operator request signature, so the operator can test against the real signer.
 export { OPERATOR_AUTH_SCHEME, operatorAuthorization, operatorRequestPayload } from './client/operatorAuth.js';
 // Grant wire format, so other implementations can test against the real signer.

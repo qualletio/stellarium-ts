@@ -19,6 +19,7 @@ const fixedVoucherSchema = {
         expiresAt: nonEmptyString,
         invocationHash: nonEmptyString,
         publicKey: nonEmptyString,
+        runId: { type: 'string', format: 'uuid' },
     },
     not: { required: ['kind'] },
 } as const;
@@ -39,6 +40,7 @@ const inferenceVoucherSchema = {
         expiresAt: nonEmptyString,
         invocationHash: nonEmptyString,
         publicKey: nonEmptyString,
+        runId: { type: 'string', format: 'uuid' },
     },
 } as const;
 

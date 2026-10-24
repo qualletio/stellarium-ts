@@ -4,7 +4,9 @@ import type { Service } from '../service.js';
 import authRoutes from './auth.js';
 import dashboardRoutes from './dashboard.js';
 import nodeRoutes from './nodes.js';
+import oauthRoutes from './oauth.js';
 import paymentRoutes from './payments.js';
+import runRoutes from './runs.js';
 import stripeRoutes from './stripe.js';
 
 export interface RouteOptions {
@@ -30,6 +32,8 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, { serv
 
     await fastify.register(nodeRoutes, { service });
     await fastify.register(paymentRoutes, { service });
+    await fastify.register(runRoutes, { service });
+    await fastify.register(oauthRoutes, { service });
     if (service.auth) {
         await fastify.register(authRoutes, { auth: service.auth });
     }

@@ -57,6 +57,16 @@ export function parseMaxTokens(parameters: ResourceFunctionCallParameter[]): num
     return Number.isInteger(value) && (value as number) > 0 && (value as number) <= INT32_MAX ? value as number : undefined;
 }
 
+/** The function's own input-token estimate, or undefined if its estimator failed or returned something other than a count. */
+export async function estimateInputTokens(fn: StellariumResourceFunction, parameters: ResourceFunctionCallParameter[]): Promise<number | undefined> {
+    try {
+        const inputTokens = await fn.estimateInputTokens?.(parameters);
+        return Number.isSafeInteger(inputTokens) && inputTokens! >= 0 ? inputTokens : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
 /** The usage an inference `exec` reported, or undefined if it isn't two nonnegative safe integers. */
 export function parseInferenceResult(result: unknown): InferenceResult | undefined {
     if (typeof result !== 'object' || result === null || !('usage' in result)) {

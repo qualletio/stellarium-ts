@@ -4,7 +4,11 @@ import type { RouteOptions } from './index.js';
 
 const sessionSchema = {
     type: 'object',
-    properties: { enrollmentToken: { type: 'string', minLength: 1, maxLength: 255 } },
+    properties: {
+        enrollmentToken: { type: 'string', minLength: 1, maxLength: 255 },
+        // The URL the node serves on, which listing verifies.
+        baseUrl: { type: 'string', pattern: '^https?://', maxLength: 1024 },
+    },
     additionalProperties: false,
 } as const;
 
@@ -13,8 +17,8 @@ const nodeRoutes: FastifyPluginAsync<RouteOptions> = async function (fastify, { 
     fastify.addHook('preValidation', authenticateNode);
 
     // A node calls this at startup to learn its organization, enrolling with a dashboard token the first time.
-    fastify.post<{ Body: { enrollmentToken?: string } }>('/nodes/session', { schema: { body: sessionSchema } }, async (request) => {
-        return service.organizations.session(request.nodePublicKey!, request.body?.enrollmentToken);
+    fastify.post<{ Body: { enrollmentToken?: string, baseUrl?: string } }>('/nodes/session', { schema: { body: sessionSchema } }, async (request) => {
+        return service.organizations.session(request.nodePublicKey!, request.body?.enrollmentToken, request.body?.baseUrl?.replace(/\/+$/, ''));
     });
 };
 

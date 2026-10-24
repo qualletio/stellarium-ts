@@ -1,13 +1,14 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import rateLimit from '@fastify/rate-limit';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { interpretParsed, parseScript } from 'requestscript';
+import { interpretParsed, parseScript, RequestScriptError, type ResourceInvoker, TokenMeter } from 'requestscript';
+import { looksLikeJwt, type RunTokenClaims } from './client/runTokens.js';
 import { Peer } from './peer/repository.js';
 import { type InferencePaymentVoucher, inferenceVoucherPayload, invocationHash, isInferenceVoucher, PaymentVoucher, paymentVoucherPayload } from './resource/invoker.js';
-import { inferenceCharge, type InferenceUsage, isInferenceFunction, isInferenceManifest, parseMaxTokens } from './resource/inference.js';
+import { estimateInputTokens, inferenceCharge, isInferenceFunction, isInferenceManifest, parseMaxTokens } from './resource/inference.js';
+import { type InvokeResult, settlePaidCall } from './resource/settlement.js';
 import { StellariumResource, StellariumResourceFunction, StellariumResourceFunctionPaymentManifest } from './resource/repository.js';
 import type { Service } from './service.js';
-import type { PaymentSubmission } from './client/operatorClient.js';
 import { safeVerifyData } from './crypto/utils.js';
 import type { Grant, GrantRenewalRequest, GrantRequest } from './grant/grant.js';
 import { InvalidPublicKeyError } from './grant/service.js';
@@ -55,6 +56,18 @@ interface ResourceRunRequest extends ResourceCallRequest {
 
 interface RunRequest {
     source: string;
+}
+
+/**
+ * Who is calling `POST /v1/run`: the holder of this node's API key, or an API client with a run token.
+ * Set by the route's preValidation hook.
+ */
+type RunCaller = { kind: 'apiKey' } | ({ kind: 'client', token: string } & RunTokenClaims);
+
+declare module 'fastify' {
+    interface FastifyRequest {
+        runCaller?: RunCaller;
+    }
 }
 
 // Body schemas check only the shape the handlers rely on. Signed payloads (resources) are
@@ -242,26 +255,6 @@ function isValidPaymentVoucher(voucher: PaymentVoucher | InferencePaymentVoucher
     return safeVerifyData(paymentVoucherPayload(voucher), voucher.publicKey, voucher.signature);
 }
 
-/** The function's own input-token estimate, or undefined if its estimator failed or returned something other than a count. */
-async function estimateInputTokens(resourceFunction: StellariumResourceFunction, request: ResourceCallRequest): Promise<number | undefined> {
-    try {
-        const inputTokens = await resourceFunction.estimateInputTokens?.(request.parameters);
-        return Number.isSafeInteger(inputTokens) && inputTokens! >= 0 ? inputTokens : undefined;
-    } catch {
-        return undefined;
-    }
-}
-
-/** What the operator will capture for `usage`: its charge at the voucher's rates, capped at `maxAmount`. */
-function cappedInferenceCharge(voucher: InferencePaymentVoucher, usage: InferenceUsage): number {
-    try {
-        return Math.min(inferenceCharge(voucher, usage.inputTokens, usage.outputTokens), voucher.maxAmount);
-    } catch {
-        // The charge isn't a safe integer, so it is over any maxAmount.
-        return voucher.maxAmount;
-    }
-}
-
 /**
  * Encapsulates the routes
  * @param fastify Encapsulated Fastify Instance
@@ -285,6 +278,33 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         if (!expectedApiKey || !apiKey || !secretsEqual(apiKey, expectedApiKey)) {
             return reply.status(401).send({ error: 'Invalid API Key' });
         }
+    };
+
+    /**
+     * Requires `Authorization: Bearer <API_KEY>` or `Bearer <run token>`, a JWT from the operator addressed to
+     * this node. Records the caller on `request.runCaller`.
+     */
+    const requireRunAuthorization = async (request: FastifyRequest, reply: FastifyReply) => {
+        const authorizationHeader = request.headers['authorization'];
+        if (!authorizationHeader) {
+            return reply.status(401).send({ error: 'Authorization header is required' });
+        }
+        const token = authorizationHeader.split(' ')[1];
+        const expectedApiKey = options.service.config.apiKey;
+        if (token && expectedApiKey && secretsEqual(token, expectedApiKey)) {
+            request.runCaller = { kind: 'apiKey' };
+            return;
+        }
+        const verifier = options.service.runTokenVerifier;
+        if (token && verifier && looksLikeJwt(token)) {
+            const claims = await verifier.verify(token);
+            if (!claims) {
+                return reply.status(401).send({ error: 'Invalid run token' });
+            }
+            request.runCaller = { kind: 'client', token, ...claims };
+            return;
+        }
+        return reply.status(401).send({ error: 'Invalid API Key' });
     };
 
     // Start Meta Routes
@@ -377,8 +397,14 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
 
     // Start Run Routes
 
+    /**
+     * Runs a request script. A run token from another organization's API client is billed: the operator
+     * holds the run's cost first, the script's paid calls draw on that hold, and afterwards the run is
+     * charged for the tokens the script executed at this node's listed price. Runs by the API key holder or
+     * by this node's own organization are free, and their paid calls are paid by this node's organization.
+     */
     // Authenticate before body validation, so unauthenticated callers learn nothing about the schema.
-    fastify.post('/run', { schema: { body: runRequestSchema }, preValidation: requireApiKey }, async (request, reply) => {
+    fastify.post('/run', { schema: { body: runRequestSchema }, preValidation: requireRunAuthorization }, async (request, reply) => {
         const runRequest = request.body as RunRequest;
 
         let script: ReturnType<typeof parseScript>;
@@ -393,16 +419,49 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             return reply.status(400).send({ error: 'Invalid script' });
         }
 
-        try {
-            const result = await interpretParsed(script, { 
-                resourceResolver: options.service.resourceResolver, 
-                resourceInvoker: options.service.resourceInvoker
-            });
+        const caller = request.runCaller!;
+        const billed = caller.kind === 'client' && caller.organizationId !== options.service.config.organizationId;
+        const runId = billed ? randomUUID() : undefined;
+        let resourceInvoker: ResourceInvoker = options.service.resourceInvoker;
+        if (billed) {
+            const authorization = await options.service.operatorClient.authorizeRun({ token: caller.token, runId: runId!, source: runRequest.source });
+            if (!authorization.ok) {
+                return reply.status(authorization.status).send({ error: authorization.error });
+            }
+            resourceInvoker = options.service.resourceInvoker.forRun({ runId: runId! });
+        }
 
-            reply.status(200).send({ returnValue: result.returnValue ?? null });
+        // Nothing waits on settlement, so it doesn't delay the response.
+        const settle = (outcome: 'capture' | 'release', tokens: number) => runId && setTimeout(async () => {
+            try {
+                if (outcome === 'capture') {
+                    await options.service.operatorClient.captureRun({ runId, tokens });
+                } else {
+                    await options.service.operatorClient.releaseRun({ runId });
+                }
+            } catch (error) {
+                fastify.log.error(error, `Failed to ${outcome} run ${runId}`);
+            }
+        }, 0);
+
+        const meter = new TokenMeter();
+        try {
+            const result = await interpretParsed(script, {
+                resourceResolver: options.service.resourceResolver,
+                resourceInvoker,
+                meter,
+            });
+            settle('capture', meter.tokens);
+            return reply.status(200).send({ returnValue: result.returnValue ?? null, usage: { tokens: meter.tokens } });
         } catch (error) {
+            // A script that fails at runtime is the caller's mistake, and is charged for what it executed.
+            if (error instanceof RequestScriptError) {
+                settle('capture', meter.tokens);
+                return reply.status(422).send({ error: 'Script failed', details: error.message, usage: { tokens: meter.tokens } });
+            }
+            settle('release', meter.tokens);
             fastify.log.error(error);
-            reply.status(500).send({ error: 'Internal server error' });
+            return reply.status(500).send({ error: 'Internal server error' });
         }
     });
 
@@ -475,7 +534,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         if (maxTokens === undefined) {
             return reply.status(400).send({ error: 'maxTokens must be a positive int32' });
         }
-        const inputTokens = await estimateInputTokens(resourceFunction, resourceRequest);
+        const inputTokens = await estimateInputTokens(resourceFunction, resourceRequest.parameters);
         if (inputTokens === undefined) {
             return reply.status(500).send({ error: 'Failed to estimate input tokens' });
         }
@@ -509,7 +568,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             }
             // Re-estimated here, so inference never runs on a voucher that can't cover the expected cost.
             if (isInferenceVoucher(paymentVoucher)) {
-                const inputTokens = await estimateInputTokens(resourceFunction, resourceRequest);
+                const inputTokens = await estimateInputTokens(resourceFunction, resourceRequest.parameters);
                 if (inputTokens === undefined) {
                     return reply.status(500).send({ error: 'Failed to estimate input tokens' });
                 }
@@ -520,46 +579,15 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             }
         }
 
-        // Hold the call's price on the payer's balance before running it, so a paid function never runs unpaid.
-        const paid = paymentManifest && paymentVoucher ? paymentVoucher : undefined;
-        if (paid) {
-            const authorization = await options.service.operatorClient.authorize(paid);
-            if (!authorization.ok) {
-                return reply.status(authorization.status).send({ error: authorization.error });
-            }
+        const invoke = () => options.service.resourceInvoker.invoke(resource, resourceRequest.functionName, resourceRequest.parameters) as Promise<InvokeResult>;
+        // A free function ignores any voucher sent with it.
+        if (!paymentManifest || !paymentVoucher) {
+            return invoke();
         }
-
-        const result = await options.service.resourceInvoker.invoke(resource, resourceRequest.functionName, resourceRequest.parameters) as { value: unknown, error: { message: string } | null, usage?: InferenceUsage };
-
-        if (paid) {
-            let capture: PaymentSubmission | undefined;
-            if (!result.error && !isInferenceVoucher(paid)) {
-                capture = { voucher: paid };
-            } else if (!result.error && result.usage && isInferenceVoucher(paid)) {
-                // The function may report more output than it was allowed; the caller only signed for maxTokens.
-                const usage = { inputTokens: result.usage.inputTokens, outputTokens: Math.min(result.usage.outputTokens, paid.maxTokens) };
-                result.usage = usage;
-                // A free call has nothing to charge, so its hold is released instead.
-                if (cappedInferenceCharge(paid, usage) > 0) {
-                    capture = { voucher: paid, usage };
-                }
-            }
-
-            // A failed or free call releases its hold. Nothing awaits this, so it doesn't delay the response,
-            // and an uncaught error here would be an unhandled rejection.
-            setTimeout(async () => {
-                try {
-                    if (capture) {
-                        await options.service.operatorClient.capture(capture);
-                    } else {
-                        await options.service.operatorClient.release(paid);
-                    }
-                } catch (error) {
-                    fastify.log.error(error, capture ? 'Failed to capture payment' : 'Failed to release payment');
-                }
-            }, 0);
+        const result = await settlePaidCall(options.service.operatorClient, paymentVoucher, invoke, (error, message) => fastify.log.error(error, message));
+        if ('refused' in result) {
+            return reply.status(result.refused.status).send({ error: result.refused.error });
         }
-
         return result;
     });
 
