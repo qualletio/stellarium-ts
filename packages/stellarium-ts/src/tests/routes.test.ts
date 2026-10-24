@@ -1,7 +1,9 @@
+import { generateKeyPairSync, type KeyObject } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
+import { createLocalJWKSet, exportJWK, SignJWT } from "jose";
 import type { Database } from "sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { signData } from "../crypto/utils.js";
+import { safeVerifyData, signData } from "../crypto/utils.js";
 import { openDatabase } from "../db/db.js";
 import { type Grant, grantRenewalPayload, grantRequestPayload } from "../grant/grant.js";
 import { GrantRepository } from "../grant/repository.js";
@@ -231,7 +233,7 @@ describe("routes", () => {
 
             expect(response.statusCode).toBe(200);
             // RequestScript resource calls evaluate to the invoker's { value, error } result.
-            expect(response.json()).toEqual({ returnValue: { value: 12, error: null } });
+            expect(response.json()).toEqual({ usage: { tokens: expect.any(Number) }, returnValue: { value: 12, error: null } });
         });
 
         test("requires an Authorization header", async () => {
@@ -274,6 +276,117 @@ describe("routes", () => {
 
             expect(response.statusCode).toBe(400);
             expect(response.json()).toMatchObject({ error: "Invalid script" });
+        });
+
+        test("answers 422 for a script that fails while running", async () => {
+            const response = await run("Bearer secret", { source: "request R {\n  return 1 / 0\n}" });
+
+            expect(response.statusCode).toBe(422);
+            expect(response.json()).toMatchObject({ error: "Script failed", details: expect.stringContaining("Division by zero"), usage: { tokens: 4 } });
+        });
+
+        describe("with run tokens", () => {
+            const operatorKeys = generateKeyPairSync("ed25519");
+            let tokenService: Service;
+            let tokenApp: FastifyInstance;
+            let authorizeRun: ReturnType<typeof vi.spyOn>;
+            let captureRun: ReturnType<typeof vi.spyOn>;
+            let releaseRun: ReturnType<typeof vi.spyOn>;
+
+            beforeEach(async () => {
+                const jwk = await exportJWK(operatorKeys.publicKey);
+                tokenService = createService(db, [weather], config, { runTokenKeys: createLocalJWKSet({ keys: [{ ...jwk, alg: "EdDSA" }] }) });
+                authorizeRun = vi.spyOn(tokenService.operatorClient, "authorizeRun").mockResolvedValue({ ok: true, heldMicroUsd: 50_000, maxTokens: 9 });
+                captureRun = vi.spyOn(tokenService.operatorClient, "captureRun").mockResolvedValue(undefined);
+                releaseRun = vi.spyOn(tokenService.operatorClient, "releaseRun").mockResolvedValue(undefined);
+                vi.spyOn(tokenService.operatorClient, "authorize").mockResolvedValue({ ok: true });
+                vi.spyOn(tokenService.operatorClient, "capture").mockResolvedValue(undefined);
+                tokenApp = Fastify();
+                await tokenApp.register(routes, { prefix: "/v1", service: tokenService });
+                await tokenApp.ready();
+            });
+
+            afterEach(async () => {
+                await tokenApp.close();
+            });
+
+            /** A token the operator would issue, for `organizationId`'s client on this node unless `audience` says otherwise. */
+            const runToken = (organizationId: string, options: { audience?: string, key?: KeyObject, expiresIn?: string } = {}) => new SignJWT({ org: organizationId })
+                .setProtectedHeader({ alg: "EdDSA" })
+                .setIssuer("stellarium")
+                .setSubject("cli_test")
+                .setAudience(options.audience ?? config.publicKey)
+                .setIssuedAt()
+                .setExpirationTime(options.expiresIn ?? "15m")
+                .sign(options.key ?? operatorKeys.privateKey);
+
+            const runWith = async (token: string, source = temperatureSource) => tokenApp.inject({
+                method: "POST", url: "/v1/run", headers: { authorization: `Bearer ${token}` }, payload: { source },
+            });
+
+            test("bills another organization's run, and charges its call to this node's paid function to the run", async () => {
+                const token = await runToken("org_caller");
+
+                const response = await runWith(token);
+
+                expect(response.statusCode).toBe(200);
+                expect(response.json()).toEqual({ returnValue: { value: 12, error: null }, usage: { tokens: 17 } });
+                const runId = authorizeRun.mock.calls[0]![0].runId;
+                expect(authorizeRun).toHaveBeenCalledWith({ token, runId: expect.any(String), source: temperatureSource });
+                // The local paid function signed a voucher for the run, paying this node's organization.
+                const [voucher] = (tokenService.operatorClient.authorize as unknown as ReturnType<typeof vi.fn>).mock.calls[0]!;
+                expect(voucher).toMatchObject({ runId, recipientOrganizationId: ORGANIZATION, amount: COST, publicKey: config.publicKey });
+                expect(safeVerifyData(paymentVoucherPayload(voucher), voucher.publicKey, voucher.signature)).toBe(true);
+                await vi.waitFor(() => expect(captureRun).toHaveBeenCalledWith({ runId, tokens: 17 }));
+            });
+
+            test("runs this node's own organization's tokens free, without the operator", async () => {
+                const response = await runWith(await runToken(ORGANIZATION));
+
+                expect(response.json()).toEqual({ returnValue: { value: 12, error: null }, usage: { tokens: 17 } });
+                expect(authorizeRun).not.toHaveBeenCalled();
+                expect(tokenService.operatorClient.authorize).not.toHaveBeenCalled();
+            });
+
+            test("answers the operator's refusal without running the script", async () => {
+                authorizeRun.mockResolvedValue({ ok: false, status: 402, error: "Insufficient balance" });
+
+                const response = await runWith(await runToken("org_caller"));
+
+                expect(response.statusCode).toBe(402);
+                expect(response.json()).toEqual({ error: "Insufficient balance" });
+                expect(tokenService.operatorClient.authorize).not.toHaveBeenCalled();
+            });
+
+            test("charges a script that fails for what it executed, and releases a run the node failed", async () => {
+                const failing = await runWith(await runToken("org_caller"), "request R {\n  return 1 / 0\n}");
+                expect(failing.statusCode).toBe(422);
+                await vi.waitFor(() => expect(captureRun).toHaveBeenCalledWith({ runId: expect.any(String), tokens: 4 }));
+
+                vi.spyOn(tokenService.resourceResolver, "resolve").mockRejectedValue(new Error("database is gone"));
+                const broken = await runWith(await runToken("org_caller"));
+                expect(broken.statusCode).toBe(500);
+                await vi.waitFor(() => expect(releaseRun).toHaveBeenCalledTimes(1));
+            });
+
+            test.each([
+                ["addressed to another node", () => runToken("org_caller", { audience: generateBase64KeyPair().publicKey })],
+                ["signed by another key", () => runToken("org_caller", { key: generateKeyPairSync("ed25519").privateKey })],
+                ["expired", () => runToken("org_caller", { expiresIn: "-1m" })],
+            ])("refuses a token %s", async (_, token) => {
+                const response = await runWith(await token());
+
+                expect(response.statusCode).toBe(401);
+                expect(response.json()).toEqual({ error: "Invalid run token" });
+                expect(authorizeRun).not.toHaveBeenCalled();
+            });
+
+            test("still accepts the API key", async () => {
+                const response = await tokenApp.inject({ method: "POST", url: "/v1/run", headers: { authorization: "Bearer secret" }, payload: { source: temperatureSource } });
+
+                expect(response.statusCode).toBe(200);
+                expect(authorizeRun).not.toHaveBeenCalled();
+            });
         });
     });
 

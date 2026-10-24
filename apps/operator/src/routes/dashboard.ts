@@ -3,6 +3,8 @@ import { authenticateDashboard, type DashboardAuthenticator, isAdmin, requireAdm
 import type { BillingService } from '../billing/billingService.js';
 import { OperationError } from '../errors.js';
 import type { Organization } from '../ledger.js';
+import type { ListingUpdate } from '../organizations.js';
+import type { NewApiClient } from '../runs/clients.js';
 import type { RouteOptions } from './index.js';
 
 const pageQuerySchema = {
@@ -14,6 +16,31 @@ const pageQuerySchema = {
 } as const;
 
 type PageQuery = { limit: number, before?: number };
+
+const microUsd = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER } as const;
+
+const listingSchema = {
+    type: 'object',
+    properties: {
+        name: { type: 'string', minLength: 1, maxLength: 255 },
+        description: { type: ['string', 'null'], maxLength: 2048 },
+        priceMicroUsdPerMillionTokens: microUsd,
+        listed: { type: 'boolean' },
+    },
+    additionalProperties: false,
+} as const;
+
+const newClientSchema = {
+    type: 'object',
+    required: ['nodePublicKey'],
+    properties: {
+        nodePublicKey: { type: 'string', minLength: 1, maxLength: 255 },
+        label: { type: 'string', minLength: 1, maxLength: 255 },
+        maxRunCostMicroUsd: { ...microUsd, minimum: 1 },
+        monthlyCapMicroUsd: { type: ['integer', 'null'], minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+    },
+    additionalProperties: false,
+} as const;
 
 function summary(organization: Organization, role: string | undefined) {
     return {
@@ -63,6 +90,33 @@ const dashboardRoutes: FastifyPluginAsync<RouteOptions & { authenticator: Dashbo
 
     fastify.get('/org/nodes', async (request) => {
         return { nodes: await service.organizations.listNodes(organization(request).id) };
+    });
+
+    fastify.get<{ Querystring: PageQuery & { as: 'payer' | 'provider' } }>('/org/runs', {
+        schema: { querystring: { ...pageQuerySchema, required: ['as'], properties: { ...pageQuerySchema.properties, as: { enum: ['payer', 'provider'] } } } },
+    }, async (request) => {
+        const { as, ...page } = request.query;
+        return { runs: await service.organizations.listRuns(organization(request).id, as, page) };
+    });
+
+    // Every organization's listed nodes, for choosing one to create an API client for.
+    fastify.get('/listings', async () => ({ listings: await service.organizations.listings() }));
+
+    fastify.get('/org/clients', async (request) => ({ clients: await service.clients.list(organization(request).id) }));
+
+    // The secret is shown once: the operator keeps only its hash.
+    fastify.post<{ Body: Omit<NewApiClient, 'createdBy'> }>('/org/clients', { preHandler: requireAdmin, schema: { body: newClientSchema } }, async (request) => {
+        const { client: { secretHash: _, ...client }, clientSecret } = await service.clients.create(organization(request).id, { ...request.body, createdBy: request.dashboardSession!.userId });
+        return { client, clientSecret };
+    });
+
+    fastify.delete<{ Params: { id: string } }>('/org/clients/:id', { preHandler: requireAdmin }, async (request) => {
+        await service.clients.revoke(organization(request).id, request.params.id);
+        return { revoked: true };
+    });
+
+    fastify.patch<{ Params: { publicKey: string }, Body: ListingUpdate }>('/org/nodes/:publicKey', { preHandler: requireAdmin, schema: { body: listingSchema } }, async (request) => {
+        return { node: await service.organizations.updateListing(organization(request).id, request.params.publicKey, request.body) };
     });
 
     fastify.post<{ Body: { amountCents: number } }>('/org/top-ups', {

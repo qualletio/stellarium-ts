@@ -1,8 +1,10 @@
 import { Resource, ResourceFunctionCallParameter, ResourceInvoker } from "requestscript";
+import type { OperatorClient } from "../client/operatorClient.js";
 import { hashData, signData } from "../crypto/utils.js";
 import type { GrantService } from "../grant/service.js";
-import { inferenceCharge, type InferenceUsage, isInferenceFunction, isInferenceManifest, parseInferenceResult, parseMaxTokens } from "./inference.js";
+import { estimateInputTokens, inferenceCharge, type InferenceUsage, isInferenceFunction, isInferenceManifest, parseInferenceResult, parseMaxTokens } from "./inference.js";
 import { ResourceRepository, type StellariumInferencePaymentManifest, type StellariumResourceFunction } from "./repository.js";
+import { type InvokeResult, settlePaidCall } from "./settlement.js";
 
 export interface PaymentVoucher {
     requestId: string;
@@ -13,6 +15,8 @@ export interface PaymentVoucher {
     expiresAt: string;
     invocationHash: string;
     publicKey: string;
+    /** Set for a call made by a script run billed to an API client: the run's hold pays instead of this node's organization. */
+    runId?: string;
 }
 
 /**
@@ -33,6 +37,8 @@ export interface InferencePaymentVoucher {
     expiresAt: string;
     invocationHash: string;
     publicKey: string;
+    /** Set for a call made by a script run billed to an API client: the run's hold pays instead of this node's organization. */
+    runId?: string;
 }
 
 /** What a provider's `POST /v1/run/resource/estimate` answers. */
@@ -61,7 +67,12 @@ export function invocationHash(
  */
 export function paymentVoucherPayload(voucher: Omit<PaymentVoucher, "signature">) {
     const { requestId, invocationId, amount, recipientOrganizationId, expiresAt, invocationHash, publicKey } = voucher;
-    return { requestId, invocationId, amount, recipientOrganizationId, expiresAt, invocationHash, publicKey };
+    return { requestId, invocationId, amount, recipientOrganizationId, expiresAt, invocationHash, publicKey, ...runPayload(voucher.runId) };
+}
+
+/** `runId` is signed last, and only when set, so a voucher without one signs the same bytes as before it existed. */
+function runPayload(runId: string | undefined): { runId?: string } {
+    return runId === undefined ? {} : { runId };
 }
 
 /**
@@ -70,7 +81,7 @@ export function paymentVoucherPayload(voucher: Omit<PaymentVoucher, "signature">
  */
 export function inferenceVoucherPayload(voucher: Omit<InferencePaymentVoucher, "signature">) {
     const { kind, requestId, invocationId, maxAmount, inputCostMicroUsdPerMillionTokens, outputCostMicroUsdPerMillionTokens, maxTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey } = voucher;
-    return { kind, requestId, invocationId, maxAmount, inputCostMicroUsdPerMillionTokens, outputCostMicroUsdPerMillionTokens, maxTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey };
+    return { kind, requestId, invocationId, maxAmount, inputCostMicroUsdPerMillionTokens, outputCostMicroUsdPerMillionTokens, maxTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey, ...runPayload(voucher.runId) };
 }
 
 export function isInferenceVoucher(voucher: PaymentVoucher | InferencePaymentVoucher): voucher is InferencePaymentVoucher {
@@ -113,11 +124,24 @@ async function fetchWithRetry(url: string, init: () => RequestInit, timeoutMs = 
     }
 }
 
+/** A script run billed to another organization's API client. Its paid calls draw on the run's hold. */
+export interface RunContext {
+    runId: string;
+}
+
+/** How a node settles its own paid functions when a billed run calls them. */
+export interface LocalSettlement {
+    operatorClient: OperatorClient;
+    /** The organization this node's functions pay. */
+    organizationId?: string;
+}
+
 export class CombinationResourceInvoker implements ResourceInvoker {
 
     /**
      * Without a `grantService`, calls to restricted remote functions fail.
      * `inferenceCostLimitMicroUsd` caps an inference voucher's `maxAmount`, and defaults to `costLimitMicroUsd`.
+     * Without `localSettlement`, a billed run can't call this node's own paid functions.
      */
     constructor(
         private readonly resourceRepository: ResourceRepository,
@@ -126,7 +150,17 @@ export class CombinationResourceInvoker implements ResourceInvoker {
         private readonly privateKey: string,
         private readonly grantService?: GrantService,
         private readonly inferenceCostLimitMicroUsd: number = costLimitMicroUsd,
+        private readonly localSettlement?: LocalSettlement,
     ) {}
+
+    /**
+     * An invoker for one billed run. Its paid calls, remote or to this node's own paid functions, carry
+     * the run's id, so the run's hold pays for them. The run's hold limits what they cost, in place of the
+     * cost limits.
+     */
+    forRun(run: RunContext): ResourceInvoker {
+        return { invoke: (resource, functionName, parameters) => this.invokeIn(resource, functionName, parameters, run) };
+    }
     /**
      * Invoke a function on a resource.
      * If the resource has a baseUrl, it will be invoked as a remote function.
@@ -141,6 +175,10 @@ export class CombinationResourceInvoker implements ResourceInvoker {
      * @returns The return value of the function
      */
     async invoke(resource: Resource, functionName: string, parameters: ResourceFunctionCallParameter[]): Promise<{ value: any, error: { message: string } | null, usage?: InferenceUsage }> {
+        return this.invokeIn(resource, functionName, parameters, undefined);
+    }
+
+    private async invokeIn(resource: Resource, functionName: string, parameters: ResourceFunctionCallParameter[], run: RunContext | undefined): Promise<{ value: any, error: { message: string } | null, usage?: InferenceUsage }> {
         if (resource.metadata.baseUrl) {
             let requestBody: Record<string, any> = {
                 resourcePath: resource.path,
@@ -189,19 +227,19 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 if (inferenceCharge(manifest, estimate.inputTokens, maxTokens) !== estimate.maxAmount) {
                     return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: the provider's estimate doesn't match its advertised rates` } };
                 }
-                if (estimate.maxAmount > this.inferenceCostLimitMicroUsd) {
+                if (!run && estimate.maxAmount > this.inferenceCostLimitMicroUsd) {
                     throw new Error(`Function ${functionName} may cost up to ${estimate.maxAmount} micro-USD, which exceeds the inference cost limit of ${this.inferenceCostLimitMicroUsd} micro-USD`);
                 }
-                requestBody.paymentVoucher = this.createInferenceVoucher(manifest, estimate.maxAmount, maxTokens, resource.path, resource.name, functionName, parameters);
+                requestBody.paymentVoucher = this.createInferenceVoucher(manifest, estimate.maxAmount, maxTokens, resource.path, resource.name, functionName, parameters, run?.runId);
             } else if (manifest) {
                 console.log(`Resource function ${resource.name}.${functionName} has a payment manifest, creating payment voucher...`);
                 if (isInferenceManifest(manifest)) {
                     return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: it has per-token pricing but isn't an inference function` } };
                 }
-                if (manifest.costMicroUsd > this.costLimitMicroUsd) {
+                if (!run && manifest.costMicroUsd > this.costLimitMicroUsd) {
                     throw new Error(`Function ${functionName} cost ${manifest.costMicroUsd} micro-USD, which exceeds the cost limit of ${this.costLimitMicroUsd} micro-USD`);
                 }
-                requestBody.paymentVoucher = this.createPaymentVoucher(manifest.recipientOrganizationId!, manifest.costMicroUsd, resource.path, resource.name, functionName, parameters);
+                requestBody.paymentVoucher = this.createPaymentVoucher(manifest.recipientOrganizationId!, manifest.costMicroUsd, resource.path, resource.name, functionName, parameters, run?.runId);
             }
 
             // The voucher is created once and reused on every attempt, so the operator's
@@ -229,17 +267,56 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             if (!fn) {
                 return { value: null, error: { message: `Function ${functionName} not found in resource ${resource.name}` } };
             }
-
-            const result = await fn.exec(parameters);
-            if (isInferenceFunction(fn)) {
-                const inferenceResult = parseInferenceResult(result);
-                if (!inferenceResult) {
-                    return { value: null, error: { message: `Inference function ${functionName} must return { value, usage: { inputTokens, outputTokens } }` } };
-                }
-                return { value: inferenceResult.value, error: null, usage: inferenceResult.usage };
+            // A billed run pays for this node's own paid functions as a remote caller would.
+            if (run && fn.paymentManifest) {
+                return this.invokeLocalPaid(resource, fn, parameters, run);
             }
-            return { value: result, error: null };
+            return this.execLocal(fn, parameters);
         }
+    }
+
+    private async execLocal(fn: StellariumResourceFunction, parameters: ResourceFunctionCallParameter[]): Promise<InvokeResult> {
+        const result = await fn.exec(parameters);
+        if (isInferenceFunction(fn)) {
+            const inferenceResult = parseInferenceResult(result);
+            if (!inferenceResult) {
+                return { value: null, error: { message: `Inference function ${fn.name} must return { value, usage: { inputTokens, outputTokens } }` } };
+            }
+            return { value: inferenceResult.value, error: null, usage: inferenceResult.usage };
+        }
+        return { value: result, error: null };
+    }
+
+    /**
+     * Calls one of this node's paid functions for a billed run: signs a voucher with the run's id that pays
+     * this node's organization, then authorizes, runs and settles it as `POST /v1/run/resource` would.
+     */
+    private async invokeLocalPaid(resource: Resource, fn: StellariumResourceFunction, parameters: ResourceFunctionCallParameter[], run: RunContext): Promise<InvokeResult> {
+        const failed = (reason: string) => ({ value: null, error: { message: `Failed to invoke ${resource.name}.${fn.name}: ${reason}` } });
+        const organizationId = this.localSettlement?.organizationId;
+        if (!this.localSettlement || !organizationId) {
+            return failed('this node is not enrolled in an organization that can be paid');
+        }
+        const manifest = fn.paymentManifest!;
+        let voucher: PaymentVoucher | InferencePaymentVoucher;
+        if (isInferenceFunction(fn) && isInferenceManifest(manifest)) {
+            const maxTokens = parseMaxTokens(parameters);
+            if (maxTokens === undefined) {
+                return failed('maxTokens must be a positive int32');
+            }
+            const inputTokens = await estimateInputTokens(fn, parameters);
+            if (inputTokens === undefined) {
+                return failed('failed to estimate input tokens');
+            }
+            const maxAmount = inferenceCharge(manifest, inputTokens, maxTokens);
+            voucher = this.createInferenceVoucher({ ...manifest, recipientOrganizationId: organizationId }, maxAmount, maxTokens, resource.path, resource.name, fn.name, parameters, run.runId);
+        } else if (!isInferenceManifest(manifest)) {
+            voucher = this.createPaymentVoucher(organizationId, manifest.costMicroUsd, resource.path, resource.name, fn.name, parameters, run.runId);
+        } else {
+            return failed('it has per-token pricing but isn\'t an inference function');
+        }
+        const result = await settlePaidCall(this.localSettlement.operatorClient, voucher, () => this.execLocal(fn, parameters), (error, message) => console.error(message, error));
+        return 'refused' in result ? failed(result.refused.error) : result;
     }
 
     /** Asks the provider what a call to a paid inference function will cost at most. */
@@ -266,16 +343,23 @@ export class CombinationResourceInvoker implements ResourceInvoker {
         return { inputTokens: inputTokens!, maxAmount: maxAmount! };
     }
 
-    createPaymentVoucher(recipientOrganizationId: string, amount: number, resourcePath: string, resourceName: string, functionName: string, parameters: ResourceFunctionCallParameter[]): PaymentVoucher {
-        const requestId = crypto.randomUUID();
-        const invocationId = crypto.randomUUID();
-        const expiresAt = new Date(Date.now() + PAYMENT_VOUCHER_LIFETIME_MS).toISOString();
-        const hash = invocationHash(resourcePath, resourceName, functionName, parameters);
-        const signature = signData(paymentVoucherPayload({ requestId, invocationId, amount, recipientOrganizationId, expiresAt, invocationHash: hash, publicKey: this.publicKey }), this.privateKey);
-        return { requestId, invocationId, amount, recipientOrganizationId, signature, expiresAt, invocationHash: hash, publicKey: this.publicKey };
+    /** With `runId`, the voucher is paid from that run's hold. */
+    createPaymentVoucher(recipientOrganizationId: string, amount: number, resourcePath: string, resourceName: string, functionName: string, parameters: ResourceFunctionCallParameter[], runId?: string): PaymentVoucher {
+        const unsigned: Omit<PaymentVoucher, "signature"> = {
+            requestId: crypto.randomUUID(),
+            invocationId: crypto.randomUUID(),
+            amount,
+            recipientOrganizationId,
+            expiresAt: new Date(Date.now() + PAYMENT_VOUCHER_LIFETIME_MS).toISOString(),
+            invocationHash: invocationHash(resourcePath, resourceName, functionName, parameters),
+            publicKey: this.publicKey,
+            ...runPayload(runId),
+        };
+        return { ...unsigned, signature: signData(paymentVoucherPayload(unsigned), this.privateKey) };
     }
 
-    createInferenceVoucher(manifest: StellariumInferencePaymentManifest, maxAmount: number, maxTokens: number, resourcePath: string, resourceName: string, functionName: string, parameters: ResourceFunctionCallParameter[]): InferencePaymentVoucher {
+    /** With `runId`, the voucher is paid from that run's hold. */
+    createInferenceVoucher(manifest: StellariumInferencePaymentManifest, maxAmount: number, maxTokens: number, resourcePath: string, resourceName: string, functionName: string, parameters: ResourceFunctionCallParameter[], runId?: string): InferencePaymentVoucher {
         const unsigned: Omit<InferencePaymentVoucher, "signature"> = {
             kind: 'inference',
             requestId: crypto.randomUUID(),
@@ -288,6 +372,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             expiresAt: new Date(Date.now() + INFERENCE_VOUCHER_LIFETIME_MS).toISOString(),
             invocationHash: invocationHash(resourcePath, resourceName, functionName, parameters),
             publicKey: this.publicKey,
+            ...runPayload(runId),
         };
         return { ...unsigned, signature: signData(inferenceVoucherPayload(unsigned), this.privateKey) };
     }

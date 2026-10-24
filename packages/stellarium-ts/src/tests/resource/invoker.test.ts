@@ -38,6 +38,21 @@ describe("payment voucher", () => {
         expect(verifyData(voucher, voucher.publicKey, voucher.signature)).toBe(false);
     });
 
+    test("signs a run id last, and only when the voucher has one", () => {
+        const { publicKey, privateKey } = generateBase64KeyPair();
+        const invoker = new CombinationResourceInvoker({} as ResourceRepository, 100_000, publicKey, privateKey);
+        const parameters = [{ name: "city", value: "Oslo" }];
+
+        const plain = invoker.createPaymentVoucher("org_provider", 10000, "com.example", "Weather", "forecast", parameters);
+        const forRun = invoker.createPaymentVoucher("org_provider", 10000, "com.example", "Weather", "forecast", parameters, "run-1");
+
+        // Vouchers without a run sign the same bytes as before run ids existed.
+        expect(Object.keys(paymentVoucherPayload(plain))).toEqual(["requestId", "invocationId", "amount", "recipientOrganizationId", "expiresAt", "invocationHash", "publicKey"]);
+        expect(Object.keys(paymentVoucherPayload(forRun)).at(-1)).toBe("runId");
+        expect(verifyData(paymentVoucherPayload(forRun), publicKey, forRun.signature)).toBe(true);
+        expect(verifyData(paymentVoucherPayload({ ...forRun, runId: "run-2" }), publicKey, forRun.signature)).toBe(false);
+    });
+
     test("invocationHash changes with the function name or parameters", () => {
         const parameters = [{ name: "city", value: "Oslo" }];
         const hash = invocationHash("com.example", "Weather", "forecast", parameters);
@@ -139,6 +154,16 @@ describe("external invoke retries", () => {
         expect(new Set(bodies).size).toBe(1);
         expect(JSON.parse(bodies[0]).paymentVoucher.requestId).toBeDefined();
         expect(JSON.parse(bodies[0]).paymentVoucher.invocationHash).toBe(invocationHash("com.example", "Weather", "forecast", parameters));
+    });
+
+    test("a billed run's calls carry its run id, and its hold replaces the cost limit", async () => {
+        fetchMock.mockResolvedValueOnce(ok());
+
+        const invoker = createInvoker({ costMicroUsd: 500_000, recipientOrganizationId: "org_provider" });
+        await invoker.forRun({ runId: "run-1" }).invoke(resource, "forecast", parameters);
+
+        expect(JSON.parse(fetchMock.mock.calls[0]![1].body).paymentVoucher).toMatchObject({ amount: 500_000, runId: "run-1" });
+        await expect(invoker.invoke(resource, "forecast", parameters)).rejects.toThrow("exceeds the cost limit");
     });
 
     test("refuses a paid function whose manifest names no recipient organization, without signing a voucher", async () => {

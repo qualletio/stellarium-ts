@@ -26,7 +26,7 @@ export interface StellariumNodeOptions {
     publicKey?: string;
     /** Defaults to `SIGNING_PRIVATE_KEY`. */
     privateKey?: string;
-    /** Bearer token for `POST /v1/run`. Defaults to `API_KEY`. */
+    /** Bearer token for `POST /v1/run` and the admin routes. Defaults to `API_KEY`. */
     apiKey?: string;
     /** Defaults to `OPERATOR_URL`. */
     operatorUrl?: string;
@@ -112,13 +112,24 @@ export class StellariumNode {
         const enrollmentToken = options.enrollmentToken ?? process.env.ENROLLMENT_TOKEN;
         // Paid functions are paid to the node's organization, so a provider must be enrolled before it serves them.
         // A node that only calls paid functions enrolls the same way, so its vouchers draw on its organization's balance.
+        // Any other node with an operator still reports its URL, for listing, and learns its organization, so its
+        // own organization's run tokens run free.
+        const session = () => new OperatorClient(config.operatorUrl, config.publicKey, config.privateKey).session(enrollmentToken, config.baseUrl);
         if (hostsPaidFunctions(this.resources) || enrollmentToken) {
             try {
-                ({ organizationId: config.organizationId } = await new OperatorClient(config.operatorUrl, config.publicKey, config.privateKey).session(enrollmentToken));
+                ({ organizationId: config.organizationId } = await session());
             } catch (error) {
                 const hint = enrollmentToken ? '' : '. Create an enrollment token for it at https://platform.stellarium.sh and set ENROLLMENT_TOKEN';
                 throw new Error(`${error instanceof Error ? error.message : String(error)}${hint}`, { cause: error });
             }
+        } else if (config.operatorUrl) {
+            // Serving doesn't depend on it, so it doesn't hold up the start. Until it answers, run tokens from
+            // this node's own organization are refused as if billed.
+            session().then(({ organizationId }) => {
+                config.organizationId = organizationId;
+            }, (error) => {
+                fastify.log.warn(`No session with the operator, so this node can't be listed: ${error instanceof Error ? error.message : String(error)}`);
+            });
         }
         const db = await openDatabase(options.databasePath ?? DEFAULT_DATABASE_PATH);
         fastify.addHook('onClose', async () => db.close());

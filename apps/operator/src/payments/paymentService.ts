@@ -1,6 +1,6 @@
 import { and, eq, lt } from "drizzle-orm";
 import type { Database, Transaction } from "../db/database.js";
-import { receiptsTable } from "../db/schema.js";
+import { receiptsTable, runsTable } from "../db/schema.js";
 import { verifySignature } from "../crypto.js";
 import { OperationError } from "../errors.js";
 import { inferenceAmount, isInferenceSubmission } from "../inference.js";
@@ -9,6 +9,7 @@ import type { OrganizationService } from "../organizations.js";
 import { isInferenceVoucher, type PaymentSubmission, type Voucher, voucherPayload } from "./types.js";
 
 export type Receipt = typeof receiptsTable.$inferSelect;
+type Run = typeof runsTable.$inferSelect;
 
 export interface PaymentPolicy {
     /** The platform's share of each captured payment, in basis points. */
@@ -58,7 +59,11 @@ export class PaymentService {
         }
     }
 
-    /** Holds the voucher's amount, or an inference voucher's `maxAmount`, on the payer organization's balance. */
+    /**
+     * Holds the voucher's amount, or an inference voucher's `maxAmount`, on the payer organization's balance.
+     * A voucher naming a run is a call from a script run instead: the run's payer pays, and the amount moves
+     * from the run's hold to the receipt, so the run's hold caps what its calls cost.
+     */
     async authorize(providerPublicKey: string, voucher: Voucher): Promise<AuthorizeResult> {
         this.verifyVoucher(voucher);
         const expiresAt = new Date(Date.parse(voucher.expiresAt));
@@ -67,22 +72,33 @@ export class PaymentService {
         }
         await this.requireProvider(providerPublicKey, voucher.recipientOrganizationId);
 
-        const payer = await this.organizations.getNode(voucher.publicKey);
-        if (!payer) {
+        const signer = await this.organizations.getNode(voucher.publicKey);
+        if (!signer) {
             throw new OperationError(402, `Payer node is not enrolled in an organization. Enroll it at ${TOP_UP_URL}`);
         }
-        if (payer.revokedAt) {
+        if (signer.revokedAt) {
             throw new OperationError(403, 'Payer node has been revoked');
         }
-        if (payer.organizationId === voucher.recipientOrganizationId) {
+        let run: Run | undefined;
+        if (voucher.runId !== undefined) {
+            [run] = await this.db.select().from(runsTable).where(eq(runsTable.runId, voucher.runId)).limit(1);
+            if (!run) {
+                throw new OperationError(404, 'Voucher\'s run was never authorized');
+            }
+            if (run.nodePublicKey !== voucher.publicKey) {
+                throw new OperationError(403, 'Only the node running a run can spend its hold');
+            }
+        }
+        const payerOrganizationId = run ? run.payerOrganizationId : signer.organizationId;
+        if (payerOrganizationId === voucher.recipientOrganizationId) {
             throw new OperationError(422, 'An organization can\'t pay itself');
         }
         const hold = isInferenceVoucher(voucher) ? voucher.maxAmount : voucher.amount;
 
         try {
             return await this.db.transaction(async (tx) => {
-                const organizations = await lockOrganizations(tx, [payer.organizationId, voucher.recipientOrganizationId]);
-                const payerOrganization = organizations.get(payer.organizationId)!;
+                const organizations = await lockOrganizations(tx, [payerOrganizationId, voucher.recipientOrganizationId]);
+                const payerOrganization = organizations.get(payerOrganizationId)!;
                 const recipient = organizations.get(voucher.recipientOrganizationId);
                 if (!recipient?.payoutsEnabled) {
                     throw new OperationError(422, `Organization ${voucher.recipientOrganizationId} can't receive payouts yet`);
@@ -100,14 +116,24 @@ export class PaymentService {
                     throw new OperationError(409, 'Voucher has already been used');
                 }
 
-                if (payerOrganization.balanceMicroUsd - payerOrganization.heldMicroUsd < hold) {
+                if (run) {
+                    const [locked] = await tx.select().from(runsTable).where(eq(runsTable.id, run.id)).for('update');
+                    if (locked!.status !== 'held') {
+                        throw new OperationError(409, 'Voucher\'s run has already been settled');
+                    }
+                    // The token budget stays held for the script itself.
+                    if (locked!.heldMicroUsd - locked!.tokenBudgetMicroUsd < hold) {
+                        throw new OperationError(402, 'The run\'s remaining budget can\'t cover this call');
+                    }
+                    await tx.update(runsTable).set({ heldMicroUsd: locked!.heldMicroUsd - hold, updatedAt: new Date() }).where(eq(runsTable.id, run.id));
+                } else if (payerOrganization.balanceMicroUsd - payerOrganization.heldMicroUsd < hold) {
                     throw new OperationError(402, `Insufficient balance: top up at ${TOP_UP_URL}`);
                 }
 
                 await tx.insert(receiptsTable).values({
                     requestId: voucher.requestId,
                     invocationId: voucher.invocationId,
-                    payerOrganizationId: payer.organizationId,
+                    payerOrganizationId,
                     payerPublicKey: voucher.publicKey,
                     recipientOrganizationId: voucher.recipientOrganizationId,
                     providerPublicKey,
@@ -115,8 +141,10 @@ export class PaymentService {
                     voucherSignature: voucher.signature,
                     invocationHash: voucher.invocationHash,
                     expiresAt,
+                    runId: run?.id,
                 });
-                await adjustOrganization(tx, payer.organizationId, { held: hold });
+                // A run's call is already held as part of the run's hold.
+                if (!run) await adjustOrganization(tx, payerOrganizationId, { held: hold });
                 return { status: 'held' as const, heldMicroUsd: hold };
             });
         } catch (error) {

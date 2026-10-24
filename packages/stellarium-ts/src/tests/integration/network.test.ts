@@ -158,7 +158,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
             functions: expect.arrayContaining([expect.objectContaining({ name: "temperature", paymentManifest: { costMicroUsd: COST, recipientOrganizationId: ORGANIZATION } })]),
         }));
 
-        expect(await run(caller.url)).toEqual({ returnValue: { value: 12, error: null } });
+        expect(await run(caller.url)).toEqual({ usage: { tokens: expect.any(Number) }, returnValue: { value: 12, error: null } });
 
         await vi.waitFor(() => expect(settlements).toHaveLength(1));
         const [voucher] = settlements;
@@ -173,7 +173,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
 
         const second = await startCaller();
 
-        expect(await run(second.url)).toEqual({ returnValue: { value: 12, error: null } });
+        expect(await run(second.url)).toEqual({ usage: { tokens: expect.any(Number) }, returnValue: { value: 12, error: null } });
     });
 
     describe("restricted functions", () => {
@@ -185,7 +185,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
 
             await caller.node.addGrant(await provider.issueGrant(callerKeys.publicKey, [vault], { lifetimeMs: HOUR }));
 
-            expect(await run(caller.url, vaultSource)).toEqual({ returnValue: { value: 7, error: null } });
+            expect(await run(caller.url, vaultSource)).toEqual({ usage: { tokens: expect.any(Number) }, returnValue: { value: 7, error: null } });
         });
 
         test("the caller asks the provider for a grant, then calls with it", async () => {
@@ -194,7 +194,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
             await expect(caller.node.requestGrant(providerUrl, [vault], { invite: "wrong" })).rejects.toThrow("Grant request refused");
             await caller.node.requestGrant(providerUrl, [vault], { invite: "letmein" });
 
-            expect(await run(caller.url, vaultSource)).toEqual({ returnValue: { value: 7, error: null } });
+            expect(await run(caller.url, vaultSource)).toEqual({ usage: { tokens: expect.any(Number) }, returnValue: { value: 7, error: null } });
         });
 
         test("the provider's admin blocks a caller over HTTP, then unblocks it", async () => {
@@ -213,13 +213,13 @@ describe("two-node network", { timeout: 15_000 }, () => {
             await expect(caller.node.requestGrant(providerUrl, [vault], { invite: "letmein" })).rejects.toThrow("refused");
 
             expect((await adminRequest("DELETE")).status).toBe(200);
-            expect(await run(caller.url, vaultSource)).toEqual({ returnValue: { value: 7, error: null } });
+            expect(await run(caller.url, vaultSource)).toEqual({ usage: { tokens: expect.any(Number) }, returnValue: { value: 7, error: null } });
         });
 
         test("grants passed at start are loaded, and revocation at the provider cuts them off", async () => {
             const chain = await provider.issueGrant(callerKeys.publicKey, [vault], { lifetimeMs: HOUR });
             const caller = await startCaller({ grants: [chain] });
-            expect(await run(caller.url, vaultSource)).toEqual({ returnValue: { value: 7, error: null } });
+            expect(await run(caller.url, vaultSource)).toEqual({ usage: { tokens: expect.any(Number) }, returnValue: { value: 7, error: null } });
 
             await provider.revokeGrant(chain[0].id);
 
@@ -236,7 +236,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
             const user = await startCaller({ ...userKeys, databasePath: path.join(dir, "user.db") });
             await user.node.addGrant(await caller.node.delegateGrant(root.id, userKeys.publicKey, [vault], { lifetimeMs: HOUR }));
 
-            expect(await run(user.url, vaultSource)).toEqual({ returnValue: { value: 7, error: null } });
+            expect(await run(user.url, vaultSource)).toEqual({ usage: { tokens: expect.any(Number) }, returnValue: { value: 7, error: null } });
         });
 
         test("the refresher renews a grant past half its lifetime", async () => {
@@ -249,7 +249,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
 
             // Well past the first copy's expiry, the renewed one still works.
             await new Promise((resolve) => setTimeout(resolve, 500));
-            expect(await run(caller.url, vaultSource)).toEqual({ returnValue: { value: 7, error: null } });
+            expect(await run(caller.url, vaultSource)).toEqual({ usage: { tokens: expect.any(Number) }, returnValue: { value: 7, error: null } });
         });
     });
 
@@ -264,14 +264,19 @@ describe("two-node network", { timeout: 15_000 }, () => {
         expect(authorizations).toEqual([]);
     });
 
-    test("a caller with an enrollment token enrolls at startup; one without doesn't contact the operator", async () => {
+    test("a caller with an enrollment token enrolls at startup; one without still reports its URL", async () => {
         sessions.length = 0;
-        await startCaller({ operatorUrl, enrollmentToken: "enr_caller" });
-        expect(sessions).toEqual([{ enrollmentToken: "enr_caller" }]);
+        const enrolled = await startCaller({ operatorUrl, enrollmentToken: "enr_caller" });
+        expect(sessions).toEqual([{ enrollmentToken: "enr_caller", baseUrl: enrolled.url }]);
 
         sessions.length = 0;
-        await startCaller({ operatorUrl, databasePath: path.join(dir, "caller-2.db") });
-        expect(sessions).toEqual([]);
+        const other = await startCaller({ operatorUrl, databasePath: path.join(dir, "caller-2.db") });
+        await vi.waitFor(() => expect(sessions).toEqual([{ baseUrl: other.url }]));
+    });
+
+    test("a node without paid functions or a token starts without waiting for an unreachable operator", async () => {
+        const caller = await startCaller({ operatorUrl: "http://127.0.0.1:1/v1", databasePath: path.join(dir, "caller-3.db") });
+        expect(await run(caller.url)).toMatchObject({ returnValue: { value: 12, error: null } });
     });
 
     test("the provider refuses to run a call the operator won't hold, and the caller sees why", async () => {
@@ -293,7 +298,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
 
             const result = await run(caller.url, completeSource);
 
-            expect(result).toEqual({ returnValue: { value: "echo: Hello world!", error: null } });
+            expect(result).toEqual({ usage: { tokens: expect.any(Number) }, returnValue: { value: "echo: Hello world!", error: null } });
             await vi.waitFor(() => expect(submissions).toHaveLength(1));
             // 3 input tokens at $3/M plus 10 output tokens at $15/M, rounded up.
             expect(submissions[0]).toMatchObject({

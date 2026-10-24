@@ -29,17 +29,54 @@ export const organizationsTable = pgTable("organizations", {
   updatedAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
 });
 
-/** A node key enrolled in an organization. A key belongs to at most one organization, ever. */
+/**
+ * A node key enrolled in an organization. A key belongs to at most one organization, ever.
+ * A listed node accepts runs from other organizations' API clients, at its token price.
+ */
 export const nodesTable = pgTable("nodes", {
   // The node's SPKI public key, as on its vouchers and signed requests.
   publicKey: varchar({ length: 255 }).primaryKey(),
   organizationId: varchar({ length: 64 }).notNull().references(() => organizationsTable.id),
   label: varchar({ length: 255 }),
+  // The URL the node reports in its session. Changing it unlists the node until it is verified again.
+  baseUrl: varchar({ length: 1024 }),
+  // Listing details, set from the dashboard.
+  name: varchar({ length: 255 }),
+  description: varchar({ length: 2048 }),
+  // Charged per million script tokens a run executes. 0 is free.
+  priceMicroUsdPerMillionTokens: bigint({ mode: 'number' }).notNull().default(0),
+  listed: boolean().notNull().default(false),
+  // When `{baseUrl}/v1/self` last answered with this node's key. Listing requires it.
+  verifiedAt: timestamp(),
   createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
   // A revoked node can neither pay nor be paid.
   revokedAt: timestamp(),
 }, (table) => [
   index("nodes_organizationId_index").on(table.organizationId),
+]);
+
+/**
+ * Credentials an organization exchanges for JWTs that run scripts on one node, paid from its balance.
+ * Only the secret's SHA-256 hash is stored.
+ */
+export const apiClientsTable = pgTable("api_clients", {
+  // `cli_` plus random characters: the OAuth client_id.
+  id: varchar({ length: 64 }).primaryKey(),
+  secretHash: varchar({ length: 64 }).notNull(),
+  // The organization that pays for its runs.
+  organizationId: varchar({ length: 64 }).notNull().references(() => organizationsTable.id),
+  nodePublicKey: varchar({ length: 255 }).notNull().references(() => nodesTable.publicKey),
+  label: varchar({ length: 255 }),
+  // Most one run may cost, script tokens and the paid calls it makes together. Also the run's hold.
+  maxRunCostMicroUsd: bigint({ mode: 'number' }).notNull(),
+  // Most its runs may cost in a calendar month (UTC). Null for no cap.
+  monthlyCapMicroUsd: bigint({ mode: 'number' }),
+  // The dashboard user who created it.
+  createdBy: varchar({ length: 255 }),
+  createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
+  revokedAt: timestamp(),
+}, (table) => [
+  index("api_clients_organizationId_index").on(table.organizationId),
 ]);
 
 /** One-time tokens that enroll a node in an organization. Only their SHA-256 hash is stored. */
@@ -61,6 +98,46 @@ export const enrollmentTokensTable = pgTable("enrollment_tokens", {
  */
 export const RECEIPT_STATUSES = ['held', 'captured', 'released'] as const;
 export type ReceiptStatus = typeof RECEIPT_STATUSES[number];
+
+/**
+ * One script run by an API client on another organization's node, from its authorization to its capture
+ * or release. Its hold covers the script's tokens and the paid calls the script makes: a voucher naming
+ * the run moves part of the hold to its own receipt.
+ */
+export const runsTable = pgTable("runs", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  // Chosen by the node, so a retried authorization finds the same run.
+  runId: uuid().notNull().unique(),
+  clientId: varchar({ length: 64 }).notNull().references(() => apiClientsTable.id),
+  payerOrganizationId: varchar({ length: 64 }).notNull().references(() => organizationsTable.id),
+  recipientOrganizationId: varchar({ length: 64 }).notNull().references(() => organizationsTable.id),
+  nodePublicKey: varchar({ length: 255 }).notNull(),
+  status: varchar({ length: 16, enum: RECEIPT_STATUSES }).notNull().default('held'),
+  // The node's price when the run was authorized.
+  priceMicroUsdPerMillionTokens: bigint({ mode: 'number' }).notNull(),
+  // The most tokens the script can execute, computed by the operator from its source.
+  maxTokens: bigint({ mode: 'number' }).notNull(),
+  // The hold placed at authorization.
+  holdMicroUsd: bigint({ mode: 'number' }).notNull(),
+  // The part of the hold the run still holds itself: the hold less what moved to its calls' receipts. 0 once settled.
+  heldMicroUsd: bigint({ mode: 'number' }).notNull(),
+  // Kept back from the calls' share for the script's tokens at most `maxTokens`.
+  tokenBudgetMicroUsd: bigint({ mode: 'number' }).notNull(),
+  // The tokens the node reported, and what they were charged. Null until captured.
+  tokens: bigint({ mode: 'number' }),
+  amountMicroUsd: bigint({ mode: 'number' }),
+  feeMicroUsd: bigint({ mode: 'number' }),
+  expiresAt: timestamp().notNull(),
+  capturedAt: timestamp(),
+  releasedAt: timestamp(),
+  createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
+  updatedAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
+}, (table) => [
+  index("runs_clientId_createdAt_index").on(table.clientId, table.createdAt),
+  index("runs_payerOrganizationId_index").on(table.payerOrganizationId),
+  index("runs_recipientOrganizationId_index").on(table.recipientOrganizationId),
+  index("runs_status_expiresAt_index").on(table.status, table.expiresAt),
+]);
 
 /** One voucher, from its authorization to its capture or release. */
 export const receiptsTable = pgTable("receipts", {
@@ -86,6 +163,8 @@ export const receiptsTable = pgTable("receipts", {
   // Inference vouchers only: the usage the provider reported. Null for fixed vouchers.
   inputTokens: bigint({ mode: 'number' }),
   outputTokens: bigint({ mode: 'number' }),
+  // The run whose hold paid for it, for a call made by a script run. The run's payer pays.
+  runId: integer().references(() => runsTable.id),
   capturedAt: timestamp(),
   releasedAt: timestamp(),
   createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
@@ -96,6 +175,7 @@ export const receiptsTable = pgTable("receipts", {
   index("receipts_payerOrganizationId_index").on(table.payerOrganizationId),
   index("receipts_recipientOrganizationId_index").on(table.recipientOrganizationId),
   index("receipts_status_expiresAt_index").on(table.status, table.expiresAt),
+  index("receipts_runId_index").on(table.runId),
 ]);
 
 /**
@@ -110,6 +190,7 @@ export const ledgerEntriesTable = pgTable("ledger_entries", {
   amountMicroUsd: bigint({ mode: 'number' }).notNull(),
   kind: varchar({ length: 32 }).notNull(),
   receiptId: integer().references(() => receiptsTable.id),
+  runId: integer().references(() => runsTable.id),
   topUpId: integer().references(() => topUpsTable.id),
   payoutId: integer().references(() => payoutsTable.id),
   // The Stripe object behind the entry, such as a refund's charge or a dispute.

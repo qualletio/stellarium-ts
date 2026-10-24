@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { and, desc, eq, gt, isNull, lt, type SQL } from "drizzle-orm";
 import type { Database } from "./db/database.js";
-import { enrollmentTokensTable, nodesTable, organizationsTable, payoutsTable, receiptsTable, topUpsTable } from "./db/schema.js";
+import { enrollmentTokensTable, nodesTable, organizationsTable, payoutsTable, receiptsTable, runsTable, topUpsTable } from "./db/schema.js";
 import { newId, sha256Hex } from "./crypto.js";
 import { OperationError } from "./errors.js";
 import { accounts, adjustOrganization, lockOrganizations, type Organization, postLedgerTransaction } from "./ledger.js";
@@ -9,6 +9,30 @@ import { accounts, adjustOrganization, lockOrganizations, type Organization, pos
 export type Node = typeof nodesTable.$inferSelect;
 
 export const ENROLLMENT_TOKEN_LIFETIME_MS = 1000 * 60 * 60 * 24;
+
+/** Returns the public key `{baseUrl}/v1/self` answers with, or undefined if it can't be reached. Tests replace it. */
+export type NodeVerifier = (baseUrl: string) => Promise<string | undefined>;
+
+export const NODE_VERIFY_TIMEOUT_MS = 5_000;
+
+export const fetchNodePublicKey: NodeVerifier = async (baseUrl) => {
+    try {
+        const response = await fetch(`${baseUrl}/v1/self`, { signal: AbortSignal.timeout(NODE_VERIFY_TIMEOUT_MS), redirect: 'error' });
+        if (!response.ok) return undefined;
+        const { publicKey } = await response.json() as { publicKey?: unknown };
+        return typeof publicKey === 'string' ? publicKey : undefined;
+    } catch {
+        return undefined;
+    }
+};
+
+/** What an organization admin may change about a node's listing. */
+export interface ListingUpdate {
+    name?: string;
+    description?: string | null;
+    priceMicroUsdPerMillionTokens?: number;
+    listed?: boolean;
+}
 
 /** Newest first. `before` is the last id of the previous page. */
 export interface Page {
@@ -18,7 +42,7 @@ export interface Page {
 
 /** Organizations, the node keys enrolled in them, and enrollment. */
 export class OrganizationService {
-    constructor(private readonly db: Database) {}
+    constructor(private readonly db: Database, private readonly verifyNode: NodeVerifier = fetchNodePublicKey) {}
 
     /** `id` defaults to a new random one. Returns undefined, creating nothing, if an organization with `id` exists. */
     async create(name: string, options: { id?: string, authOrganizationId?: string } = {}): Promise<Organization | undefined> {
@@ -72,11 +96,15 @@ export class OrganizationService {
     /**
      * Returns the organization a node is enrolled in, first enrolling it with `enrollmentToken` if it
      * isn't enrolled yet. An enrolled node's token is ignored, so a node may keep it configured.
+     * Records the `baseUrl` the node reports. A listed node that reports a new one is unlisted until verified again.
      */
-    async session(publicKey: string, enrollmentToken?: string): Promise<{ organizationId: string }> {
+    async session(publicKey: string, enrollmentToken?: string, baseUrl?: string): Promise<{ organizationId: string }> {
         const node = await this.getNode(publicKey);
         if (node) {
             if (node.revokedAt) throw new OperationError(403, 'Node has been revoked');
+            if (baseUrl !== undefined && baseUrl !== node.baseUrl) {
+                await this.db.update(nodesTable).set({ baseUrl, listed: false, verifiedAt: null }).where(eq(nodesTable.publicKey, publicKey));
+            }
             return { organizationId: node.organizationId };
         }
         if (!enrollmentToken) {
@@ -95,7 +123,7 @@ export class OrganizationService {
             if (!claimed) {
                 throw new OperationError(403, 'Enrollment token is invalid, used or expired');
             }
-            await tx.insert(nodesTable).values({ publicKey, organizationId: claimed.organizationId, label: claimed.label });
+            await tx.insert(nodesTable).values({ publicKey, organizationId: claimed.organizationId, label: claimed.label, baseUrl });
             return { organizationId: claimed.organizationId };
         });
     }
@@ -117,6 +145,65 @@ export class OrganizationService {
         if (!revoked && !(await this.getNode(publicKey))?.revokedAt) {
             throw new OperationError(404, 'Node not found');
         }
+    }
+
+    /**
+     * Changes one of the organization's nodes' listing. Listing requires a name and a base URL whose
+     * `/v1/self` answers with the node's key, checked each time the node is listed.
+     */
+    async updateListing(organizationId: string, publicKey: string, update: ListingUpdate): Promise<Node> {
+        const node = await this.getNode(publicKey);
+        if (!node || node.organizationId !== organizationId) {
+            throw new OperationError(404, 'Node not found');
+        }
+        if (node.revokedAt) {
+            throw new OperationError(409, 'Node has been revoked');
+        }
+        const changes: Partial<Node> = {};
+        if (update.name !== undefined) changes.name = update.name;
+        if (update.description !== undefined) changes.description = update.description;
+        if (update.priceMicroUsdPerMillionTokens !== undefined) changes.priceMicroUsdPerMillionTokens = update.priceMicroUsdPerMillionTokens;
+        if (update.listed === false) changes.listed = false;
+        if (update.listed === true) {
+            if (!(changes.name ?? node.name)) {
+                throw new OperationError(400, 'A listed node needs a name');
+            }
+            if (!node.baseUrl) {
+                throw new OperationError(409, 'The node hasn\'t reported its URL yet. Restart it with OPERATOR_URL set');
+            }
+            if (await this.verifyNode(node.baseUrl) !== publicKey) {
+                throw new OperationError(422, `${node.baseUrl}/v1/self didn't answer with this node's key`);
+            }
+            changes.listed = true;
+            changes.verifiedAt = new Date();
+        }
+        const [updated] = await this.db.update(nodesTable).set(changes).where(eq(nodesTable.publicKey, publicKey)).returning();
+        return updated!;
+    }
+
+    /** Every listed node, with its organization's name, for callers choosing a node. */
+    async listings() {
+        return this.db.select({
+            publicKey: nodesTable.publicKey,
+            name: nodesTable.name,
+            description: nodesTable.description,
+            baseUrl: nodesTable.baseUrl,
+            priceMicroUsdPerMillionTokens: nodesTable.priceMicroUsdPerMillionTokens,
+            organizationId: nodesTable.organizationId,
+            organizationName: organizationsTable.name,
+            verifiedAt: nodesTable.verifiedAt,
+        })
+            .from(nodesTable)
+            .innerJoin(organizationsTable, eq(organizationsTable.id, nodesTable.organizationId))
+            .where(and(eq(nodesTable.listed, true), isNull(nodesTable.revokedAt)))
+            .orderBy(nodesTable.name);
+    }
+
+    /** Runs the organization paid for (`payer`) or was paid for (`provider`). */
+    async listRuns(organizationId: string, as: 'payer' | 'provider', page: Page) {
+        const owner = as === 'payer' ? eq(runsTable.payerOrganizationId, organizationId) : eq(runsTable.recipientOrganizationId, organizationId);
+        return this.db.select().from(runsTable).where(page.before === undefined ? owner : and(owner, lt(runsTable.id, page.before)))
+            .orderBy(desc(runsTable.id)).limit(page.limit);
     }
 
     /** Receipts the organization paid (`payer`) or was paid (`provider`). */

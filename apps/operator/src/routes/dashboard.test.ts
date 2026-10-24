@@ -1,9 +1,10 @@
+import { eq } from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
 import Stripe from 'stripe';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { DashboardAuthenticator, DashboardSession } from '../auth/dashboardAuth.js';
 import type { Database } from '../db/database.js';
-import { authOrganizationsTable } from '../db/schema.js';
+import { authOrganizationsTable, nodesTable } from '../db/schema.js';
 import type { OrganizationService } from '../organizations.js';
 import { DEFAULT_PAYOUT_POLICY } from '../payouts/payoutService.js';
 import { createService, type Service } from '../service.js';
@@ -30,14 +31,18 @@ describe('dashboard and Stripe routes', () => {
     let fastify: FastifyInstance;
     let service: Service;
     let stripe: FakeStripe;
+    /** What the fake `{baseUrl}/v1/self` answers, by base URL. */
+    let selves: Map<string, string>;
 
     async function start(options: { stripe?: boolean } = { stripe: true }) {
         stripe = new FakeStripe();
         // Signatures are checked by the real SDK; everything else goes to the fake.
         stripe.constructEvent = (payload, signature, secret) => new StripeSdkGateway('sk_test_unused').constructEvent(payload, signature, secret);
+        selves = new Map();
         service = createService(db, {
             platformFeeBps: 2000,
             dashboardAuthenticator: new FakeAuthenticator(),
+            verifyNode: async (baseUrl) => selves.get(baseUrl),
             stripe: options.stripe ? {
                 gateway: stripe, webhookSecret: WEBHOOK_SECRET, connectWebhookSecret: CONNECT_WEBHOOK_SECRET,
                 billing: BILLING_CONFIG, payouts: DEFAULT_PAYOUT_POLICY,
@@ -92,6 +97,9 @@ describe('dashboard and Stripe routes', () => {
                 ['POST', '/v1/org/connect/onboarding', undefined],
                 ['POST', '/v1/org/enrollment-tokens', {}],
                 ['DELETE', '/v1/org/nodes/key', undefined],
+                ['PATCH', '/v1/org/nodes/key', { listed: false }],
+                ['POST', '/v1/org/clients', { nodePublicKey: 'key' }],
+                ['DELETE', '/v1/org/clients/cli_x', undefined],
             ] as const) {
                 const response = await fastify.inject({ method, url, payload, headers: member });
                 expect(response.statusCode, `${method} ${url}`).toBe(403);
@@ -137,6 +145,50 @@ describe('dashboard and Stripe routes', () => {
 
             expect(response.statusCode).toBe(404);
             expect((await service.organizations.getNode(provider.publicKey))!.revokedAt).toBeNull();
+        });
+
+        test('an admin lists a node once its URL answers with its key, and sets its price', async () => {
+            const { token } = (await fastify.inject({ method: 'POST', url: '/v1/org/enrollment-tokens', payload: {}, headers: admin })).json();
+            const node = generateNodeKeys();
+            await service.organizations.session(node.publicKey, token, 'https://node.example');
+            const patch = (payload: object) => fastify.inject({ method: 'PATCH', url: `/v1/org/nodes/${node.publicKey}`, payload, headers: admin });
+
+            expect((await patch({ listed: true })).statusCode).toBe(400);
+            expect((await patch({ name: 'Weather', listed: true })).statusCode).toBe(422);
+
+            selves.set('https://node.example', node.publicKey);
+            const listed = await patch({ name: 'Weather', description: 'Forecasts', priceMicroUsdPerMillionTokens: 2_000_000, listed: true });
+            expect(listed.statusCode).toBe(200);
+            expect(listed.json().node).toMatchObject({ listed: true, verifiedAt: expect.any(String), priceMicroUsdPerMillionTokens: 2_000_000 });
+
+            const listings = (await fastify.inject({ method: 'GET', url: '/v1/listings', headers: member })).json().listings;
+            expect(listings).toEqual([expect.objectContaining({ publicKey: node.publicKey, name: 'Weather', baseUrl: 'https://node.example', organizationName: 'Org acme' })]);
+
+            // A new URL unlists it until it is verified again.
+            await service.organizations.session(node.publicKey, undefined, 'https://moved.example');
+            expect((await service.organizations.getNode(node.publicKey))).toMatchObject({ listed: false, verifiedAt: null, baseUrl: 'https://moved.example' });
+        });
+
+        test('an admin creates an API client for a listed node, sees it without its secret, and revokes it', async () => {
+            const { provider } = await seedOrganizations(db, 0);
+            const create = (nodePublicKey: string) => fastify.inject({ method: 'POST', url: '/v1/org/clients', payload: { nodePublicKey, label: 'ci', maxRunCostMicroUsd: 5_000 }, headers: admin });
+
+            expect((await create(provider.publicKey)).statusCode).toBe(404);
+
+            await db.update(nodesTable).set({ listed: true }).where(eq(nodesTable.publicKey, provider.publicKey));
+            const created = await create(provider.publicKey);
+            expect(created.statusCode).toBe(200);
+            const { client, clientSecret } = created.json();
+            expect(client).toMatchObject({ id: expect.stringMatching(/^cli_/), label: 'ci', maxRunCostMicroUsd: 5_000, createdBy: 'user_admin' });
+            expect(client.secretHash).toBeUndefined();
+            expect(clientSecret).toMatch(/^cs_/);
+
+            const clients = (await fastify.inject({ method: 'GET', url: '/v1/org/clients', headers: member })).json().clients;
+            expect(clients).toEqual([expect.objectContaining({ id: client.id, monthToDateMicroUsd: 0 })]);
+            expect(clients[0].secretHash).toBeUndefined();
+
+            expect((await fastify.inject({ method: 'DELETE', url: `/v1/org/clients/${client.id}`, headers: admin })).json()).toEqual({ revoked: true });
+            expect((await service.clients.get(client.id))!.revokedAt).not.toBeNull();
         });
 
         test('lists receipts as payer and as provider', async () => {

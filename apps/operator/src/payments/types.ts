@@ -14,6 +14,8 @@ export interface FixedPaymentSubmission {
         expiresAt: string;
         invocationHash: string;
         publicKey: string;
+        /** Set by a node calling a paid function from a script run: the run's hold pays, not the signer's organization. */
+        runId?: string;
     };
 }
 
@@ -32,6 +34,8 @@ export interface InferencePaymentSubmission {
         expiresAt: string;
         invocationHash: string;
         publicKey: string;
+        /** Set by a node calling a paid function from a script run: the run's hold pays, not the signer's organization. */
+        runId?: string;
     };
     usage: {
         inputTokens: number;
@@ -45,9 +49,11 @@ export function isInferenceVoucher(voucher: Voucher): voucher is InferencePaymen
 
 /**
  * The bytes the caller signed: stellarium-ts's paymentVoucherPayload or inferenceVoucherPayload.
- * Key order is part of the signed bytes.
+ * Key order is part of the signed bytes. `runId` comes last and only when set, so vouchers without one
+ * sign the same bytes as before it existed.
  */
 export function voucherPayload(voucher: Voucher): object {
+    const run = voucher.runId === undefined ? {} : { runId: voucher.runId };
     if (isInferenceVoucher(voucher)) {
         const {
             kind, requestId, invocationId, maxAmount, inputCostMicroUsdPerMillionTokens, outputCostMicroUsdPerMillionTokens,
@@ -55,9 +61,9 @@ export function voucherPayload(voucher: Voucher): object {
         } = voucher;
         return {
             kind, requestId, invocationId, maxAmount, inputCostMicroUsdPerMillionTokens, outputCostMicroUsdPerMillionTokens,
-            maxTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey,
+            maxTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey, ...run,
         };
     }
     const { requestId, invocationId, amount, recipientOrganizationId, expiresAt, invocationHash, publicKey } = voucher;
-    return { requestId, invocationId, amount, recipientOrganizationId, expiresAt, invocationHash, publicKey };
+    return { requestId, invocationId, amount, recipientOrganizationId, expiresAt, invocationHash, publicKey, ...run };
 }
