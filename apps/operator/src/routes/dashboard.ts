@@ -4,7 +4,7 @@ import type { BillingService } from '../billing/billingService.js';
 import { OperationError } from '../errors.js';
 import type { Organization } from '../ledger.js';
 import type { ListingUpdate } from '../organizations.js';
-import type { NewApiClient } from '../runs/clients.js';
+import type { ApiClientLimits, NewApiClient } from '../runs/clients.js';
 import type { RouteOptions } from './index.js';
 
 const pageQuerySchema = {
@@ -38,6 +38,15 @@ const newClientSchema = {
         label: { type: 'string', minLength: 1, maxLength: 255 },
         maxRunCostMicroUsd: { ...microUsd, minimum: 1 },
         monthlyCapMicroUsd: { type: ['integer', 'null'], minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+    },
+    additionalProperties: false,
+} as const;
+
+const clientLimitsSchema = {
+    type: 'object',
+    properties: {
+        maxRunCostMicroUsd: newClientSchema.properties.maxRunCostMicroUsd,
+        monthlyCapMicroUsd: newClientSchema.properties.monthlyCapMicroUsd,
     },
     additionalProperties: false,
 } as const;
@@ -108,6 +117,11 @@ const dashboardRoutes: FastifyPluginAsync<RouteOptions & { authenticator: Dashbo
     fastify.post<{ Body: Omit<NewApiClient, 'createdBy'> }>('/org/clients', { preHandler: requireAdmin, schema: { body: newClientSchema } }, async (request) => {
         const { client: { secretHash: _, ...client }, clientSecret } = await service.clients.create(organization(request).id, { ...request.body, createdBy: request.dashboardSession!.userId });
         return { client, clientSecret };
+    });
+
+    fastify.patch<{ Params: { id: string }, Body: ApiClientLimits }>('/org/clients/:id', { preHandler: requireAdmin, schema: { body: clientLimitsSchema } }, async (request) => {
+        const { secretHash: _, ...client } = await service.clients.updateLimits(organization(request).id, request.params.id, request.body);
+        return { client };
     });
 
     fastify.delete<{ Params: { id: string } }>('/org/clients/:id', { preHandler: requireAdmin }, async (request) => {

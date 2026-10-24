@@ -217,6 +217,7 @@ client by `X-Forwarded-For`.
 | `GET /v1/listings` | member | Every organization's listed nodes, with their price |
 | `GET /v1/org/clients` | member | API clients, with what each spent this month. Secrets are never returned |
 | `POST /v1/org/clients` `{ nodePublicKey, label?, maxRunCostMicroUsd?, monthlyCapMicroUsd? }` | admin | `{ client, clientSecret }`. The secret is shown once. The node must be the organization's own or listed. `maxRunCostMicroUsd` defaults to $1 |
+| `PATCH /v1/org/clients/:id` `{ maxRunCostMicroUsd?, monthlyCapMicroUsd? }` | admin | `{ client }`. Omitted limits are kept, and a null `monthlyCapMicroUsd` removes the cap. 400 if the cap would be below the maximum run cost, 409 for a revoked client. Applies from the client's next run |
 | `DELETE /v1/org/clients/:id` | admin | Revokes an API client |
 | `GET /v1/org/runs?as=payer\|provider` | member | Runs, paged like receipts |
 

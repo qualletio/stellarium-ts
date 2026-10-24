@@ -19,6 +19,12 @@ export interface NewApiClient {
     createdBy?: string;
 }
 
+/** A change to a client's limits. Omitted fields keep their value, and a null monthly cap removes it. */
+export interface ApiClientLimits {
+    maxRunCostMicroUsd?: number;
+    monthlyCapMicroUsd?: number | null;
+}
+
 /** The start of the calendar month (UTC) that `now` falls in. Monthly caps reset then. */
 export function monthStart(now: Date = new Date()): Date {
     return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
@@ -88,6 +94,29 @@ export class ApiClientService {
             ...client,
             monthToDateMicroUsd: await clientSpend(this.db, client.id, monthStart(now)),
         })));
+    }
+
+    /**
+     * Changes a client's per-run maximum and monthly cap. Runs already authorized keep their hold; the
+     * new limits apply from the next run.
+     */
+    async updateLimits(organizationId: string, id: string, limits: ApiClientLimits): Promise<ApiClient> {
+        return this.db.transaction(async (tx) => {
+            const [client] = await tx.select().from(apiClientsTable)
+                .where(and(eq(apiClientsTable.id, id), eq(apiClientsTable.organizationId, organizationId)))
+                .for('update');
+            if (!client) throw new OperationError(404, 'API client not found');
+            if (client.revokedAt) throw new OperationError(409, 'API client has been revoked');
+            const maxRunCostMicroUsd = limits.maxRunCostMicroUsd ?? client.maxRunCostMicroUsd;
+            const monthlyCapMicroUsd = limits.monthlyCapMicroUsd === undefined ? client.monthlyCapMicroUsd : limits.monthlyCapMicroUsd;
+            if (monthlyCapMicroUsd !== null && monthlyCapMicroUsd < maxRunCostMicroUsd) {
+                throw new OperationError(400, 'The monthly cap must be at least the maximum run cost');
+            }
+            const [updated] = await tx.update(apiClientsTable).set({ maxRunCostMicroUsd, monthlyCapMicroUsd })
+                .where(eq(apiClientsTable.id, id))
+                .returning();
+            return updated!;
+        });
     }
 
     async revoke(organizationId: string, id: string): Promise<void> {

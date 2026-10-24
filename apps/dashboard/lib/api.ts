@@ -253,6 +253,15 @@ export interface NewApiClient {
 
 export const createClient = (client: NewApiClient) => request<{ client: Omit<ApiClient, 'monthToDateMicroUsd'>; clientSecret: string }>('POST', '/org/clients', client);
 
+/** Omitted fields keep their value. A null monthly cap removes it. */
+export interface ApiClientLimits {
+  maxRunCostMicroUsd?: number;
+  monthlyCapMicroUsd?: number | null;
+}
+
+export const updateClientLimits = (id: string, limits: ApiClientLimits) =>
+  request<{ client: Omit<ApiClient, 'monthToDateMicroUsd'> }>('PATCH', `/org/clients/${encodeURIComponent(id)}`, limits).then((r) => r.client);
+
 export const revokeClient = (id: string) => request<{ revoked: boolean }>('DELETE', `/org/clients/${encodeURIComponent(id)}`);
 
 export const listRuns = (as: 'payer' | 'provider', before?: number) =>
