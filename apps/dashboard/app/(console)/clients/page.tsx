@@ -1,12 +1,13 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { ClientForm, type ClientNodeOption } from '@/components/ClientForm';
+import { ClientLimitsForm } from '@/components/ClientLimitsForm';
 import { RevokeButton } from '@/components/RevokeButton';
 import { StatusBadge } from '@/components/StatusBadge';
 import ui from '@/components/ui.module.css';
 import { revokeClientAction } from '@/lib/actions';
 import { getOrganization, listClients, listListings, listNodes } from '@/lib/api';
-import { formatDate, formatPreciseUsd, formatTokenPrice, formatUsd, shortKey } from '@/lib/format';
+import { formatDate, formatPreciseUsd, formatTokenPrice, shortKey } from '@/lib/format';
 import { publicOperatorUrl } from '@/lib/site';
 
 export const metadata: Metadata = { title: 'API clients' };
@@ -99,8 +100,7 @@ export default async function ClientsPage({ searchParams }: PageProps<'/clients'
                       <span className={`${ui.secondary} ${ui.mono}`} title={client.nodePublicKey}>{shortKey(client.nodePublicKey)}</span>
                     </td>
                     <td>
-                      {formatUsd(client.maxRunCostMicroUsd)} per run
-                      <span className={ui.secondary}>{client.monthlyCapMicroUsd === null ? 'No monthly cap' : `${formatUsd(client.monthlyCapMicroUsd)} a month`}</span>
+                      <ClientLimitsForm client={client} editable={admin && !client.revokedAt} />
                     </td>
                     <td>{formatDate(client.createdAt)}</td>
                     <td>{client.revokedAt ? <StatusBadge status="revoked" /> : <StatusBadge status="active" />}</td>

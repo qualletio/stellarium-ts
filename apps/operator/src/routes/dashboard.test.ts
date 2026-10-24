@@ -99,6 +99,7 @@ describe('dashboard and Stripe routes', () => {
                 ['DELETE', '/v1/org/nodes/key', undefined],
                 ['PATCH', '/v1/org/nodes/key', { listed: false }],
                 ['POST', '/v1/org/clients', { nodePublicKey: 'key' }],
+                ['PATCH', '/v1/org/clients/cli_x', { maxRunCostMicroUsd: 1 }],
                 ['DELETE', '/v1/org/clients/cli_x', undefined],
             ] as const) {
                 const response = await fastify.inject({ method, url, payload, headers: member });
@@ -189,6 +190,27 @@ describe('dashboard and Stripe routes', () => {
 
             expect((await fastify.inject({ method: 'DELETE', url: `/v1/org/clients/${client.id}`, headers: admin })).json()).toEqual({ revoked: true });
             expect((await service.clients.get(client.id))!.revokedAt).not.toBeNull();
+        });
+
+        test('an admin updates an API client\'s limits', async () => {
+            const { provider } = await seedOrganizations(db, 0);
+            await db.update(nodesTable).set({ listed: true }).where(eq(nodesTable.publicKey, provider.publicKey));
+            const { client } = (await fastify.inject({ method: 'POST', url: '/v1/org/clients', payload: { nodePublicKey: provider.publicKey, maxRunCostMicroUsd: 5_000 }, headers: admin })).json();
+            const update = (payload: object, id = client.id) => fastify.inject({ method: 'PATCH', url: `/v1/org/clients/${id}`, payload, headers: admin });
+
+            const capped = await update({ monthlyCapMicroUsd: 20_000 });
+            expect(capped.statusCode).toBe(200);
+            expect(capped.json().client).toMatchObject({ maxRunCostMicroUsd: 5_000, monthlyCapMicroUsd: 20_000 });
+            expect(capped.json().client.secretHash).toBeUndefined();
+
+            // The cap is checked against the merged limits.
+            expect((await update({ maxRunCostMicroUsd: 30_000 })).statusCode).toBe(400);
+            expect((await update({ maxRunCostMicroUsd: 30_000, monthlyCapMicroUsd: null })).json().client).toMatchObject({ maxRunCostMicroUsd: 30_000, monthlyCapMicroUsd: null });
+            expect((await update({ maxRunCostMicroUsd: 0 })).statusCode).toBe(400);
+
+            expect((await update({ maxRunCostMicroUsd: 1 }, 'cli_missing')).statusCode).toBe(404);
+            await fastify.inject({ method: 'DELETE', url: `/v1/org/clients/${client.id}`, headers: admin });
+            expect((await update({ maxRunCostMicroUsd: 1 })).statusCode).toBe(409);
         });
 
         test('lists receipts as payer and as provider', async () => {

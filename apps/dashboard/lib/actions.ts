@@ -117,6 +117,21 @@ export async function createClientAction(_state: ActionState, formData: FormData
   return { client: { id: result.value.client.id, secret: result.value.clientSecret, nodePublicKey: result.value.client.nodePublicKey } };
 }
 
+/** Changes an API client's maximum per run and monthly cap. An empty cap removes it. */
+export async function updateClientLimitsAction(_state: ActionState, formData: FormData): Promise<ActionState> {
+  const maxRunCost = microUsd(formData.get('maxRunCost'));
+  const monthlyCap = microUsd(formData.get('monthlyCap'));
+  if (maxRunCost === null || !maxRunCost) return { error: 'Enter a maximum run cost in dollars, such as 1.00.' };
+  if (monthlyCap === null || monthlyCap === 0) return { error: 'Enter a monthly cap in dollars, or leave it empty for none.' };
+  const result = await attempt(() => api.updateClientLimits(String(formData.get('id')), {
+    maxRunCostMicroUsd: maxRunCost,
+    monthlyCapMicroUsd: monthlyCap ?? null,
+  }));
+  if ('error' in result) return result;
+  refresh();
+  return { saved: true };
+}
+
 export async function revokeClientAction(_state: ActionState, formData: FormData): Promise<ActionState> {
   const result = await attempt(() => api.revokeClient(String(formData.get('id'))));
   if ('error' in result) return result;
