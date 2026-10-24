@@ -450,6 +450,8 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
                 resourceResolver: options.service.resourceResolver,
                 resourceInvoker,
                 meter,
+                // The run token's claims, or null for an API-key run, so the name is always reserved.
+                builtins: { jwt: caller.kind === 'client' ? caller.payload : null },
             });
             settle('capture', meter.tokens);
             return reply.status(200).send({ returnValue: result.returnValue ?? null, usage: { tokens: meter.tokens } });

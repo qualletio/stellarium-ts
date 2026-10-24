@@ -381,6 +381,32 @@ describe("routes", () => {
                 expect(authorizeRun).not.toHaveBeenCalled();
             });
 
+            test("gives the script the run token's claims as the built-in jwt", async () => {
+                const response = await runWith(await runToken("org_caller"), "request R {\n  return jwt\n}");
+
+                expect(response.statusCode).toBe(200);
+                expect(response.json().returnValue).toEqual({
+                    iss: "stellarium", sub: "cli_test", aud: config.publicKey, org: "org_caller", iat: expect.any(Number), exp: expect.any(Number),
+                });
+            });
+
+            test.each([
+                ["redeclares", "var jwt = 1", /'jwt' is a built-in variable/],
+                ["changes", 'jwt.sub = "cli_other"', /read-only/],
+            ])("fails a script that %s jwt", async (_, statement, details) => {
+                const response = await runWith(await runToken(ORGANIZATION), `request R {\n  ${statement}\n}`);
+
+                expect(response.statusCode).toBe(422);
+                expect(response.json()).toMatchObject({ error: "Script failed", details: expect.stringMatching(details) });
+            });
+
+            test("gives an API-key run a null jwt", async () => {
+                const response = await tokenApp.inject({ method: "POST", url: "/v1/run", headers: { authorization: "Bearer secret" }, payload: { source: "request R {\n  return jwt\n}" } });
+
+                expect(response.statusCode).toBe(200);
+                expect(response.json().returnValue).toBeNull();
+            });
+
             test("still accepts the API key", async () => {
                 const response = await tokenApp.inject({ method: "POST", url: "/v1/run", headers: { authorization: "Bearer secret" }, payload: { source: temperatureSource } });
 

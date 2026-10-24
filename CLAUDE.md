@@ -47,6 +47,7 @@ When it is ambiguous whether a column was renamed or newly created, drizzle-kit 
 5. `/v1/run` accepts the node's `API_KEY` or a **run token**: an EdDSA JWT an organization's API client gets from the operator's `POST /v1/oauth/token` (`apps/operator/src/runs/`). Its `aud` is the node's public key, and `org` is the paying organization. The node verifies it against the operator's `/.well-known/jwks.json` (`RunTokenVerifier`, `src/client/runTokens.ts`). API-key runs and runs by the node's own organization are free, as before. Any other run is billed:
    - The node first calls `OperatorClient.authorizeRun` with the token, a run id it picks and the source. The operator computes the script's `maxTokens` itself and holds up to the client's `maxRunCostMicroUsd`.
    - The script runs with `resourceInvoker.forRun({ runId })`. Each of its paid calls, remote or to this node's own paid functions (`invokeLocalPaid`), signs a voucher carrying the `runId`, and the operator moves the voucher's amount from the run's hold to its receipt. The per-call cost limits don't apply.
+   - The script gets the verified run token's payload as the read-only built-in variable `jwt` (requestscript ≥ 1.3.0's `builtins` option), or `null` for an API-key run.
    - A `TokenMeter` (requestscript ≥ 1.2.0) counts the tokens executed. The node captures them with `captureRun`, charged at the node's listed price per million tokens. A script that fails with a `RequestScriptError` answers 422 and is still captured. Any other failure releases the run.
 
 ### Signing and voucher invariants

@@ -8,7 +8,7 @@ import { authOrganizationsTable, nodesTable } from '../db/schema.js';
 import type { OrganizationService } from '../organizations.js';
 import { DEFAULT_PAYOUT_POLICY } from '../payouts/payoutService.js';
 import { createService, type Service } from '../service.js';
-import { StripeSdkGateway } from '../stripe/gateway.js';
+import { StripeRequestError, StripeSdkGateway } from '../stripe/gateway.js';
 import { BILLING_CONFIG, createTestDatabase, FakeStripe, generateNodeKeys, seedOrganizations, signedVoucher } from '../testing.js';
 import routes from './index.js';
 
@@ -124,6 +124,21 @@ describe('dashboard and Stripe routes', () => {
             expect(org.payoutOnboardingStarted).toBe(true);
             const topUps = (await fastify.inject({ method: 'GET', url: '/v1/org/top-ups', headers: member })).json().topUps;
             expect(topUps).toMatchObject([{ status: 'pending', amountMicroUsd: 20_000_000, createdBy: 'user_admin' }]);
+        });
+
+        test('summarizes a Stripe refusal instead of answering an internal error', async () => {
+            stripe.createExpressAccount = async () => {
+                throw new StripeRequestError("The provided key 'rk_live_...' does not have the required permissions", true, { type: 'StripePermissionError' });
+            };
+            const refused = await fastify.inject({ method: 'POST', url: '/v1/org/connect/onboarding', headers: admin });
+            expect(refused.statusCode).toBe(502);
+            expect(refused.json().error).toMatch(/^Stripe refused the operator's API key/);
+            expect(refused.body).not.toContain('rk_live');
+
+            stripe.createExpressAccount = async () => { throw new StripeRequestError('Connection reset', false); };
+            const unreachable = await fastify.inject({ method: 'POST', url: '/v1/org/connect/onboarding', headers: admin });
+            expect(unreachable.statusCode).toBe(503);
+            expect(unreachable.json()).toEqual({ error: 'Stripe could not be reached. Try again in a moment.' });
         });
 
         test('an admin enrolls a node with a token, lists it and revokes it', async () => {

@@ -1,4 +1,4 @@
-import { createRemoteJWKSet, type JWTVerifyGetKey, jwtVerify } from "jose";
+import { createRemoteJWKSet, type JWTPayload, type JWTVerifyGetKey, jwtVerify } from "jose";
 
 /** The `iss` of every run token. Copied from RUN_TOKEN_ISSUER in apps/operator/src/runs/tokens.ts. */
 export const RUN_TOKEN_ISSUER = 'stellarium';
@@ -7,6 +7,8 @@ export const RUN_TOKEN_ISSUER = 'stellarium';
 export interface RunTokenClaims {
     clientId: string;
     organizationId: string;
+    /** Every claim of the verified token, which scripts read as the built-in `jwt`. */
+    payload: JWTPayload;
 }
 
 /** Whether `token` has the three base64url segments of a JWT, as opposed to an API key. */
@@ -34,7 +36,7 @@ export class RunTokenVerifier {
             if (typeof payload.sub !== 'string' || typeof payload.org !== 'string') {
                 return undefined;
             }
-            return { clientId: payload.sub, organizationId: payload.org };
+            return { clientId: payload.sub, organizationId: payload.org, payload };
         } catch {
             return undefined;
         }

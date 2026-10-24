@@ -202,6 +202,27 @@ The node verifies the token against the operator's published keys. The token nam
 
 A node reports its `BASE_URL` to the operator whenever it has an `OPERATOR_URL`. An organization admin lists it on the platform's Nodes page, which checks that `{BASE_URL}/v1/self` answers with the node's key.
 
+A script reads its run token's claims as the built-in variable `jwt`, for example to tell a function which client is calling (`com.example.Quotas` is hypothetical):
+
+```
+request CheckQuota {
+    const quotas: com.example.Quotas
+    return quotas.remaining(clientId: jwt.sub, organizationId: jwt.org)
+}
+```
+
+| Field | Type | Value |
+| ----- | ---- | ----- |
+| `iss` | string | Always `"stellarium"` |
+| `sub` | string | The API client's id |
+| `aud` | string | The public key of the node running the script |
+| `org` | string | The id of the organization the client belongs to |
+| `iat` | int | When the token was issued, in Unix seconds |
+| `exp` | int | When the token expires, in Unix seconds |
+| `jti` | string | The token's unique id |
+
+`jwt` is `null` for a run made with the API key. It is read-only: assigning to it or to one of its fields fails the script (`422`), and so does declaring a variable named `jwt`.
+
 ### Payments
 
 A function with a `paymentManifest` (`costMicroUsd`) is paid. Every amount is an integer number of micro-USD (1 USD = 1,000,000), so `costMicroUsd: 10000` is $0.01.

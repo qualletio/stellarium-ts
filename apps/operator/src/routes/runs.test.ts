@@ -56,7 +56,11 @@ describe('API client and run routes', () => {
             expect(response.headers['cache-control']).toBe('no-store');
             const body = response.json();
             expect(body).toMatchObject({ token_type: 'Bearer', expires_in: 900 });
-            expect(await (await verifier()).verify(body.access_token)).toEqual({ clientId, organizationId: PAYER_ORGANIZATION });
+            expect(await (await verifier()).verify(body.access_token)).toEqual({
+                clientId,
+                organizationId: PAYER_ORGANIZATION,
+                payload: { iss: 'stellarium', sub: clientId, aud: provider.publicKey, org: PAYER_ORGANIZATION, iat: expect.any(Number), exp: expect.any(Number), jti: expect.any(String) },
+            });
             // Addressed to the client's node only.
             const other = new RunTokenVerifier('http://operator.invalid/v1', generateNodeKeys().publicKey, createLocalJWKSet((await fastify.inject({ method: 'GET', url: '/v1/.well-known/jwks.json' })).json()));
             expect(await other.verify(body.access_token)).toBeUndefined();

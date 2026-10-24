@@ -14,7 +14,7 @@ Do the whole procedure with Stripe in test mode first. The README's [Running Loc
 
 | Secret | Used by | Notes |
 | --- | --- | --- |
-| `STRIPE_SECRET_KEY` (`sk_live_...`) | Operator | Moves real money. Use a restricted key if you prefer, with write access to Checkout Sessions, Customers, Customer Portal sessions, Accounts, Account Links, Login Links and Transfers. |
+| `STRIPE_SECRET_KEY` (`sk_live_...`) | Operator | Moves real money. Use a restricted key if you prefer, with write access to Checkout Sessions, Customers, Customer Portal, Transfers, Account Links, Login Links and Connected accounts (`connected_account_write`, which creates each organization's Express account; not your own account's settings). Without it, payout setup fails with "Stripe refused the operator's API key", and the operator's log names the missing permission. |
 | `STRIPE_WEBHOOK_SECRET`, `STRIPE_CONNECT_WEBHOOK_SECRET` | Operator | The signing secrets of the two webhook endpoints in step 6. They are different in production. |
 | `BETTER_AUTH_SECRET` | Operator | Signs dashboard session cookies. Generate one with `openssl rand -base64 32`. Changing it signs everyone out. |
 | `RUN_TOKEN_PRIVATE_KEY` | Operator | Signs API clients' run tokens. An Ed25519 key in the format of a node's `SIGNING_PRIVATE_KEY` (generate one with the README's key script). Changing it invalidates outstanding tokens, which last 15 minutes. Nodes refetch the new public key when they see an unknown key id. |

@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { OperationError } from '../errors.js';
 import type { Service } from '../service.js';
+import { StripeRequestError } from '../stripe/gateway.js';
 import authRoutes from './auth.js';
 import dashboardRoutes from './dashboard.js';
 import nodeRoutes from './nodes.js';
@@ -24,6 +25,11 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, { serv
         if (validation) {
             return reply.status(400).send({ error: (error as Error).message });
         }
+        if (error instanceof StripeRequestError) {
+            // Stripe's message names the platform's account and key, so the caller gets a summary.
+            fastify.log.error(error);
+            return reply.status(error.definitive ? 502 : 503).send({ error: stripeFailure(error) });
+        }
         fastify.log.error(error);
         return reply.status(500).send({ error: 'Internal error', details: error instanceof Error ? error.message : undefined });
     });
@@ -45,5 +51,13 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, { serv
         await fastify.register(stripeRoutes, { gateway, webhooks: service.webhooks, webhookSecret, connectWebhookSecret });
     }
 };
+
+function stripeFailure(error: StripeRequestError): string {
+    if (error.type === 'StripePermissionError' || error.type === 'StripeAuthenticationError') {
+        return "Stripe refused the operator's API key for this request. The operator's logs name the permission it needs.";
+    }
+    if (error.definitive) return "Stripe refused the request. The operator's logs have the details.";
+    return 'Stripe could not be reached. Try again in a moment.';
+}
 
 export default routes;
