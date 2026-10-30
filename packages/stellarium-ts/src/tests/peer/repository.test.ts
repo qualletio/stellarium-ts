@@ -1,11 +1,10 @@
-import type { Database } from "sqlite";
+import type { NodeDatabase as Database } from "../../db/database.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { signData } from "../../crypto/utils.js";
-import { openDatabase } from "../../db/db.js";
 import { type Peer, PeerRepository, peerAnnouncementPayload } from "../../peer/repository.js";
-import { generateBase64KeyPair } from "../helpers.js";
+import { DIALECTS, generateBase64KeyPair, openTestDatabase } from "../helpers.js";
 
-describe("PeerRepository", () => {
+describe.each(DIALECTS)("PeerRepository (%s)", (dialect) => {
     const keys = generateBase64KeyPair();
     const peer: Peer = { baseUrl: "http://peer.example", name: "peer", publicKey: keys.publicKey };
     const expiry = () => new Date(Date.now() + 60_000).toISOString();
@@ -14,7 +13,7 @@ describe("PeerRepository", () => {
     let repository: PeerRepository;
 
     beforeEach(async () => {
-        db = await openDatabase(":memory:");
+        db = await openTestDatabase(dialect);
         repository = new PeerRepository(db);
     });
 

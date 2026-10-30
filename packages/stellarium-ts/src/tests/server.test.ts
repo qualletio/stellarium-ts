@@ -45,6 +45,31 @@ describe("resolveConfig", () => {
         expect(resolveConfig({ ...keys, databasePath: ":memory:" }).databasePath).toBe(":memory:");
     });
 
+    test("uses Postgres when DATABASE_URL is set, in DATABASE_SCHEMA", () => {
+        vi.stubEnv("DATABASE_PATH", undefined);
+        vi.stubEnv("DATABASE_URL", "postgresql://node@db/stellarium");
+        vi.stubEnv("DATABASE_SCHEMA", "node_a");
+        const config = resolveConfig(keys);
+        expect(config).toMatchObject({ databaseUrl: "postgresql://node@db/stellarium", databaseSchema: "node_a" });
+        expect(config.databasePath).toBeUndefined();
+
+        vi.stubEnv("DATABASE_URL", "");
+        vi.stubEnv("DATABASE_SCHEMA", "");
+        expect(resolveConfig(keys).databasePath).toBe(DEFAULT_DATABASE_PATH);
+        expect(resolveConfig(keys).databaseUrl).toBeUndefined();
+    });
+
+    test("refuses a database configuration it can't use", () => {
+        vi.stubEnv("DATABASE_PATH", undefined);
+        vi.stubEnv("DATABASE_URL", undefined);
+        vi.stubEnv("DATABASE_SCHEMA", undefined);
+        const url = "postgres://db/stellarium";
+        expect(() => resolveConfig({ ...keys, databaseUrl: "mysql://db/stellarium" })).toThrow("postgres://");
+        expect(() => resolveConfig({ ...keys, databaseUrl: url, databasePath: "./node.db" })).toThrow("not both");
+        expect(() => resolveConfig({ ...keys, databaseSchema: "node_a" })).toThrow("needs a Postgres");
+        expect(() => resolveConfig({ ...keys, databaseUrl: url, databaseSchema: "Node-A" })).toThrow("Invalid database schema");
+    });
+
     test("requires the signing keys and base URL", () => {
         vi.stubEnv("SIGNING_PRIVATE_KEY", undefined);
 

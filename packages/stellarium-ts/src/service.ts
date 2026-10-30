@@ -1,6 +1,6 @@
 import type { JWTVerifyGetKey } from "jose";
 import { ResourceResolver } from "requestscript";
-import type { Database } from "sqlite";
+import type { NodeDatabase } from "./db/database.js";
 import { PeerRepository } from "./peer/repository.js";
 import { CombinationResourceResolver } from "./resource/resolver.js";
 import { ResourceRepository, type StellariumResource } from "./resource/repository.js";
@@ -9,6 +9,8 @@ import { OperatorClient } from "./client/operatorClient.js";
 import { RunTokenVerifier } from "./client/runTokens.js";
 import { GrantRepository } from "./grant/repository.js";
 import { type ApproveGrant, GrantService } from "./grant/service.js";
+import { ContractRepository } from "./contract/repository.js";
+import { ContractService } from "./contract/service.js";
 
 /** Settings a node runs with. `StellariumNode.start` fills these from its options, then the environment. */
 export interface NodeConfig {
@@ -31,8 +33,23 @@ export interface NodeConfig {
     costLimitMicroUsd: number;
     /** Most this node will sign for in one remote inference call. */
     inferenceCostLimitMicroUsd: number;
-    /** SQLite file the node opens. */
+    /** Most one call to a contract on another node may hold: its voucher's `maxAmount`. Defaults to `costLimitMicroUsd`. */
+    contractCostLimitMicroUsd?: number;
+    /** What another organization pays to deploy a contract to this node. 0 or unset is free. */
+    contractDeployFeeMicroUsd?: number;
+    /** Largest contract source this node accepts. Defaults to 64 KiB. */
+    maxContractSourceBytes?: number;
+    /**
+     * This node's listed price per million script tokens, which its contracts are charged at. `StellariumNode.start`
+     * learns it from the operator.
+     */
+    priceMicroUsdPerMillionTokens?: number;
+    /** SQLite file the node opens, when it has no `databaseUrl`. */
     databasePath?: string;
+    /** Postgres URL. When set, the node uses Postgres instead of SQLite. */
+    databaseUrl?: string;
+    /** Postgres schema the node's tables live in. */
+    databaseSchema?: string;
 }
 
 export interface Service {
@@ -43,6 +60,8 @@ export interface Service {
     resourceInvoker: CombinationResourceInvoker;
     operatorClient: OperatorClient;
     grantService: GrantService;
+    contractRepository: ContractRepository;
+    contractService: ContractService;
     /** Verifies the run tokens `POST /v1/run` accepts. Set when the node has an operator URL. */
     runTokenVerifier?: RunTokenVerifier;
 }
@@ -54,8 +73,14 @@ export interface ServiceOptions {
     runTokenKeys?: JWTVerifyGetKey;
 }
 
-export function createService(db: Database, resources: StellariumResource[], config: NodeConfig, options: ServiceOptions = {}): Service {
-    const resourceRepository = new ResourceRepository(db, resources, config.baseUrl, config.organizationId);
+export function createService(db: NodeDatabase, resources: StellariumResource[], config: NodeConfig, options: ServiceOptions = {}): Service {
+    const contractRepository = new ContractRepository(db);
+    // Read from the config on each use, since the node may learn its organization and price after it starts.
+    const resourceRepository = new ResourceRepository(db, resources, config.baseUrl, config.organizationId, {
+        repository: contractRepository,
+        price: () => config.priceMicroUsdPerMillionTokens ?? 0,
+        organizationId: () => config.organizationId,
+    });
 
     const resourceResolver = new CombinationResourceResolver(resourceRepository);
 
@@ -68,6 +93,9 @@ export function createService(db: Database, resources: StellariumResource[], con
         organizationId: config.organizationId,
     });
 
+    const contractService = new ContractService(contractRepository, resourceRepository, resourceResolver, resourceInvoker, operatorClient, config);
+    resourceInvoker.contracts = { costLimitMicroUsd: config.contractCostLimitMicroUsd ?? config.costLimitMicroUsd, host: contractService };
+
     return {
         config,
         peerRepository: new PeerRepository(db),
@@ -76,6 +104,8 @@ export function createService(db: Database, resources: StellariumResource[], con
         resourceInvoker,
         operatorClient,
         grantService,
+        contractRepository,
+        contractService,
         runTokenVerifier: config.operatorUrl ? new RunTokenVerifier(config.operatorUrl, config.publicKey, options.runTokenKeys) : undefined,
     };
 }

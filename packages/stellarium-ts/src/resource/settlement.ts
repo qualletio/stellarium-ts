@@ -74,3 +74,27 @@ export async function settlePaidCall(
     settle();
     return result;
 }
+
+/**
+ * Captures a billed run with the tokens it executed, or releases it, after the response: nothing waits on
+ * settlement.
+ */
+export function settleRunLater(
+    operatorClient: OperatorClient,
+    runId: string,
+    outcome: 'capture' | 'release',
+    tokens: number,
+    onSettleError: (error: unknown, message: string) => void,
+): void {
+    setTimeout(async () => {
+        try {
+            if (outcome === 'capture') {
+                await operatorClient.captureRun({ runId, tokens });
+            } else {
+                await operatorClient.releaseRun({ runId });
+            }
+        } catch (error) {
+            onSettleError(error, `Failed to ${outcome} run ${runId}`);
+        }
+    }, 0);
+}

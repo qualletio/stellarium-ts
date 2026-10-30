@@ -1,23 +1,22 @@
-import type { Database } from "sqlite";
+import type { NodeDatabase as Database } from "../../db/database.js";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { openDatabase } from "../../db/db.js";
 import { type Capability, type Grant, type GrantRenewalRequest, type GrantRequest, grantHash, grantRequestPayload, signGrant } from "../../grant/grant.js";
 import { signData } from "../../crypto/utils.js";
 import { GrantRepository } from "../../grant/repository.js";
 import { PeerRepository } from "../../peer/repository.js";
 import { type ApproveGrant, GrantService, HELD_GRANT_RETENTION_MS, type InvocationTarget } from "../../grant/service.js";
-import { generateBase64KeyPair } from "../helpers.js";
+import { DIALECTS, generateBase64KeyPair, openTestDatabase } from "../helpers.js";
 
 const HOUR = 3_600_000;
 const weather: Capability = { resourcePath: "com.example", resourceName: "Weather" };
 const target: InvocationTarget = { resourcePath: "com.example", resourceName: "Weather", functionName: "temperature", parameters: [{ name: "city", value: "Oslo" }] };
 
-describe("GrantService", () => {
+describe.each(DIALECTS)("GrantService (%s)", (dialect) => {
     const databases: Database[] = [];
     const nodes = new Map<string, GrantService>();
 
     async function node(baseUrl: string, approveGrant?: ApproveGrant) {
-        const db = await openDatabase(":memory:");
+        const db = await openTestDatabase(dialect);
         databases.push(db);
         const keys = generateBase64KeyPair();
         const service = new GrantService(new GrantRepository(db), { baseUrl, ...keys }, approveGrant);

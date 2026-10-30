@@ -76,7 +76,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
     });
 
     /** Starts a node on a free port. A provider registers the weather resource before starting. */
-    async function startNode(keys: { publicKey: string, privateKey: string }, options: { provider?: boolean, resources?: (baseUrl: string) => StellariumResource[], startingPeer?: string, enrollmentToken?: string } = {}) {
+    async function startNode(keys: { publicKey: string, privateKey: string }, options: { provider?: boolean, resources?: (baseUrl: string) => StellariumResource[], startingPeer?: string, enrollmentToken?: string, contractDeployFeeMicroUsd?: number, contractCostLimitMicroUsd?: number } = {}) {
         const fastify = Fastify();
         servers.push(fastify);
         // Listening first gives the node its port, which its resources' base URL needs.
@@ -92,6 +92,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
         await node.start(app, {
             host: '127.0.0.1', port, baseUrl, ...keys, apiKey: 'key', operatorUrl,
             databasePath: path.join(dir, `${port}.db`), startingPeer: options.startingPeer, enrollmentToken: options.enrollmentToken,
+            contractDeployFeeMicroUsd: options.contractDeployFeeMicroUsd, contractCostLimitMicroUsd: options.contractCostLimitMicroUsd,
         });
         return baseUrl;
     }
@@ -192,6 +193,60 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
 
         expect(await db.select().from(runsTable)).toEqual([]);
         expect(await organizations.get(PROVIDER_ORGANIZATION)).toMatchObject({ payableMicroUsd: 0 });
+    });
+
+    const deploy = (url: string, source: string, authorization = 'Bearer key') => fetch(`${url}/v1/contracts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: authorization },
+        body: JSON.stringify({ source }),
+    });
+
+    const forecastContract = 'contract com.example.Outlook(city: string): string {\n  const weather: com.example.Weather\n  return "${weather.temperature(city: city).value} degrees"\n}';
+
+    test('a call to another node\'s contract pays for the tokens it executed and for the paid call it makes', async () => {
+        const seeded = await seedOrganizations(db, 100_000);
+        organizations = seeded.organizations;
+        // A micro-USD a token, which the provider learns at startup. Its session reports a new URL, which unlists it.
+        await db.update(nodesTable).set({ priceMicroUsdPerMillionTokens: 1_000_000 }).where(eq(nodesTable.publicKey, seeded.provider.publicKey));
+        const providerUrl = await startNode(seeded.provider, { provider: true });
+        await db.update(nodesTable).set({ listed: true }).where(eq(nodesTable.publicKey, seeded.provider.publicKey));
+        // Enough for the contract's tokens and the paid call it makes, which the default, a single call's limit, isn't.
+        const callerUrl = await startNode(seeded.payer, { startingPeer: providerUrl, contractCostLimitMicroUsd: 50_000 });
+
+        expect((await deploy(providerUrl, forecastContract)).status).toBe(201);
+        await vi.waitFor(async () => {
+            const { resources } = await (await fetch(`${callerUrl}/v1/resources`)).json() as { resources: StellariumResource[] };
+            expect(resources.map(resource => resource.name)).toContain('Outlook');
+        });
+
+        const result = await run(callerUrl, 'request R {\n  const outlook: com.example.Outlook\n  return outlook.run(city: "Oslo")\n}');
+
+        expect(result.returnValue).toEqual({ value: '12 degrees', error: null });
+        await vi.waitFor(async () => expect((await db.select().from(runsTable))[0]).toMatchObject({ kind: 'contract', status: 'captured', clientId: null }));
+        const [contractRun] = await db.select().from(runsTable);
+        const tokens = contractRun!.tokens!;
+        expect(tokens).toBeGreaterThan(0);
+        await vi.waitFor(async () => expect(await organizations.get(PAYER_ORGANIZATION)).toMatchObject({ heldMicroUsd: 0 }));
+        // Weather (10,000) from the contract run's hold, and a micro-USD a token.
+        expect(await organizations.get(PAYER_ORGANIZATION)).toMatchObject({ balanceMicroUsd: 100_000 - 10_000 - tokens });
+        expect(await organizations.get(PROVIDER_ORGANIZATION)).toMatchObject({ payableMicroUsd: 8_000 + tokens - Math.floor(tokens * 0.2) });
+        expect(await ledgerProblems(db)).toEqual([]);
+    });
+
+    test('another organization\'s API client pays the deploy fee', async () => {
+        const seeded = await seedOrganizations(db, 100_000);
+        organizations = seeded.organizations;
+        const providerUrl = await startNode(seeded.provider, { provider: true, contractDeployFeeMicroUsd: 2_000 });
+        await db.update(nodesTable).set({ listed: true }).where(eq(nodesTable.publicKey, seeded.provider.publicKey));
+        const token = await runToken(PAYER_ORGANIZATION, seeded.provider.publicKey);
+
+        const response = await deploy(providerUrl, forecastContract, `Bearer ${token}`);
+
+        expect(response.status).toBe(201);
+        expect(await response.json()).toMatchObject({ feeMicroUsd: 2_000 });
+        await vi.waitFor(async () => expect(await organizations.get(PAYER_ORGANIZATION)).toMatchObject({ balanceMicroUsd: 98_000, heldMicroUsd: 0 }));
+        expect(await organizations.get(PROVIDER_ORGANIZATION)).toMatchObject({ payableMicroUsd: 1_600 });
+        expect(await ledgerProblems(db)).toEqual([]);
     });
 
     test('a provider that isn\'t enrolled fails to start', async () => {

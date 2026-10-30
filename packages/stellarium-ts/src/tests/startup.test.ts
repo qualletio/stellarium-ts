@@ -1,16 +1,15 @@
 import Fastify, { type FastifyInstance } from "fastify";
-import type { Database } from "sqlite";
+import type { NodeDatabase as Database } from "../db/database.js";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { openDatabase } from "../db/db.js";
 import routes from "../routes.js";
 import { createService, type Service } from "../service.js";
 import { STARTUP_PAGE_SIZE, StartupService } from "../startup.js";
-import { testConfig, weatherResource } from "./helpers.js";
+import { DIALECTS, testConfig, weatherResource, openTestDatabase } from "./helpers.js";
 
 const STARTING_PEER = "http://starting.example";
 const SELF = "http://self.example";
 
-describe("StartupService", () => {
+describe.each(DIALECTS)("StartupService (%s)", (dialect) => {
     const peerCount = STARTUP_PAGE_SIZE * 2 + 5;
     const resourceCount = STARTUP_PAGE_SIZE + 1;
 
@@ -21,7 +20,7 @@ describe("StartupService", () => {
     let requestedUrls: string[];
 
     beforeEach(async () => {
-        const startingDb = await openDatabase(":memory:");
+        const startingDb = await openTestDatabase(dialect);
         const startingService = createService(startingDb, [weatherResource(STARTING_PEER)], testConfig({ baseUrl: STARTING_PEER }));
         for (let i = 0; i < peerCount; i++) {
             const baseUrl = `http://peer${i}.example`;
@@ -44,7 +43,7 @@ describe("StartupService", () => {
             return new Response(response.body, { status: response.statusCode, headers: { "Content-Type": "application/json" } });
         });
 
-        const db = await openDatabase(":memory:");
+        const db = await openTestDatabase(dialect);
         databases = [startingDb, db];
         const config = testConfig({ baseUrl: SELF });
         service = createService(db, [], config);

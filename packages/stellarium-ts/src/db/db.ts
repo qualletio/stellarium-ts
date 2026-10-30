@@ -1,7 +1,6 @@
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import sqlite3 from 'sqlite3';
-import { open, type Database } from 'sqlite';
+import type { DatabaseDialect, NodeDatabase } from './database.js';
+import { nodePostgresDriver, PostgresDatabase } from './postgres.js';
+import { SqliteDatabase } from './sqlite.js';
 
 export const DEFAULT_DATABASE_PATH = './requestscript.db';
 
@@ -14,21 +13,63 @@ export const DEFAULT_DATABASE_PATH = './requestscript.db';
  * Version 5 added `resource_function.kind` and per-token inference pricing, which made `cost_micro_usdc` nullable.
  * Version 6 moved payments to Stripe: `*_micro_usdc` columns became `*_micro_usd`, and `recipient_address`
  * became `recipient_organization_id`.
+ * Version 7 added contract functions: `resource_function.kind` 'contract', priced per million tokens in
+ * `resource_function_payment_manifest.price_micro_usd_per_million_tokens`.
  */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
-/** Opens (or creates) the node database and brings its schema up to date. Pass ':memory:' for tests. */
-export async function openDatabase(filename: string = DEFAULT_DATABASE_PATH): Promise<Database> {
-    if (filename !== ':memory:') {
-        mkdirSync(dirname(filename), { recursive: true });
+export interface OpenDatabaseOptions {
+    /** Postgres only: the schema the node's tables live in, created if missing. Lets nodes share a database. */
+    schema?: string;
+}
+
+export function isPostgresUrl(location: string): boolean {
+    return location.startsWith('postgres://') || location.startsWith('postgresql://');
+}
+
+/**
+ * Opens the node database and brings its schema up to date. `location` is a `postgres://` or
+ * `postgresql://` URL, or a SQLite file. Pass ':memory:' for tests.
+ */
+export async function openDatabase(location: string = DEFAULT_DATABASE_PATH, options: OpenDatabaseOptions = {}): Promise<NodeDatabase> {
+    const db = isPostgresUrl(location)
+        ? await PostgresDatabase.open(nodePostgresDriver(location, options.schema), options.schema)
+        : await SqliteDatabase.open(location);
+    try {
+        await createTables(db);
+    } catch (error) {
+        await db.close();
+        throw error;
     }
-    const db = await open({ filename, driver: sqlite3.Database });
-    await createTables(db);
     return db;
 }
 
-export async function createTables(db: Database) {
-    const { user_version: version } = await db.get<{ user_version: number }>('PRAGMA user_version') ?? { user_version: 0 };
+/** Column types that differ between the dialects. */
+function columnTypes(dialect: DatabaseDialect) {
+    return dialect === 'sqlite'
+        ? { id: 'INTEGER PRIMARY KEY AUTOINCREMENT', bigint: 'INTEGER' }
+        : { id: 'BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY', bigint: 'BIGINT' };
+}
+
+/** SQLite keeps the version in `PRAGMA user_version`; Postgres, which has no equivalent, in a one-row table. */
+async function getSchemaVersion(db: NodeDatabase): Promise<number> {
+    if (db.dialect === 'sqlite') {
+        return (await db.get<{ user_version: number }>('PRAGMA user_version'))?.user_version ?? 0;
+    }
+    await db.exec('CREATE TABLE IF NOT EXISTS stellarium_schema (version INTEGER NOT NULL)');
+    return (await db.get<{ version: number }>('SELECT version FROM stellarium_schema'))?.version ?? 0;
+}
+
+async function setSchemaVersion(db: NodeDatabase, version: number): Promise<void> {
+    if (db.dialect === 'sqlite') {
+        await db.exec(`PRAGMA user_version = ${version}`);
+        return;
+    }
+    await db.exec(`DELETE FROM stellarium_schema; INSERT INTO stellarium_schema (version) VALUES (${version})`);
+}
+
+export async function createTables(db: NodeDatabase) {
+    const version = await getSchemaVersion(db);
     if (version < SCHEMA_VERSION) {
         // Resource rows are a cache of what peers advertise, and are relearned on the next broadcast.
         // SQLite can't drop a constraint in place, so rebuild them. Peers are kept.
@@ -40,9 +81,10 @@ export async function createTables(db: Database) {
         `);
     }
 
+    const t = columnTypes(db.dialect);
     await db.exec(`
         CREATE TABLE IF NOT EXISTS peer (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id ${t.id},
             base_url TEXT NOT NULL,
             public_key TEXT NOT NULL,
             name TEXT NOT NULL,
@@ -55,8 +97,8 @@ export async function createTables(db: Database) {
         );
 
         CREATE TABLE IF NOT EXISTS resource (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            peer_id INTEGER,
+            id ${t.id},
+            peer_id ${t.bigint},
             path TEXT NOT NULL,
             name TEXT NOT NULL,
             base_url TEXT NOT NULL,
@@ -71,8 +113,8 @@ export async function createTables(db: Database) {
         );
 
         CREATE TABLE IF NOT EXISTS resource_function (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            resource_id INTEGER NOT NULL,
+            id ${t.id},
+            resource_id ${t.bigint} NOT NULL,
             name TEXT NOT NULL,
             return_type TEXT NOT NULL,
             description TEXT,
@@ -87,8 +129,8 @@ export async function createTables(db: Database) {
         );
 
         CREATE TABLE IF NOT EXISTS resource_function_parameter (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            resource_function_id INTEGER NOT NULL,
+            id ${t.id},
+            resource_function_id ${t.bigint} NOT NULL,
             name TEXT NOT NULL,
             parameter_type TEXT NOT NULL,
             description TEXT,
@@ -101,12 +143,14 @@ export async function createTables(db: Database) {
         );
 
         CREATE TABLE IF NOT EXISTS resource_function_payment_manifest (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            resource_function_id INTEGER NOT NULL,
-            -- Null for inference functions, which are priced per million tokens instead.
-            cost_micro_usd INTEGER,
-            input_cost_micro_usd_per_million_tokens INTEGER,
-            output_cost_micro_usd_per_million_tokens INTEGER,
+            id ${t.id},
+            resource_function_id ${t.bigint} NOT NULL,
+            -- Null for inference and contract functions, which are priced per million tokens instead.
+            cost_micro_usd ${t.bigint},
+            input_cost_micro_usd_per_million_tokens ${t.bigint},
+            output_cost_micro_usd_per_million_tokens ${t.bigint},
+            -- Set for contract functions, which are charged for the tokens they execute.
+            price_micro_usd_per_million_tokens ${t.bigint},
             -- The hosting node's organization. Null only if a peer advertised the manifest without one.
             recipient_organization_id TEXT,
             created_at TEXT NOT NULL,
@@ -125,7 +169,7 @@ export async function createTables(db: Database) {
             capabilities TEXT NOT NULL,
             parent_grant_issuer TEXT,
             parent_grant_id TEXT,
-            lifetime_ms INTEGER NOT NULL,
+            lifetime_ms ${t.bigint} NOT NULL,
             renewable_until TEXT,
             created_at TEXT NOT NULL
         );
@@ -157,9 +201,26 @@ export async function createTables(db: Database) {
         -- publicKey:nonce of accepted authorizations and grant requests, until they expire.
         CREATE TABLE IF NOT EXISTS seen_nonce (
             key TEXT PRIMARY KEY,
-            expires_at INTEGER NOT NULL
+            expires_at ${t.bigint} NOT NULL
         );
         CREATE INDEX IF NOT EXISTS seen_nonce_expires_at ON seen_nonce (expires_at);
+
+        -- Contracts deployed to this node. Versions are immutable. The latest version of each is one of the
+        -- node's resources, with a single function, run. An owner of null is the node's admin.
+        CREATE TABLE IF NOT EXISTS contract (
+            path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            version TEXT NOT NULL,
+            source TEXT NOT NULL,
+            -- JSON: [{ name, type }]
+            parameters TEXT NOT NULL,
+            return_type TEXT NOT NULL,
+            owner_organization_id TEXT,
+            description TEXT,
+            created_at TEXT NOT NULL,
+
+            PRIMARY KEY (path, name, version)
+        );
 
         -- Keys an admin blocked from calling this node or getting grants from it.
         CREATE TABLE IF NOT EXISTS blocked_caller (
@@ -169,5 +230,5 @@ export async function createTables(db: Database) {
         );
     `);
 
-    await db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    await setSchemaVersion(db, SCHEMA_VERSION);
 }

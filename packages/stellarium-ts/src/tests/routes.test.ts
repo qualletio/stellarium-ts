@@ -1,10 +1,9 @@
 import { generateKeyPairSync, type KeyObject } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { createLocalJWKSet, exportJWK, SignJWT } from "jose";
-import type { Database } from "sqlite";
+import type { NodeDatabase as Database } from "../db/database.js";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { safeVerifyData, signData } from "../crypto/utils.js";
-import { openDatabase } from "../db/db.js";
 import { type Grant, grantRenewalPayload, grantRequestPayload } from "../grant/grant.js";
 import { GrantRepository } from "../grant/repository.js";
 import { GrantService } from "../grant/service.js";
@@ -13,12 +12,12 @@ import { CombinationResourceInvoker, type InferencePaymentVoucher, inferenceVouc
 import { resourceAnnouncementPayload, type StellariumResource } from "../resource/repository.js";
 import routes from "../routes.js";
 import { createService, type NodeConfig, type Service } from "../service.js";
-import { COST, generateBase64KeyPair, INFERENCE_RATES, modelResource, ORGANIZATION, temperatureSource, testConfig, weatherResource } from "./helpers.js";
+import { DIALECTS, COST, generateBase64KeyPair, INFERENCE_RATES, modelResource, ORGANIZATION, temperatureSource, testConfig, weatherResource, openTestDatabase } from "./helpers.js";
 
 const parameters = [{ name: "city", value: "Oslo" }];
 const inMinutes = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
 
-describe("routes", () => {
+describe.each(DIALECTS)("routes (%s)", (dialect) => {
     const weather = weatherResource();
     const caller = generateBase64KeyPair();
     // Signs vouchers as a remote caller would. Its local branch never touches the repository.
@@ -33,7 +32,7 @@ describe("routes", () => {
     let release: ReturnType<typeof vi.spyOn>;
 
     beforeEach(async () => {
-        db = await openDatabase(":memory:");
+        db = await openTestDatabase(dialect);
         config = testConfig();
         service = createService(db, [weather], config);
         authorize = vi.spyOn(service.operatorClient, "authorize").mockResolvedValue({ ok: true });
@@ -614,7 +613,7 @@ describe("routes", () => {
     });
 });
 
-describe("restricted functions", () => {
+describe.each(DIALECTS)("restricted functions (%s)", (dialect) => {
     const caller = generateBase64KeyPair();
     const callerInvoker = new CombinationResourceInvoker(undefined as never, 100_000, caller.publicKey, caller.privateKey);
     const restricted: StellariumResource = {
@@ -638,12 +637,12 @@ describe("restricted functions", () => {
     let grant: Grant[];
 
     beforeEach(async () => {
-        db = await openDatabase(":memory:");
+        db = await openTestDatabase(dialect);
         service = createService(db, [restricted], testConfig());
         vi.spyOn(service.operatorClient, "authorize").mockResolvedValue({ ok: true });
         vi.spyOn(service.operatorClient, "capture").mockResolvedValue(undefined);
         vi.spyOn(service.operatorClient, "release").mockResolvedValue(undefined);
-        callerDb = await openDatabase(":memory:");
+        callerDb = await openTestDatabase(dialect);
         callerGrants = new GrantService(new GrantRepository(callerDb), { baseUrl: "http://caller", ...caller });
         grant = await service.grantService.issue(caller.publicKey, [{ resourcePath: "com.example", resourceName: "Vault" }], { lifetimeMs: 3_600_000 });
 
@@ -690,7 +689,7 @@ describe("restricted functions", () => {
         beforeEach(async () => {
             await fastify.close();
             await db.close();
-            db = await openDatabase(":memory:");
+            db = await openTestDatabase(dialect);
             service = createService(db, [restricted], testConfig(), {
                 approveGrant: ({ details }) => details?.invite === "letmein" ? { lifetimeMs: 3_600_000 } : undefined,
             });
@@ -733,7 +732,7 @@ describe("restricted functions", () => {
         test("answers 500 when the approval hook returns an invalid approval", async () => {
             await fastify.close();
             await db.close();
-            db = await openDatabase(":memory:");
+            db = await openTestDatabase(dialect);
             service = createService(db, [restricted], testConfig(), { approveGrant: () => ({ lifetimeMs: -1 }) });
             fastify = Fastify();
             await fastify.register(routes, { prefix: "/v1", service });
@@ -877,7 +876,7 @@ describe("restricted functions", () => {
     });
 });
 
-describe("inference functions", () => {
+describe.each(DIALECTS)("inference functions (%s)", (dialect) => {
     const weather = weatherResource();
     const model = modelResource();
     const caller = generateBase64KeyPair();
@@ -895,7 +894,7 @@ describe("inference functions", () => {
     let release: ReturnType<typeof vi.spyOn>;
 
     beforeEach(async () => {
-        db = await openDatabase(":memory:");
+        db = await openTestDatabase(dialect);
         service = createService(db, [weather, model], testConfig());
         authorize = vi.spyOn(service.operatorClient, "authorize").mockResolvedValue({ ok: true });
         capture = vi.spyOn(service.operatorClient, "capture").mockResolvedValue(undefined);

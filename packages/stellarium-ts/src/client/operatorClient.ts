@@ -1,3 +1,4 @@
+import type { ContractPaymentVoucher } from "../resource/invoker.js";
 import { operatorAuthorization } from "./operatorAuth.js";
 
 // Wire formats match PaymentVoucher and InferencePaymentVoucher in resource/invoker.ts,
@@ -55,6 +56,27 @@ export interface RunAuthorizationRequest {
     token: string;
     runId: string;
     source: string;
+}
+
+/** What a node sends to authorize a call to one of its contracts. Matches apps/operator/src/runs/runService.ts. */
+export interface ContractRunAuthorizationRequest {
+    /** The caller's voucher. Its `invocationId` is the run's id. */
+    voucher: ContractPaymentVoucher;
+    /** The contract's source, which the operator prices. */
+    source: string;
+}
+
+/**
+ * The operator's answer to a contract call: a hold for the run named by the voucher's `invocationId`, or
+ * `free` when the caller is in this node's organization, which doesn't pay itself.
+ */
+export type ContractRunAuthorizeResult = { ok: true, free: boolean } | { ok: false, status: number, error: string };
+
+/** What the operator knows of this node. */
+export interface OperatorSession {
+    organizationId: string;
+    /** The node's listed price per million script tokens. Absent from older operators. */
+    priceMicroUsdPerMillionTokens?: number;
 }
 
 /** The operator's hold for a run: up to `heldMicroUsd` for the script's tokens and its paid calls together. */
@@ -135,13 +157,13 @@ export class OperatorClient {
      * enrolls the node first; a node that is already enrolled ignores the token. Throws if the node is
      * not enrolled or the operator refuses.
      */
-    async session(enrollmentToken?: string, baseUrl?: string): Promise<{ organizationId: string }> {
+    async session(enrollmentToken?: string, baseUrl?: string): Promise<OperatorSession> {
         const body = { ...(enrollmentToken ? { enrollmentToken } : {}), ...(baseUrl ? { baseUrl } : {}) };
         const response = await this.post('/nodes/session', body, OPERATOR_MAX_RETRIES, OPERATOR_BASE_DELAY_MS);
         if (!response.ok) {
             throw new Error(`Operator refused this node's session: ${await errorMessage(response)}`);
         }
-        return await response.json() as { organizationId: string };
+        return await response.json() as OperatorSession;
     }
 
     /**
@@ -162,6 +184,16 @@ export class OperatorClient {
         if (!result.ok) return result;
         const { heldMicroUsd, maxTokens } = result.body as { heldMicroUsd: number, maxTokens: number };
         return { ok: true, heldMicroUsd, maxTokens };
+    }
+
+    /**
+     * Asks the operator to hold a contract call's cost on the caller's organization, or on the caller's run,
+     * before running the contract. An unreachable operator is reported as a 503 refusal.
+     */
+    async authorizeContractRun(request: ContractRunAuthorizationRequest): Promise<ContractRunAuthorizeResult> {
+        const result = await this.hold('/runs/contract/authorize', request);
+        if (!result.ok) return result;
+        return { ok: true, free: (result.body as { status?: unknown } | undefined)?.status === 'free' };
     }
 
     /** Charges a held run for the tokens its script executed, and releases the rest of its hold. */

@@ -1,5 +1,7 @@
 export { StellariumNode, resolveConfig, type StellariumNodeOptions } from './server.js';
 export type { NodeConfig } from './service.js';
+export { DEFAULT_DATABASE_PATH, openDatabase, type OpenDatabaseOptions } from './db/db.js';
+export type { DatabaseDialect, NodeDatabase, RunResult } from './db/database.js';
 export type {
     StellariumFixedPaymentManifest,
     StellariumInferencePaymentManifest,
@@ -12,10 +14,12 @@ export type {
 // The voucher wire format, so the operator and other settlers can test against the real signer.
 export {
     CombinationResourceInvoker,
+    contractVoucherPayload,
     inferenceVoucherPayload,
     invocationHash,
     paymentVoucherPayload,
     type RunContext,
+    type ContractPaymentVoucher,
     type InferenceEstimate,
     type InferencePaymentVoucher,
     type PaymentVoucher,

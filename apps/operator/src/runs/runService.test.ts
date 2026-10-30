@@ -8,7 +8,7 @@ import type { OrganizationService } from '../organizations.js';
 import { PaymentService } from '../payments/paymentService.js';
 import { createTestDatabase, generateNodeKeys, ledgerProblems, type NodeKeys, PAYER_ORGANIZATION, PROVIDER_ORGANIZATION, seedOrganizations } from '../testing.js';
 import { ApiClientService } from './clients.js';
-import { RUN_LIFETIME_MS, RunService, scriptMaxTokens, tokenCharge } from './runService.js';
+import { contractMaxTokens, RUN_LIFETIME_MS, RunService, scriptMaxTokens, tokenCharge } from './runService.js';
 import { RunTokenSigner } from './tokens.js';
 
 const DOWNSTREAM_ORGANIZATION = 'org_downstream';
@@ -16,6 +16,8 @@ const DOWNSTREAM_ORGANIZATION = 'org_downstream';
 const PRICE = 250_000_000;
 /** Four tokens: `return`, `1`, `+`, `2`. */
 const SOURCE = 'request R {\n  return 1 + 2\n}';
+/** Also four tokens. */
+const CONTRACT = 'contract com.example.Sum(a: int32): int32 {\n  return a + 2\n}';
 
 describe('RunService', () => {
     let db: Database;
@@ -162,11 +164,16 @@ describe('RunService', () => {
                 await organizations.updateListing(PROVIDER_ORGANIZATION, provider.publicKey, { listed: false });
                 return { token: issued };
             }, 403],
-            ['a contract script', async () => ({ source: 'contract C { return 1 }' }), 400],
         ])('refuses %s', async (_, setup, status) => {
             expect(await rejection(authorize(await setup()))).toMatchObject({ status });
             expect(await balances(PAYER_ORGANIZATION)).toMatchObject({ held: 0 });
         });
+    });
+
+    test('a contract source authorizes a deploy, with no tokens to run', async () => {
+        const { result } = await authorize({ source: CONTRACT });
+
+        expect(result).toEqual({ status: 'held', heldMicroUsd: 50_000, maxTokens: 0, tokenBudgetMicroUsd: 0 });
     });
 
     describe('capture and release', () => {
@@ -292,6 +299,125 @@ describe('RunService', () => {
 
             await service.capture(provider.publicKey, { runId, tokens: 4 });
             expect(await rejection(payments.authorize(downstream.publicKey, runVoucher(runId)))).toMatchObject({ status: 409 });
+        });
+    });
+
+    describe('contract calls', () => {
+        /** A voucher a caller node signs to call the provider's contract. */
+        function contractVoucher(options: { keys?: NodeKeys, maxAmount?: number, price?: number, runId?: string, recipientOrganizationId?: string } = {}) {
+            const keys = options.keys ?? payer;
+            const invoker = new CombinationResourceInvoker(undefined as never, 0, keys.publicKey, keys.privateKey);
+            return invoker.createContractVoucher(options.recipientOrganizationId ?? PROVIDER_ORGANIZATION, options.price ?? PRICE, options.maxAmount ?? 20_000, 'com.example', 'Sum', 'run', [{ name: 'a', value: 1 }], options.runId);
+        }
+
+        const authorizeContract = (voucher: ReturnType<typeof contractVoucher>, node = provider) =>
+            service.authorizeContract(node.publicKey, { voucher, source: CONTRACT });
+
+        test('contractMaxTokens prices a contract, and refuses a request script', () => {
+            expect(contractMaxTokens(CONTRACT)).toBe(4);
+            expect(() => contractMaxTokens(SOURCE)).toThrow('contract');
+        });
+
+        test('holds up to maxAmount on the signer\'s organization, and charges the tokens at the node\'s price', async () => {
+            const voucher = contractVoucher();
+
+            expect(await authorizeContract(voucher)).toEqual({ status: 'held', heldMicroUsd: 20_000, maxTokens: 4, tokenBudgetMicroUsd: 1_000 });
+            expect(await run(voucher.invocationId)).toMatchObject({ kind: 'contract', clientId: null, parentRunId: null, payerOrganizationId: PAYER_ORGANIZATION });
+            expect(await balances(PAYER_ORGANIZATION)).toMatchObject({ held: 20_000 });
+            // A retried call with the same voucher finds the same run.
+            expect(await authorizeContract(voucher)).toMatchObject({ status: 'held', heldMicroUsd: 20_000 });
+
+            expect(await service.capture(provider.publicKey, { runId: voucher.invocationId, tokens: 4 })).toEqual({ status: 'captured', amountMicroUsd: 1_000 });
+            expect(await balances(PAYER_ORGANIZATION)).toEqual({ balance: 99_000, held: 0, payable: 0 });
+            expect(await balances(PROVIDER_ORGANIZATION)).toMatchObject({ payable: 800 });
+            await expectLedgerConsistent();
+        });
+
+        test('pays the contract\'s own paid calls from its hold', async () => {
+            const voucher = contractVoucher();
+            await authorizeContract(voucher);
+
+            const call = runVoucher(voucher.invocationId, { amount: 5_000 });
+            await payments.authorize(downstream.publicKey, call);
+            await payments.capture(downstream.publicKey, { voucher: call });
+            await service.capture(provider.publicKey, { runId: voucher.invocationId, tokens: 4 });
+
+            expect(await balances(PAYER_ORGANIZATION)).toEqual({ balance: 94_000, held: 0, payable: 0 });
+            await expectLedgerConsistent();
+        });
+
+        test('is free for the node\'s own organization, without a run', async () => {
+            const voucher = contractVoucher({ keys: provider });
+
+            expect(await authorizeContract(voucher)).toEqual({ status: 'free' });
+            expect(await db.select().from(runsTable)).toEqual([]);
+        });
+
+        test('a call from a run is held from the run\'s hold, and gives back what it didn\'t use', async () => {
+            // The payer's node runs a script for an API client of the provider's organization... so the provider
+            // is the caller here: its run is billed to the payer, and it calls a contract on the downstream node.
+            await db.update(nodesTable).set({ listed: true, priceMicroUsdPerMillionTokens: PRICE }).where(eq(nodesTable.publicKey, downstream.publicKey));
+            const parent = await authorize();
+            const voucher = contractVoucher({ keys: provider, runId: parent.runId, recipientOrganizationId: DOWNSTREAM_ORGANIZATION });
+
+            // At most the parent's hold less its own token budget.
+            expect(await authorizeContract(voucher, downstream)).toMatchObject({ status: 'held', heldMicroUsd: 20_000 });
+            expect(await run(parent.runId)).toMatchObject({ heldMicroUsd: 30_000 });
+            expect(await run(voucher.invocationId)).toMatchObject({ payerOrganizationId: PAYER_ORGANIZATION, parentRunId: (await run(parent.runId)).id });
+
+            await service.capture(downstream.publicKey, { runId: voucher.invocationId, tokens: 4 });
+            expect(await run(parent.runId)).toMatchObject({ heldMicroUsd: 49_000 });
+            expect(await balances(PAYER_ORGANIZATION)).toEqual({ balance: 99_000, held: 49_000, payable: 0 });
+
+            await service.capture(provider.publicKey, { runId: parent.runId, tokens: 4 });
+            expect(await balances(PAYER_ORGANIZATION)).toEqual({ balance: 98_000, held: 0, payable: 0 });
+            await expectLedgerConsistent();
+        });
+
+        test('a call settled after its parent run gives its hold back to the payer', async () => {
+            await db.update(nodesTable).set({ listed: true, priceMicroUsdPerMillionTokens: PRICE }).where(eq(nodesTable.publicKey, downstream.publicKey));
+            const parent = await authorize();
+            const voucher = contractVoucher({ keys: provider, runId: parent.runId, recipientOrganizationId: DOWNSTREAM_ORGANIZATION });
+            await authorizeContract(voucher, downstream);
+
+            await service.capture(provider.publicKey, { runId: parent.runId, tokens: 4 });
+            expect(await balances(PAYER_ORGANIZATION)).toEqual({ balance: 99_000, held: 20_000, payable: 0 });
+            await service.release(downstream.publicKey, { runId: voucher.invocationId });
+
+            expect(await balances(PAYER_ORGANIZATION)).toEqual({ balance: 99_000, held: 0, payable: 0 });
+            await expectLedgerConsistent();
+        });
+
+        test('expired calls are released before their parent runs', async () => {
+            await db.update(nodesTable).set({ listed: true, priceMicroUsdPerMillionTokens: PRICE }).where(eq(nodesTable.publicKey, downstream.publicKey));
+            const parent = await authorize();
+            await authorizeContract(contractVoucher({ keys: provider, runId: parent.runId, recipientOrganizationId: DOWNSTREAM_ORGANIZATION }), downstream);
+
+            expect(await service.releaseExpiredRuns(new Date(Date.now() + 2 * RUN_LIFETIME_MS))).toBe(2);
+            expect(await balances(PAYER_ORGANIZATION)).toEqual({ balance: 100_000, held: 0, payable: 0 });
+        });
+
+        test.each([
+            ['a maxAmount below the contract\'s token budget', () => ({ voucher: contractVoucher({ maxAmount: 999 }) }), 402],
+            ['a voucher paying another organization', () => ({ voucher: contractVoucher({ recipientOrganizationId: DOWNSTREAM_ORGANIZATION }) }), 403],
+            ['a tampered voucher', () => ({ voucher: { ...contractVoucher(), maxAmount: 1_000_000 } }), 401],
+            ['a request script as the contract', () => ({ voucher: contractVoucher(), source: SOURCE }), 400],
+        ])('refuses %s', async (_, setup, status) => {
+            const { voucher, source } = setup() as { voucher: ReturnType<typeof contractVoucher>, source?: string };
+            expect(await rejection(service.authorizeContract(provider.publicKey, { voucher, source: source ?? CONTRACT }))).toMatchObject({ status });
+            expect(await balances(PAYER_ORGANIZATION)).toMatchObject({ held: 0 });
+        });
+
+        test('charges at most the price the caller signed', async () => {
+            const voucher = contractVoucher({ price: PRICE / 2 });
+
+            expect(await authorizeContract(voucher)).toMatchObject({ tokenBudgetMicroUsd: 500 });
+            expect(await service.capture(provider.publicKey, { runId: voucher.invocationId, tokens: 4 })).toEqual({ status: 'captured', amountMicroUsd: 500 });
+        });
+
+        test('refuses an unlisted node', async () => {
+            await organizations.updateListing(PROVIDER_ORGANIZATION, provider.publicKey, { listed: false });
+            expect(await rejection(authorizeContract(contractVoucher()))).toMatchObject({ status: 403 });
         });
     });
 });

@@ -1,4 +1,8 @@
 import { generateKeyPairSync } from "node:crypto";
+import { PGlite, type Transaction } from "@electric-sql/pglite";
+import type { DatabaseDialect, NodeDatabase } from "../db/database.js";
+import { createTables, openDatabase } from "../db/db.js";
+import { PostgresDatabase, type PostgresDriver } from "../db/postgres.js";
 import type { StellariumResource } from "../resource/repository.js";
 import type { NodeConfig } from "../service.js";
 
@@ -91,3 +95,40 @@ export function modelResource(baseUrl = "http://127.0.0.1:3002"): StellariumReso
 }
 
 export const temperatureSource = 'request GetTemperature {\n  const weather: com.example.Weather\n\n  return weather.temperature(city: "Oslo")\n}';
+
+/** Both databases a node can use. Suites that touch the database run against each. */
+export const DIALECTS: DatabaseDialect[] = ["sqlite", "postgres"];
+
+export function pgliteDriver(pg: PGlite | Transaction): PostgresDriver {
+    return {
+        query: async (text, params) => {
+            const result = await pg.query(text, params);
+            return { rows: result.rows, rowCount: result.affectedRows ?? 0 };
+        },
+        exec: async (text) => {
+            await pg.exec(text);
+        },
+        transaction: (work) => {
+            if (!("transaction" in pg)) {
+                throw new Error("Transactions cannot be nested");
+            }
+            return pg.transaction(tx => work(pgliteDriver(tx)));
+        },
+        close: async () => {
+            if ("close" in pg) {
+                await pg.close();
+            }
+        },
+    };
+}
+
+/** An empty node database: SQLite in memory, or Postgres in memory through PGlite. */
+export async function openTestDatabase(dialect: DatabaseDialect = "sqlite"): Promise<NodeDatabase> {
+    if (dialect === "sqlite") {
+        return openDatabase(":memory:");
+    }
+    // 64-bit integers come back as numbers, as node-postgres is configured to return them.
+    const db = await PostgresDatabase.open(pgliteDriver(new PGlite({ parsers: { 20: Number } })));
+    await createTables(db);
+    return db;
+}

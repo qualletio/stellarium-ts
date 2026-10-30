@@ -29,8 +29,10 @@ export function RunTable({ runs, as, empty }: { runs: Run[]; as: 'payer' | 'prov
                 {formatDateTime(run.createdAt)}
                 <span className={`${ui.secondary} ${ui.mono}`} title={run.runId}>{run.runId.slice(0, 8)}</span>
               </td>
-              <td className={ui.mono} title={as === 'payer' ? run.nodePublicKey : run.clientId}>
-                {as === 'payer' ? shortKey(run.nodePublicKey) : run.clientId}
+              <td className={ui.mono} title={as === 'payer' ? run.nodePublicKey : run.clientId ?? undefined}>
+                {as === 'payer'
+                  ? shortKey(run.nodePublicKey)
+                  : run.clientId ?? <span className={ui.secondary}>Contract call</span>}
               </td>
               <td>
                 {run.tokens === null ? <span className={ui.secondary}>—</span> : run.tokens.toLocaleString('en-US')}

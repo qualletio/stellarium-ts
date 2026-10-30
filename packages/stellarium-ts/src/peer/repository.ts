@@ -1,5 +1,5 @@
 import { isFreshExpiry, safeVerifyData } from "../crypto/utils.js";
-import { Database } from "sqlite";
+import type { NodeDatabase } from "../db/database.js";
 
 export interface Peer {
     baseUrl: string;
@@ -35,7 +35,7 @@ function toPeer(row: PeerRow): StoredPeer {
 }
 
 export class PeerRepository {
-    constructor(private readonly db: Database) {}
+    constructor(private readonly db: NodeDatabase) {}
 
     /**
      * Saves a peer learned from a trusted source (the starting peer) without a signature.
@@ -44,7 +44,7 @@ export class PeerRepository {
     async create(peer: Peer): Promise<void> {
         const createdAt = new Date().toISOString();
         await this.db.run(
-            'INSERT OR IGNORE INTO peer (base_url, name, public_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+            'INSERT INTO peer (base_url, name, public_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
             [peer.baseUrl, peer.name, peer.publicKey, createdAt, createdAt]
         );
     }
