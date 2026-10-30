@@ -116,7 +116,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
         });
         operator.post("/v1/runs/contract/authorize", async (request) => {
             contractAuthorizations.push(request.body as { voucher: ContractPaymentVoucher, source: string });
-            return { status: "held", heldMicroUsd: 50_000, maxTokens: 100, tokenBudgetMicroUsd: 1 };
+            return { status: "held", heldMicroUsd: 50_000, maxTokens: 100, tokenBudgetMicroUsd: 1, payerOrganizationId: "org_caller" };
         });
         operator.post("/v1/runs/capture", async (request) => {
             runCaptures.push(request.body as { runId: string, tokens: number });
@@ -221,6 +221,20 @@ describe("two-node network", { timeout: 15_000 }, () => {
         await vi.waitFor(() => expect(runCaptures).toEqual([{ runId: voucher.invocationId, tokens: expect.any(Number) }]));
         await vi.waitFor(() => expect(settlements).toHaveLength(1));
         expect(settlements[0]).toMatchObject({ amount: COST, recipientOrganizationId: ORGANIZATION, runId: voucher.invocationId });
+    });
+
+    test("a contract keeps state for the organization paying for a remote call", async () => {
+        const caller = await startCaller();
+        await fetch(`${providerUrl}/v1/contracts`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: "Bearer provider-admin" },
+            body: JSON.stringify({ source: "contract com.example.Visits: object {\n  var state(caller.org) visits: int32 = 0\n  visits = visits + 1\n  return { visits: visits, by: caller }\n}" }),
+        });
+        await vi.waitFor(async () => expect((await getJson(`${caller.url}/v1/resources`)).resources.map((resource: StellariumResource) => resource.name)).toContain("Visits"));
+        const visit = 'request R {\n  const visits: com.example.Visits\n  return visits.run().value\n}';
+
+        expect((await run(caller.url, visit)).returnValue).toEqual({ visits: 1, by: { org: "org_caller", node: callerKeys.publicKey } });
+        expect((await run(caller.url, visit)).returnValue).toMatchObject({ visits: 2 });
     });
 
     test("the provider learns a new price from the operator, and tells peers its contracts' new price", async () => {

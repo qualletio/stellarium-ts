@@ -233,6 +233,26 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
         expect(await ledgerProblems(db)).toEqual([]);
     });
 
+    test('a contract keeps state for the organization the operator says is paying', async () => {
+        const seeded = await seedOrganizations(db, 100_000);
+        organizations = seeded.organizations;
+        const providerUrl = await startNode(seeded.provider, { provider: true });
+        await db.update(nodesTable).set({ listed: true }).where(eq(nodesTable.publicKey, seeded.provider.publicKey));
+        const callerUrl = await startNode(seeded.payer, { startingPeer: providerUrl });
+
+        expect((await deploy(providerUrl, 'contract com.example.Visits: object {\n  var state(caller.org) visits: int32 = 0\n  visits = visits + 1\n  return { visits: visits, org: caller.org }\n}')).status).toBe(201);
+        await vi.waitFor(async () => {
+            const { resources } = await (await fetch(`${callerUrl}/v1/resources`)).json() as { resources: StellariumResource[] };
+            expect(resources.map(resource => resource.name)).toContain('Visits');
+        });
+        const visit = 'request R {\n  const visits: com.example.Visits\n  return visits.run().value\n}';
+
+        expect((await run(callerUrl, visit)).returnValue).toEqual({ visits: 1, org: PAYER_ORGANIZATION });
+        expect((await run(callerUrl, visit)).returnValue).toEqual({ visits: 2, org: PAYER_ORGANIZATION });
+        // The provider's own organization has its own copy.
+        expect((await run(providerUrl, visit)).returnValue).toEqual({ visits: 1, org: PROVIDER_ORGANIZATION });
+    });
+
     test('another organization\'s API client pays the deploy fee', async () => {
         const seeded = await seedOrganizations(db, 100_000);
         organizations = seeded.organizations;

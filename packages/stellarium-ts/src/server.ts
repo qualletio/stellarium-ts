@@ -6,6 +6,7 @@ import type { Capability, Grant } from './grant/grant.js';
 import type { GrantKey } from './grant/repository.js';
 import type { ApproveGrant, GrantOptions } from './grant/service.js';
 import { DEFAULT_MAX_CONTRACT_SOURCE_BYTES } from './contract/service.js';
+import { DEFAULT_MAX_CONTRACT_STATE_BYTES } from './contract/state.js';
 import { validateInferenceFunction } from './resource/inference.js';
 import { StellariumResource } from './resource/repository.js';
 import routes, { RateLimitConfig } from './routes.js';
@@ -56,6 +57,11 @@ export interface StellariumNodeOptions {
     contractDeployFeeMicroUsd?: number;
     /** Largest contract source this node accepts, in bytes. Defaults to `MAX_CONTRACT_SOURCE_BYTES`, then 64 KiB. */
     maxContractSourceBytes?: number;
+    /**
+     * Most one contract's state may hold in one scope, in bytes of its variables' encoded values. A call that
+     * would grow it past this fails and saves nothing. Defaults to `MAX_CONTRACT_STATE_BYTES`, then 64 KiB.
+     */
+    maxContractStateBytes?: number;
     /** SQLite file. Defaults to `DATABASE_PATH`, then `./requestscript.db`; use ':memory:' for tests. */
     databasePath?: string;
     /**
@@ -110,6 +116,7 @@ export function resolveConfig(options: StellariumNodeOptions, resources: Stellar
     const contractCostLimit = nonnegativeInteger('contractCostLimitMicroUsd', options.contractCostLimitMicroUsd, process.env.CONTRACT_COST_LIMIT_MICRO_USD) ?? costLimit;
     const contractDeployFee = nonnegativeInteger('contractDeployFeeMicroUsd', options.contractDeployFeeMicroUsd, process.env.CONTRACT_DEPLOY_FEE_MICRO_USD) ?? 0;
     const maxContractSourceBytes = nonnegativeInteger('maxContractSourceBytes', options.maxContractSourceBytes, process.env.MAX_CONTRACT_SOURCE_BYTES) ?? DEFAULT_MAX_CONTRACT_SOURCE_BYTES;
+    const maxContractStateBytes = nonnegativeInteger('maxContractStateBytes', options.maxContractStateBytes, process.env.MAX_CONTRACT_STATE_BYTES) ?? DEFAULT_MAX_CONTRACT_STATE_BYTES;
     return {
         baseUrl: required('BASE_URL', options.baseUrl ?? process.env.BASE_URL),
         publicKey: required('SIGNING_PUBLIC_KEY', options.publicKey ?? process.env.SIGNING_PUBLIC_KEY),
@@ -124,6 +131,7 @@ export function resolveConfig(options: StellariumNodeOptions, resources: Stellar
         contractCostLimitMicroUsd: contractCostLimit,
         contractDeployFeeMicroUsd: contractDeployFee,
         maxContractSourceBytes,
+        maxContractStateBytes,
         ...resolveDatabase(options),
     };
 }

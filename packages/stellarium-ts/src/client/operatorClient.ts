@@ -68,9 +68,10 @@ export interface ContractRunAuthorizationRequest {
 
 /**
  * The operator's answer to a contract call: a hold for the run named by the voucher's `invocationId`, or
- * `free` when the caller is in this node's organization, which doesn't pay itself.
+ * `free` when the caller is in this node's organization, which doesn't pay itself. `payerOrganizationId` is
+ * the organization paying for the call, which the contract sees as `caller.org`. Older operators omit it.
  */
-export type ContractRunAuthorizeResult = { ok: true, free: boolean } | { ok: false, status: number, error: string };
+export type ContractRunAuthorizeResult = { ok: true, free: boolean, payerOrganizationId?: string } | { ok: false, status: number, error: string };
 
 /** What the operator knows of this node. */
 export interface OperatorSession {
@@ -193,7 +194,12 @@ export class OperatorClient {
     async authorizeContractRun(request: ContractRunAuthorizationRequest): Promise<ContractRunAuthorizeResult> {
         const result = await this.hold('/runs/contract/authorize', request);
         if (!result.ok) return result;
-        return { ok: true, free: (result.body as { status?: unknown } | undefined)?.status === 'free' };
+        const body = result.body as { status?: unknown, payerOrganizationId?: unknown } | undefined;
+        return {
+            ok: true,
+            free: body?.status === 'free',
+            ...(typeof body?.payerOrganizationId === 'string' ? { payerOrganizationId: body.payerOrganizationId } : {}),
+        };
     }
 
     /** Charges a held run for the tokens its script executed, and releases the rest of its hold. */

@@ -211,7 +211,7 @@ importers:
         version: 5.12.7
       requestscript:
         specifier: ^1.1.0
-        version: 1.4.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        version: 1.5.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       stellarium-ts:
         specifier: workspace:*
         version: link:../../packages/stellarium-ts
@@ -227,7 +227,7 @@ importers:
         version: 5.12.7
       requestscript:
         specifier: ^1.0.5
-        version: 1.4.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        version: 1.5.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       stellarium-ts:
         specifier: workspace:*
         version: link:../../packages/stellarium-ts
@@ -263,8 +263,8 @@ importers:
         specifier: ^8.23.1
         version: 8.23.1
       requestscript:
-        specifier: 1.4.0
-        version: 1.4.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        specifier: 1.5.0
+        version: 1.5.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       stripe:
         specifier: ^23.0.1
         version: 23.0.1(@types/node@26.6.5)
@@ -312,8 +312,8 @@ importers:
         specifier: ^8.23.1
         version: 8.23.1
       requestscript:
-        specifier: 1.4.0
-        version: 1.4.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        specifier: 1.5.0
+        version: 1.5.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       sqlite:
         specifier: ^5.1.1
         version: 5.1.1
@@ -2166,8 +2166,8 @@ packages:
   real-require@1.0.0:
     resolution: {integrity: sha512-P4nbQYQfePJxRSmY+v/KINxVucm4NF3p3s7pJveMTtom52FR4YGltUQLB8idDXwDDWW+eYrWDFbuzUnjoWHF7g==}
 
-  requestscript@1.4.0:
-    resolution: {integrity: sha512-a2rBp3l9dJCIF+wD52G5qZNZPnU4jwShyhcPMLv7NVLi02P5ztVTwqZ2EuU3S3fg0ilhhhY3PnPIOoofvxal4Q==}
+  requestscript@1.5.0:
+    resolution: {integrity: sha512-qrN7vgwi2SFFNnreYRQ5PLItG3CkhAtNJAR75xFnHKHoiJTcS7doFNHnkle3o4nUKwASIej48NYMCSgTQBA58Q==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -3856,7 +3856,7 @@ snapshots:
 
   real-require@1.0.0: {}
 
-  requestscript@1.4.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7):
+  requestscript@1.5.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7):
     dependencies:
       drizzle-orm: 1.0.0-rc.4(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       express: 5.3.0

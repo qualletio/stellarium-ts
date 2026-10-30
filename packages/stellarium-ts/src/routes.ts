@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import rateLimit from '@fastify/rate-limit';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { interpretParsed, parseScript, RequestScriptError, type ResourceInvoker, TokenMeter } from 'requestscript';
+import { decodeValue, interpretParsed, parseScript, RequestScriptError, type ResourceInvoker, TokenMeter, valueToJson } from 'requestscript';
 import { looksLikeJwt, type RunTokenClaims } from './client/runTokens.js';
 import { Peer } from './peer/repository.js';
 import { type ContractPaymentVoucher, contractVoucherPayload, type InferencePaymentVoucher, inferenceVoucherPayload, invocationHash, isContractVoucher, isInferenceVoucher, MAX_CONTRACT_DEPTH, PaymentVoucher, paymentVoucherPayload } from './resource/invoker.js';
@@ -495,7 +495,10 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         }
         // The run token's claims, or null for an API-key run, so the name is always reserved.
         const jwt = caller.kind === 'client' ? caller.payload : null;
-        const resourceInvoker: ResourceInvoker = options.service.resourceInvoker.forScript({ runId, jwt, depth: 0 });
+        // Contracts the script calls on this node see who pays for the run: the client's organization, or this node's own.
+        const { organizationId, publicKey } = options.service.config;
+        const runFor = { org: caller.kind === 'client' ? caller.organizationId : organizationId ?? null, node: publicKey };
+        const resourceInvoker: ResourceInvoker = options.service.resourceInvoker.forScript({ runId, jwt, depth: 0, caller: runFor });
 
         // Nothing waits on settlement, so it doesn't delay the response.
         const settle = (outcome: 'capture' | 'release', tokens: number) => runId
@@ -706,6 +709,29 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     fastify.get('/contracts', { schema: { querystring: pageQuerySchema } }, async (request) => {
         const { items, nextOffset } = await getPage(request.query as PageQuery, (offset, limit) => options.service.contractRepository.list(offset, limit));
         return { contracts: items.map(contractView), nextOffset };
+    });
+
+    /**
+     * A contract's state variables, every scope, with values as JSON. Only its owner and this node's admin may
+     * read them: a contract shares its state with callers through what it returns.
+     */
+    fastify.get('/contracts/:ref/state', { preValidation: requireRunAuthorization }, async (request, reply) => {
+        const ref = contractRef((request.params as { ref: string }).ref);
+        if (!ref || ref.version !== undefined) {
+            return reply.status(400).send({ error: 'Name a contract as path.Name: state belongs to every version' });
+        }
+        const result = await options.service.contractService.readState(ref.path, ref.name, contractCaller(request));
+        if (!result.ok) {
+            return reply.status(result.status).send({ error: result.error });
+        }
+        return {
+            variables: result.variables.map(({ variable, scope, value, updatedAt }) => ({
+                name: variable,
+                scope,
+                value: valueToJson(decodeValue(value)),
+                updatedAt,
+            })),
+        };
     });
 
     /** Deletes `path.Name@version`, or every version of `path.Name`. */
