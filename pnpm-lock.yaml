@@ -211,7 +211,7 @@ importers:
         version: 5.12.7
       requestscript:
         specifier: ^1.1.0
-        version: 1.1.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        version: 1.4.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       stellarium-ts:
         specifier: workspace:*
         version: link:../../packages/stellarium-ts
@@ -227,7 +227,7 @@ importers:
         version: 5.12.7
       requestscript:
         specifier: ^1.0.5
-        version: 1.1.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        version: 1.4.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       stellarium-ts:
         specifier: workspace:*
         version: link:../../packages/stellarium-ts
@@ -263,8 +263,8 @@ importers:
         specifier: ^8.23.1
         version: 8.23.1
       requestscript:
-        specifier: 1.3.0
-        version: 1.3.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        specifier: 1.4.0
+        version: 1.4.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       stripe:
         specifier: ^23.0.1
         version: 23.0.1(@types/node@26.6.5)
@@ -308,9 +308,12 @@ importers:
       jose:
         specifier: 6.1.0
         version: 6.1.0
+      pg:
+        specifier: ^8.23.1
+        version: 8.23.1
       requestscript:
-        specifier: 1.3.0
-        version: 1.3.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        specifier: 1.4.0
+        version: 1.4.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       sqlite:
         specifier: ^5.1.1
         version: 5.1.1
@@ -321,9 +324,15 @@ importers:
       '@biomejs/biome':
         specifier: ^2.5.15
         version: 2.5.15
+      '@electric-sql/pglite':
+        specifier: ^0.5.10
+        version: 0.5.10
       '@types/node':
         specifier: ^26.6.4
         version: 26.6.5
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
       turbo:
         specifier: ^2.11.7
         version: 2.11.8
@@ -1356,8 +1365,8 @@ packages:
   bl@4.1.0:
     resolution: {integrity: sha512-1W07cM9gS6DcLperZfFSj+bWLtaPGSOHWhPiGzXmvVJbRLdG82sH/Kn8EtW1VqWVA54AKf2h5k5BbnIbwF3h6w==}
 
-  body-parser@2.3.0:
-    resolution: {integrity: sha512-2cGmJupaNgg+QUwVLAucDuWuoMZ6EX9iHDRswZ5lsNYEmwPaRknMPCLZz07yTzVq/83p4o/wzbDZbBrTvGGTIw==}
+  body-parser@2.4.0:
+    resolution: {integrity: sha512-Ifk1KcLrxaGt1occQagQNFNNOqRt1LFuehEnHHzB8Z6cRgIxRU1TBaiIsUiCdA+gy5PL7Y1IX31DNKkRmxtXjQ==}
     engines: {node: '>=18'}
 
   buffer@5.7.1:
@@ -1612,8 +1621,8 @@ packages:
   ee-first@1.1.1:
     resolution: {integrity: sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow==}
 
-  encodeurl@2.0.0:
-    resolution: {integrity: sha512-Q0n9HRi4m6JuGIV1eFlmvJB7ZEVxu93IrMyiMsGC0lrMJMWzRgx6WGquyfQgZVb31vhGgXnfmPNNXmxnOkRBrg==}
+  encodeurl@2.0.1:
+    resolution: {integrity: sha512-Ev/hIyePLZtpL98x562lvPtenrUfGr0lfaf44HFZ+hDEwso7ccV9QAZrEVLg0hxNAzygaAFxy2dYaAKKM0G06A==}
     engines: {node: '>= 0.8'}
 
   end-of-stream@1.4.5:
@@ -2010,8 +2019,8 @@ packages:
     resolution: {integrity: sha512-0eJJY6hXLGf1udHwfNftBqH+g73EU4B504nZeKpz1sYRKafAghwxEJunB2O7rDZkL4PGfsMVnTXZ2EjibbqcsA==}
     engines: {node: '>=14.0.0'}
 
-  on-finished@2.4.1:
-    resolution: {integrity: sha512-oVlzkg3ENAhCk2zdv7IJwd/QUD4z2RxRwpkcGY8psCVcCYZNq4wYnVWALHM+brtuJjePWiYF/ClmuDr8Ch5+kg==}
+  on-finished@2.4.2:
+    resolution: {integrity: sha512-ATWUv387i+nLD49EiDoOft5scf32Vsdz3ktrQJG9bi7jRFmaXTssvyvj1EmeKVVgvesbqUtvQQvaS2TpTukAZQ==}
     engines: {node: '>= 0.8'}
 
   once@1.4.0:
@@ -2122,8 +2131,8 @@ packages:
   pump@3.0.4:
     resolution: {integrity: sha512-VS7sjc6KR7e1ukRFhQSY5LM2uBWAUPiOPa/A3mkKmiMwSmRFUITt0xuj+/lesgnCv+dPIEYlkzrcyXgquIHMcA==}
 
-  qs@6.16.1:
-    resolution: {integrity: sha512-5Px6J7rfHBAGUhNQ3es4YzcOdBBw0SDcVtThJml4RdnKw4tKs2epA0kPZ+K8X+WiHktT93RHVcQ/3ym5aTCgtg==}
+  qs@6.17.1:
+    resolution: {integrity: sha512-jd3COkaKVgGUW+ZHyEHCG9bH7RoaaiWuMgzsIBjUMVjLAaWGWpoUAVwljVvBHxRu/2qEHnadLGZrkutYUBPQJA==}
     engines: {node: '>=0.6'}
 
   quick-format-unescaped@4.0.4:
@@ -2157,13 +2166,8 @@ packages:
   real-require@1.0.0:
     resolution: {integrity: sha512-P4nbQYQfePJxRSmY+v/KINxVucm4NF3p3s7pJveMTtom52FR4YGltUQLB8idDXwDDWW+eYrWDFbuzUnjoWHF7g==}
 
-  requestscript@1.1.0:
-    resolution: {integrity: sha512-cJkHORq+4n4aQ7Gl1Muykrv+HOZgGNLcV86hAjQp6T8JSxxX1cJyt+aMIjl81F517ISOhLlUGas68j93iCh7XQ==}
-    engines: {node: '>=20'}
-    hasBin: true
-
-  requestscript@1.3.0:
-    resolution: {integrity: sha512-mPLfuuFpbjIxsyrDrS3EeGT09Ez7zppB18KGO0s0seMgbKmwUHTTQQ47BeTXrbPDA8bM3WHYDnWm4rOzX8sEUA==}
+  requestscript@1.4.0:
+    resolution: {integrity: sha512-a2rBp3l9dJCIF+wD52G5qZNZPnU4jwShyhcPMLv7NVLi02P5ztVTwqZ2EuU3S3fg0ilhhhY3PnPIOoofvxal4Q==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -3183,15 +3187,15 @@ snapshots:
       inherits: 2.0.4
       readable-stream: 3.6.2
 
-  body-parser@2.3.0:
+  body-parser@2.4.0:
     dependencies:
       bytes: 3.1.2
       content-type: 2.1.0
       debug: 4.4.3
       http-errors: 2.0.1
       iconv-lite: 0.7.3
-      on-finished: 2.4.1
-      qs: 6.16.1
+      on-finished: 2.4.2
+      qs: 6.17.1
       raw-body: 3.0.2
       type-is: 2.1.0
     transitivePeerDependencies:
@@ -3282,7 +3286,7 @@ snapshots:
 
   ee-first@1.1.1: {}
 
-  encodeurl@2.0.0: {}
+  encodeurl@2.0.1: {}
 
   end-of-stream@1.4.5:
     dependencies:
@@ -3348,14 +3352,14 @@ snapshots:
   express@5.3.0:
     dependencies:
       accepts: 2.0.0
-      body-parser: 2.3.0
+      body-parser: 2.4.0
       content-disposition: 2.0.1
       content-type: 2.1.0
       cookie: 0.7.2
       cookie-signature: 1.2.2
       debug: 4.4.3
       depd: 2.0.0
-      encodeurl: 2.0.0
+      encodeurl: 2.0.1
       escape-html: 1.0.3
       etag: 1.8.1
       finalhandler: 2.1.1
@@ -3363,11 +3367,11 @@ snapshots:
       http-errors: 2.0.1
       merge-descriptors: 2.0.0
       mime-types: 3.0.2
-      on-finished: 2.4.1
+      on-finished: 2.4.2
       once: 1.4.0
       parseurl: 1.3.3
       proxy-addr: 2.0.8
-      qs: 6.16.1
+      qs: 6.17.1
       range-parser: 1.3.0
       router: 2.2.0
       send: 1.2.1
@@ -3432,9 +3436,9 @@ snapshots:
   finalhandler@2.1.1:
     dependencies:
       debug: 4.4.3
-      encodeurl: 2.0.0
+      encodeurl: 2.0.1
       escape-html: 1.0.3
-      on-finished: 2.4.1
+      on-finished: 2.4.2
       parseurl: 1.3.3
       statuses: 2.0.2
     transitivePeerDependencies:
@@ -3689,7 +3693,7 @@ snapshots:
 
   on-exit-leak-free@2.1.2: {}
 
-  on-finished@2.4.1:
+  on-finished@2.4.2:
     dependencies:
       ee-first: 1.1.1
 
@@ -3814,7 +3818,7 @@ snapshots:
       end-of-stream: 1.4.5
       once: 1.4.0
 
-  qs@6.16.1:
+  qs@6.17.1:
     dependencies:
       es-define-property: 1.0.1
       side-channel: 1.1.1
@@ -3852,62 +3856,7 @@ snapshots:
 
   real-require@1.0.0: {}
 
-  requestscript@1.1.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7):
-    dependencies:
-      drizzle-orm: 1.0.0-rc.4(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
-      express: 5.3.0
-      pg: 8.23.1
-    transitivePeerDependencies:
-      - '@aws-sdk/client-rds-data'
-      - '@cloudflare/workers-types'
-      - '@effect/sql-d1'
-      - '@effect/sql-libsql'
-      - '@effect/sql-mysql2'
-      - '@effect/sql-pg'
-      - '@effect/sql-pglite'
-      - '@effect/sql-sqlite-bun'
-      - '@effect/sql-sqlite-do'
-      - '@effect/sql-sqlite-node'
-      - '@effect/sql-sqlite-wasm'
-      - '@electric-sql/pglite'
-      - '@libsql/client'
-      - '@libsql/client-wasm'
-      - '@neondatabase/serverless'
-      - '@op-engineering/op-sqlite'
-      - '@opentelemetry/api'
-      - '@planetscale/database'
-      - '@sinclair/typebox'
-      - '@sqlitecloud/drivers'
-      - '@tidbcloud/serverless'
-      - '@tursodatabase/database'
-      - '@tursodatabase/database-common'
-      - '@tursodatabase/database-wasm'
-      - '@tursodatabase/serverless'
-      - '@tursodatabase/sync'
-      - '@types/better-sqlite3'
-      - '@types/mssql'
-      - '@types/pg'
-      - '@types/sql.js'
-      - '@upstash/redis'
-      - '@vercel/postgres'
-      - '@xata.io/client'
-      - arktype
-      - better-sqlite3
-      - bun-types
-      - effect
-      - expo-sqlite
-      - mssql
-      - mysql2
-      - pg-native
-      - postgres
-      - sql.js
-      - sqlite3
-      - supports-color
-      - typebox
-      - valibot
-      - zod
-
-  requestscript@1.3.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7):
+  requestscript@1.4.0(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7):
     dependencies:
       drizzle-orm: 1.0.0-rc.4(@electric-sql/pglite@0.5.10)(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       express: 5.3.0
@@ -4024,14 +3973,14 @@ snapshots:
   send@1.2.1:
     dependencies:
       debug: 4.4.3
-      encodeurl: 2.0.0
+      encodeurl: 2.0.1
       escape-html: 1.0.3
       etag: 1.8.1
       fresh: 2.0.0
       http-errors: 2.0.1
       mime-types: 3.0.2
       ms: 2.1.3
-      on-finished: 2.4.1
+      on-finished: 2.4.2
       range-parser: 1.3.0
       statuses: 2.0.2
     transitivePeerDependencies:
@@ -4039,7 +3988,7 @@ snapshots:
 
   serve-static@2.2.1:
     dependencies:
-      encodeurl: 2.0.0
+      encodeurl: 2.0.1
       escape-html: 1.0.3
       parseurl: 1.3.3
       send: 1.2.1

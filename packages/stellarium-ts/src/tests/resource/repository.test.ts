@@ -1,10 +1,9 @@
-import type { Database } from "sqlite";
+import type { NodeDatabase as Database } from "../../db/database.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { signData } from "../../crypto/utils.js";
-import { openDatabase } from "../../db/db.js";
 import { PeerRepository, type StoredPeer } from "../../peer/repository.js";
 import { resourceAnnouncementPayload, ResourceRepository, type StellariumResource, type StellariumResourceFunction } from "../../resource/repository.js";
-import { generateBase64KeyPair, ORGANIZATION, weatherResource } from "../helpers.js";
+import { DIALECTS, generateBase64KeyPair, ORGANIZATION, weatherResource, openTestDatabase } from "../helpers.js";
 
 const SELF = "http://self.example";
 const PROVIDER = "http://provider.example";
@@ -20,12 +19,12 @@ function resource(name: string, functions: Partial<StellariumResourceFunction>[]
     };
 }
 
-describe("ResourceRepository", () => {
+describe.each(DIALECTS)("ResourceRepository (%s)", (dialect) => {
     let db: Database;
     let repository: ResourceRepository;
 
     beforeEach(async () => {
-        db = await openDatabase(":memory:");
+        db = await openTestDatabase(dialect);
         repository = new ResourceRepository(db, [weatherResource(SELF)], SELF);
     });
 

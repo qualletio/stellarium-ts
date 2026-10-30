@@ -85,7 +85,12 @@ await node.start(fastify, {
 | `enrollmentToken`   | `ENROLLMENT_TOKEN`                  | One-time token that enrolls this node in an organization ([Payments](#payments)) |
 | `costLimitMicroUsd` | `COST_LIMIT_MICRO_USD`, then `10000` | Most this node pays for one remote call, in micro-USD    |
 | `inferenceCostLimitMicroUsd` | `INFERENCE_COST_LIMIT_MICRO_USD`, then `costLimitMicroUsd` | Most this node signs for in one remote inference call (its voucher's `maxAmount`) |
+| `contractCostLimitMicroUsd` | `CONTRACT_COST_LIMIT_MICRO_USD`, then `costLimitMicroUsd` | Most one call to a [contract](#contracts) on another node may cost, with the paid calls it makes (its voucher's `maxAmount`) |
+| `contractDeployFeeMicroUsd` | `CONTRACT_DEPLOY_FEE_MICRO_USD`, then `0` | What another organization pays to deploy a [contract](#contracts) to this node |
+| `maxContractSourceBytes` | `MAX_CONTRACT_SOURCE_BYTES`, then `65536` | Largest contract this node accepts |
 | `databasePath`      | `DATABASE_PATH`, then `./requestscript.db` | SQLite file. `:memory:` keeps everything in memory |
+| `databaseUrl`       | `DATABASE_URL`                      | A `postgres://` or `postgresql://` URL. When set, the node uses [Postgres](#postgres) instead of SQLite, and `databasePath` must not be set |
+| `databaseSchema`    | `DATABASE_SCHEMA`                   | Postgres schema for the node's tables, created if missing, so several nodes can share one database |
 
 `start` resolves once the node is listening and, with `startingPeer`, once it has joined the network. It rejects if it can't listen, if a required setting is missing, or if bootstrapping fails.
 
@@ -101,7 +106,12 @@ Importing `StellariumNode` loads [dotenv](https://github.com/motdotla/dotenv), s
 | `ENROLLMENT_TOKEN`    | One-time token from the [Stellarium Platform](https://platform.stellarium.sh) that enrolls this node in an organization at startup. Only needed until the node is enrolled.                       |
 | `COST_LIMIT_MICRO_USD` | Most this node pays for one remote call, in micro-USD.                                                                                                                                          |
 | `INFERENCE_COST_LIMIT_MICRO_USD` | Most this node signs for in one remote inference call, in micro-USD. Defaults to the cost limit.                                                                                    |
-| `DATABASE_PATH`       | SQLite file the node keeps peers, learned resources and grants in. Defaults to `./requestscript.db`. In a container, point it at a persistent volume, for example `/data/requestscript.db`. |
+| `CONTRACT_COST_LIMIT_MICRO_USD` | Most one call to a contract on another node may cost, with the paid calls it makes, in micro-USD. Defaults to the cost limit.                                                       |
+| `CONTRACT_DEPLOY_FEE_MICRO_USD` | What another organization pays to deploy a contract to this node, in micro-USD. Defaults to `0`.                                                                                     |
+| `MAX_CONTRACT_SOURCE_BYTES` | Largest contract this node accepts. Defaults to 64 KiB.                                                                                                                                  |
+| `DATABASE_PATH`       | SQLite file the node keeps peers, learned resources, grants and contracts in. Defaults to `./requestscript.db`. In a container, point it at a persistent volume, for example `/data/requestscript.db`. |
+| `DATABASE_URL`        | A `postgres://` or `postgresql://` URL. When set, the node keeps its data in Postgres instead of SQLite. Don't set `DATABASE_PATH` too.                                                     |
+| `DATABASE_SCHEMA`     | The Postgres schema the node's tables live in, created if missing. Lets several nodes share one database.                                                                                 |
 
 Signing keys can be generated with the following script:
 
@@ -153,6 +163,9 @@ Routes are mounted at `/v1`.
 | `POST /v1/run`                                | `{ "source": "..." }`     | Run one `request` script. Requires `Authorization: Bearer <API_KEY>` or a [run token](#api-clients-and-run-tokens)             |
 | `POST /v1/run/resource`                       | One function call         | Called by peers to run a function hosted here                                                                                  |
 | `POST /v1/run/resource/estimate`              | One function call         | Called by peers to price a call to a paid inference function hosted here: `{ "inputTokens", "maxAmount" }`                     |
+| `POST /v1/contracts`                          | `{ "source", "description"? }` | Deploy a version of a [contract](#contracts). Requires the API key or a run token. Responds `201` with `{ "path", "name", "version", "feeMicroUsd" }` |
+| `GET /v1/contracts`                           | —                         | One page of every contract version on this node, with its source: `{ "contracts", "nextOffset" }`                              |
+| `DELETE /v1/contracts/:ref`                   | —                         | Delete `path.Name@version`, or every version of `path.Name`. Requires the API key, or a run token from the owner's organization |
 | `POST /v1/grants/request`                     | Signed grant request      | Ask for a new grant, decided by the node's `approveGrant` hook: `{ "grants" }`                                                 |
 | `POST /v1/grants/renew`                       | Signed renewal request    | Re-issue a grant this node issued to its audience: `{ "grants" }`                                                              |
 | `PUT /v1/admin/revoked-grants/:grantId`       | —                         | Revoke a grant this node issued, or another issuer's grant with `?issuer=<key>`. Requires the API key                          |
@@ -160,9 +173,9 @@ Routes are mounted at `/v1`.
 | `PUT /v1/admin/blocked-callers/:publicKey`    | Optional `{ "reason" }`   | Block a caller key. Requires the API key                                                                                       |
 | `DELETE /v1/admin/blocked-callers/:publicKey` | —                         | Unblock a caller key (`404` if not blocked). Requires the API key                                                              |
 
-`GET /v1/peers`, `GET /v1/resources` and `GET /v1/admin/blocked-callers` are paginated with `?offset=` (default `0`) and `?limit=` (default `100`, at most `500`). `nextOffset` is the `offset` of the next page, or `null` on the last page.
+`GET /v1/peers`, `GET /v1/resources`, `GET /v1/contracts` and `GET /v1/admin/blocked-callers` are paginated with `?offset=` (default `0`) and `?limit=` (default `100`, at most `500`). `nextOffset` is the `offset` of the next page, or `null` on the last page.
 
-`GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, `website`, `description`, and functions (`name`, `returnType`, `description`, `parameters` with their `name`, `type` and `description`, `paymentManifest` for paid functions, `restricted: true` for functions that need a grant, and `kind: "inference"` for [inference functions](#inference-functions)). `website` and all descriptions are optional and appear only when the node registering the resource sets them. A node drops a description from a peer that isn't a string, and a `website` that isn't an `http` or `https` URL. Function implementations stay on the node that hosts them.
+`GET /v1/resources` returns each resource's `path`, `name`, `baseUrl`, `website`, `description`, and functions (`name`, `returnType`, `description`, `parameters` with their `name`, `type` and `description`, `paymentManifest` for paid functions, `restricted: true` for functions that need a grant, `kind: "inference"` for [inference functions](#inference-functions), and `kind: "contract"` for [contracts](#contracts)). `website` and all descriptions are optional and appear only when the node registering the resource sets them. A node drops a description from a peer that isn't a string, and a `website` that isn't an `http` or `https` URL. Function implementations stay on the node that hosts them.
 
 `POST /v1/run` takes a JSON body whose `source` is the script. The declaration must be a `request`. A successful run responds `200` with `{ "returnValue": ..., "usage": { "tokens": ... } }`, where `tokens` counts the [script tokens](https://github.com/qualletio/requestscript-js#token-metering) the run executed. Each resource call in the script evaluates to `{ "value", "error" }`, so a script can handle a failed call. A missing or wrong API key or run token responds `401`. A script that doesn't parse, or is not a request, responds `400` with `{ "error": "Invalid script" }`. A script that fails while running, for example dividing by zero, responds `422` with `{ "error": "Script failed", "details", "usage" }`. Any other failure responds `500` with `{ "error": "Internal server error" }`.
 
@@ -276,6 +289,54 @@ A call's charge is `ceil((inputTokens × inputRate + outputTokens × outputRate)
 
 An inference function without a `paymentManifest` is free. It still needs `maxTokens`, but no estimator.
 
+### Contracts
+
+A contract is a [RequestScript](https://github.com/qualletio/requestscript-js) script deployed to a node, so a resource can be written without TypeScript. Its latest version is one of the node's resources, with one function, `run`, which takes the contract's parameters. A contract must have a path and declare its return type (requestscript 1.4.0 or later):
+
+```
+contract com.example.Outlook(city: string): string {
+    const weather: com.example.Weather
+    const today = weather.temperature(city: city)
+    if (today.error != null) {
+        return "unknown"
+    }
+    return "${today.value} degrees"
+}
+```
+
+Deploy it with the node's API key, or with a [run token](#api-clients-and-run-tokens) from an organization's API client:
+
+```sh
+curl -X POST http://127.0.0.1:3000/v1/contracts \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $API_KEY" \
+  -d '{"source": "contract com.example.Outlook(city: string): string { ... }", "description": "Today in words"}'
+```
+
+- **Versions are immutable.** Deploying a version that exists responds `409`. Deploy `com.example.Outlook@2` to change it. Calls always run the latest version, and `GET /v1/contracts` lists every version with its source, so callers can read what a call does.
+- **The first organization to deploy a contract owns it.** Only its API clients can add versions or delete it. The node's API key can do both for any contract. A contract can't take the name of a registered resource, or of a resource learned from a peer.
+- **Another organization pays a deploy fee**, `contractDeployFeeMicroUsd`, from its API client's run. The node's own organization and its API key deploy for free. A deploy that's refused isn't charged.
+- **Peers learn of a contract as soon as it's deployed**, and forget it when it's deleted, since the node announces its resources again.
+
+A script calls a contract like any other resource:
+
+```
+request Today {
+    const outlook: com.example.Outlook
+    return outlook.run(city: "Oslo")
+}
+```
+
+Calls are charged for the [script tokens](https://github.com/qualletio/requestscript-js#token-metering) the contract executes, at the hosting node's listed price per million tokens, which its manifest advertises as `priceMicroUsdPerMillionTokens`. **A contract's own paid calls are paid by whoever called it**, never by the node hosting it:
+
+1. The caller signs a contract voucher (`kind: "contract"`) for the call, with the price and `maxAmount`, its `contractCostLimitMicroUsd`. A call from a billed run also carries the run's id.
+2. The hosting node checks the voucher as it would a fixed one, then asks the operator to authorize a run for the call. The operator holds up to `maxAmount` on the caller's organization, or out of the caller's run's hold. It charges at most the price the caller signed.
+3. The node runs the contract. Each paid call the contract makes draws on that run, as a billed script's calls do. Afterwards, the node captures the tokens the contract executed, and what's left of the hold goes back where it came from.
+
+A contract that fails, for example by dividing by zero, is reported as the call's `error`, and its tokens are still charged. A call by the node's own organization isn't billed. Contracts may call other contracts, at most 8 deep. Set `contractCostLimitMicroUsd` above the cost of the paid calls the contracts you call make, since the default, `costLimitMicroUsd`, covers a single call. A contract reads the calling run's token as `jwt` when it's called from a script on the same node, and `null` otherwise.
+
+The node learns its price from the operator at startup, and checks it again every five minutes. When it changes, the node announces its contracts again.
+
 ### Restricted functions and grants
 
 A function with `restricted: true` runs only for callers holding a **grant** from the hosting node. A grant is a signed statement that one key may call some functions until an expiry. Its holder can **delegate** a narrower grant to another key, and the caller sends the whole chain with each call. The hosting node checks the chain's signatures without looking up the caller. It refuses a restricted call without an authorization, or with an invalid one, with `403`. It checks this before the payment voucher.
@@ -358,6 +419,17 @@ A capability's `resourcePath` is exact, a prefix such as `com.example.*`, or `*`
 A grant lasts at most 30 days, and a chain holds at most four grants. Each node renews its held grants in the background, once they are past half their lifetime (checked every `grantRefreshIntervalMs`, 5 minutes by default), so calls don't wait on renewal. A held grant that its issuer still refuses to renew 30 days after it expired is deleted. A grant keeps its `id` across renewals. `renewableUntil` ends access at a given time: no copy expires later, and none is renewed after it. Verifiers allow signers' clocks to run up to 30 seconds ahead (`CLOCK_SKEW_TOLERANCE_MS`). Seen authorization nonces are kept in the node's database, so they survive restarts, but replicas that don't share a database don't share them either. A revocation at the hosting node takes effect immediately. A delegator's revocation only stops renewal, so it takes effect when the current copy expires.
 
 Resources are bound with `const <name>: <path>.<ResourceName>` and called with named arguments. See the [RequestScript readme](https://www.npmjs.com/package/requestscript) for the language.
+
+### Postgres
+
+A node keeps its peers, learned resources, grants and contracts in SQLite by default. For more throughput, or to run several nodes against one database, set `DATABASE_URL` to a Postgres URL. With `DATABASE_SCHEMA`, each node keeps its tables in its own schema:
+
+```sh
+DATABASE_URL=postgresql://stellarium:password@db.example:5432/stellarium
+DATABASE_SCHEMA=weather_node
+```
+
+The node creates its tables at startup, in either database.
 
 ## Developing
 
@@ -470,6 +542,30 @@ curl -s -X POST http://localhost:3002/v1/run \
 ```
 
 The caller's organization pays $0.01 for the temperature, plus 17 tokens at $1 per million. The provider's organization is owed both, less the fee. The run is in the `runs` table.
+
+Deploy a [contract](#contracts) to the provider with the same token. As another organization's API client, it pays the provider's $0.001 deploy fee (`CONTRACT_DEPLOY_FEE_MICRO_USD` in `compose.yaml`):
+
+```sh
+curl -s -X POST http://localhost:3002/v1/contracts \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"source": "contract com.example.Outlook(city: string): string {\n  const weather: com.example.Weather\n  return \"${weather.temperature(city: city).value} degrees\"\n}"}'
+```
+
+The provider announces it, so the caller can call it:
+
+```sh
+curl -s -X POST http://localhost:3003/v1/run \
+  -H "Authorization: Bearer $CALLER_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"source": "request Today {\n  const outlook: com.example.Outlook\n\n  return outlook.run(city: \"Oslo\")\n}"}'
+```
+
+```json
+{ "returnValue": { "value": "12 degrees", "error": null }, "usage": { "tokens": 17 } }
+```
+
+The caller's organization pays for the contract's tokens at the provider's price, and for the $0.01 temperature call the contract makes. The call is a `contract` row in the `runs` table, and the temperature's receipt names it.
+
+The resource node keeps its data in Postgres, in the `resource_node` schema of the operator's database (`DATABASE_URL` and `DATABASE_SCHEMA` in `compose.yaml`). The caller node uses SQLite.
 
 #### 2. The dashboard
 

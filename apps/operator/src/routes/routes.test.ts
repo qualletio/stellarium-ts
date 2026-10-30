@@ -67,7 +67,7 @@ describe('operator routes', () => {
             const response = await post('/v1/nodes/session', {}, provider);
 
             expect(response.statusCode).toBe(200);
-            expect(response.json()).toEqual({ organizationId: PROVIDER_ORGANIZATION });
+            expect(response.json()).toEqual({ organizationId: PROVIDER_ORGANIZATION, priceMicroUsdPerMillionTokens: 0 });
         });
 
         test('enrolls a new node with a one-time token', async () => {
@@ -76,7 +76,7 @@ describe('operator routes', () => {
 
             expect(await post('/v1/nodes/session', {}, node).then(r => r.statusCode)).toBe(403);
             const enrolled = await post('/v1/nodes/session', { enrollmentToken: token }, node);
-            expect(enrolled.json()).toEqual({ organizationId: PAYER_ORGANIZATION });
+            expect(enrolled.json()).toEqual({ organizationId: PAYER_ORGANIZATION, priceMicroUsdPerMillionTokens: 0 });
             expect(await organizations.getNode(node.publicKey)).toMatchObject({ organizationId: PAYER_ORGANIZATION, label: 'second caller' });
 
             // Used up: it can't enroll another node.
@@ -96,7 +96,7 @@ describe('operator routes', () => {
 
             const response = await post('/v1/nodes/session', { enrollmentToken: token }, provider);
 
-            expect(response.json()).toEqual({ organizationId: PROVIDER_ORGANIZATION });
+            expect(response.json()).toEqual({ organizationId: PROVIDER_ORGANIZATION, priceMicroUsdPerMillionTokens: 0 });
         });
     });
 

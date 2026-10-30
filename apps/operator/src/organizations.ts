@@ -98,14 +98,14 @@ export class OrganizationService {
      * isn't enrolled yet. An enrolled node's token is ignored, so a node may keep it configured.
      * Records the `baseUrl` the node reports. A listed node that reports a new one is unlisted until verified again.
      */
-    async session(publicKey: string, enrollmentToken?: string, baseUrl?: string): Promise<{ organizationId: string }> {
+    async session(publicKey: string, enrollmentToken?: string, baseUrl?: string): Promise<{ organizationId: string, priceMicroUsdPerMillionTokens: number }> {
         const node = await this.getNode(publicKey);
         if (node) {
             if (node.revokedAt) throw new OperationError(403, 'Node has been revoked');
             if (baseUrl !== undefined && baseUrl !== node.baseUrl) {
                 await this.db.update(nodesTable).set({ baseUrl, listed: false, verifiedAt: null }).where(eq(nodesTable.publicKey, publicKey));
             }
-            return { organizationId: node.organizationId };
+            return { organizationId: node.organizationId, priceMicroUsdPerMillionTokens: node.priceMicroUsdPerMillionTokens };
         }
         if (!enrollmentToken) {
             throw new OperationError(403, 'Node is not enrolled in an organization');
@@ -124,7 +124,8 @@ export class OrganizationService {
                 throw new OperationError(403, 'Enrollment token is invalid, used or expired');
             }
             await tx.insert(nodesTable).values({ publicKey, organizationId: claimed.organizationId, label: claimed.label, baseUrl });
-            return { organizationId: claimed.organizationId };
+            // A new node's price starts at the default, 0, until it is listed.
+            return { organizationId: claimed.organizationId, priceMicroUsdPerMillionTokens: 0 };
         });
     }
 

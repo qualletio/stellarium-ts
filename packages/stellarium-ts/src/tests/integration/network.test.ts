@@ -5,7 +5,7 @@ import path from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { verifyData } from "../../crypto/utils.js";
-import { type PaymentVoucher, paymentVoucherPayload } from "../../resource/invoker.js";
+import { type ContractPaymentVoucher, contractVoucherPayload, type PaymentVoucher, paymentVoucherPayload } from "../../resource/invoker.js";
 import { StellariumNode, type StellariumNodeOptions } from "../../server.js";
 import type { StellariumResource } from "../../resource/repository.js";
 import { COST, generateBase64KeyPair, INFERENCE_RATES, modelResource, ORGANIZATION, temperatureSource, weatherResource } from "../helpers.js";
@@ -25,6 +25,8 @@ function vaultResource(baseUrl: string): StellariumResource {
 const vaultSource = 'request OpenVault {\n  const vault: com.example.Vault\n\n  return vault.open(city: "Oslo")\n}';
 const vault = { resourcePath: "com.example", resourceName: "Vault" };
 const HOUR = 3_600_000;
+const CONTRACT_PRICE = 1_000;
+const forecastContract = 'contract com.example.Forecast(city: string): string {\n  const weather: com.example.Weather\n  const temperature = weather.temperature(city: city)\n  return "${temperature.value} degrees"\n}';
 const completeSource = 'request Complete {\n  const model: com.example.Model\n\n  return model.complete(prompt: "Hello world!", maxTokens: 10)\n}';
 
 function freePort(): Promise<number> {
@@ -50,8 +52,12 @@ describe("two-node network", { timeout: 15_000 }, () => {
     const authorizations: unknown[] = [];
     const releases: unknown[] = [];
     const sessions: unknown[] = [];
+    const contractAuthorizations: { voucher: ContractPaymentVoucher, source: string }[] = [];
+    const runCaptures: { runId: string, tokens: number }[] = [];
     /** What the fake operator answers to the next authorizations; undefined places the hold. */
     let refuseAuthorization: { status: number, error: string } | undefined;
+    /** The provider's price, as its organization set it on the dashboard. */
+    let price = CONTRACT_PRICE;
     const callerKeys = generateBase64KeyPair();
     let dir: string;
     let operatorUrl: string;
@@ -94,7 +100,10 @@ describe("two-node network", { timeout: 15_000 }, () => {
         authorizations.length = 0;
         releases.length = 0;
         sessions.length = 0;
+        contractAuthorizations.length = 0;
+        runCaptures.length = 0;
         refuseAuthorization = undefined;
+        price = CONTRACT_PRICE;
 
         const operator = Fastify();
         servers.push(operator);
@@ -103,7 +112,15 @@ describe("two-node network", { timeout: 15_000 }, () => {
                 return reply.status(401).send({ error: "Unsigned request" });
             }
             sessions.push(request.body);
-            return { organizationId: ORGANIZATION };
+            return { organizationId: ORGANIZATION, priceMicroUsdPerMillionTokens: price };
+        });
+        operator.post("/v1/runs/contract/authorize", async (request) => {
+            contractAuthorizations.push(request.body as { voucher: ContractPaymentVoucher, source: string });
+            return { status: "held", heldMicroUsd: 50_000, maxTokens: 100, tokenBudgetMicroUsd: 1 };
+        });
+        operator.post("/v1/runs/capture", async (request) => {
+            runCaptures.push(request.body as { runId: string, tokens: number });
+            return { status: "captured" };
         });
         operator.post("/v1/payments/authorize", async (request, reply) => {
             authorizations.push(request.body);
@@ -135,6 +152,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
             operatorUrl,
             databasePath: ":memory:",
             apiKey: "provider-admin",
+            sessionRefreshIntervalMs: 50,
             approveGrant: ({ details }) => details?.invite === "letmein" ? { lifetimeMs: HOUR } : undefined,
         });
     });
@@ -174,6 +192,51 @@ describe("two-node network", { timeout: 15_000 }, () => {
         const second = await startCaller();
 
         expect(await run(second.url)).toEqual({ usage: { tokens: expect.any(Number) }, returnValue: { value: 12, error: null } });
+    });
+
+    test("the provider's contract reaches the caller, which pays for it and for the paid call it makes", async () => {
+        const caller = await startCaller();
+
+        const deployed = await fetch(`${providerUrl}/v1/contracts`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: "Bearer provider-admin" },
+            body: JSON.stringify({ source: forecastContract }),
+        });
+        expect(deployed.status).toBe(201);
+        // The provider announces its resources again when a contract is deployed.
+        await vi.waitFor(async () => expect((await getJson(`${caller.url}/v1/resources`)).resources).toContainEqual(expect.objectContaining({
+            name: "Forecast",
+            baseUrl: providerUrl,
+            functions: [expect.objectContaining({ name: "run", kind: "contract", paymentManifest: { priceMicroUsdPerMillionTokens: CONTRACT_PRICE, recipientOrganizationId: ORGANIZATION } })],
+        })));
+
+        const result = await run(caller.url, 'request R {\n  const forecast: com.example.Forecast\n  return forecast.run(city: "Oslo")\n}');
+
+        expect(result.returnValue).toEqual({ value: "12 degrees", error: null });
+        const [{ voucher, source }] = contractAuthorizations;
+        expect(source).toBe(forecastContract);
+        expect(voucher).toMatchObject({ kind: "contract", publicKey: callerKeys.publicKey, recipientOrganizationId: ORGANIZATION, priceMicroUsdPerMillionTokens: CONTRACT_PRICE });
+        expect(verifyData(contractVoucherPayload(voucher), voucher.publicKey, voucher.signature)).toBe(true);
+        // The contract's run pays for its tokens and for its call to the provider's paid function.
+        await vi.waitFor(() => expect(runCaptures).toEqual([{ runId: voucher.invocationId, tokens: expect.any(Number) }]));
+        await vi.waitFor(() => expect(settlements).toHaveLength(1));
+        expect(settlements[0]).toMatchObject({ amount: COST, recipientOrganizationId: ORGANIZATION, runId: voucher.invocationId });
+    });
+
+    test("the provider learns a new price from the operator, and tells peers its contracts' new price", async () => {
+        const caller = await startCaller();
+        await fetch(`${providerUrl}/v1/contracts`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: "Bearer provider-admin" },
+            body: JSON.stringify({ source: forecastContract }),
+        });
+
+        price = 2 * CONTRACT_PRICE;
+
+        await vi.waitFor(async () => {
+            const forecast = (await getJson(`${caller.url}/v1/resources`)).resources.find((resource: StellariumResource) => resource.name === "Forecast");
+            expect(forecast?.functions[0].paymentManifest.priceMicroUsdPerMillionTokens).toBe(2 * CONTRACT_PRICE);
+        });
     });
 
     describe("restricted functions", () => {
@@ -267,11 +330,13 @@ describe("two-node network", { timeout: 15_000 }, () => {
     test("a caller with an enrollment token enrolls at startup; one without still reports its URL", async () => {
         sessions.length = 0;
         const enrolled = await startCaller({ operatorUrl, enrollmentToken: "enr_caller" });
-        expect(sessions).toEqual([{ enrollmentToken: "enr_caller", baseUrl: enrolled.url }]);
+        // The provider refreshes its own session meanwhile.
+        const callerSessions = () => sessions.filter(session => (session as { baseUrl?: string }).baseUrl !== providerUrl);
+        expect(callerSessions()).toEqual([{ enrollmentToken: "enr_caller", baseUrl: enrolled.url }]);
 
         sessions.length = 0;
         const other = await startCaller({ operatorUrl, databasePath: path.join(dir, "caller-2.db") });
-        await vi.waitFor(() => expect(sessions).toEqual([{ baseUrl: other.url }]));
+        await vi.waitFor(() => expect(callerSessions()).toEqual([{ baseUrl: other.url }]));
     });
 
     test("a node without paid functions or a token starts without waiting for an unreachable operator", async () => {

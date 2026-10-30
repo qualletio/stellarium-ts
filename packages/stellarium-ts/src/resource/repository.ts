@@ -1,6 +1,7 @@
 import { isFreshExpiry, safeVerifyData } from "../crypto/utils.js";
 import { Resource, ResourceFunction, ResourceFunctionCallParameter, ResourceFunctionParameter } from "requestscript";
-import { Database } from "sqlite";
+import type { NodeDatabase } from "../db/database.js";
+import type { ContractRepository, StoredContract } from "../contract/repository.js";
 import type { StoredPeer } from "../peer/repository.js";
 import { isInferenceManifest } from "./inference.js";
 
@@ -22,10 +23,65 @@ export interface StellariumInferencePaymentManifest {
     recipientOrganizationId?: string;
 }
 
-export type StellariumResourceFunctionPaymentManifest = StellariumFixedPaymentManifest | StellariumInferencePaymentManifest;
+/**
+ * A contract's price: the hosting node's listed price per million tokens the contract executes. A call is
+ * paid with a contract voucher, which also pays for the paid calls the contract makes.
+ */
+export interface StellariumContractPaymentManifest {
+    id?: number;
+    priceMicroUsdPerMillionTokens: number;
+    recipientOrganizationId?: string;
+}
 
-/** Fixed functions return one value. Inference functions run AI inference and are priced per token. */
-export type StellariumResourceFunctionKind = 'fixed' | 'inference';
+export type StellariumResourceFunctionPaymentManifest = StellariumFixedPaymentManifest | StellariumInferencePaymentManifest | StellariumContractPaymentManifest;
+
+/**
+ * Fixed functions return one value. Inference functions run AI inference and are priced per token.
+ * Contract functions run a contract deployed to the node, and are priced per token it executes.
+ */
+export type StellariumResourceFunctionKind = 'fixed' | 'inference' | 'contract';
+
+/** The one function a contract's resource has. It runs the contract's latest version. */
+export const CONTRACT_FUNCTION = 'run';
+
+export function isContractManifest(manifest: StellariumResourceFunctionPaymentManifest | undefined): manifest is StellariumContractPaymentManifest {
+    return typeof manifest === 'object' && manifest !== null && 'priceMicroUsdPerMillionTokens' in manifest;
+}
+
+export function isContractFunction(fn: Pick<StellariumResourceFunction, 'kind'>): boolean {
+    return fn.kind === 'contract';
+}
+
+/** The resource a contract is served as. Its function always has a manifest, so every call needs a voucher. */
+export function contractResource(contract: StoredContract, baseUrl: string, priceMicroUsdPerMillionTokens: number, recipientOrganizationId?: string): StellariumResource {
+    return {
+        id: 0,
+        baseUrl,
+        metadata: {},
+        path: contract.path,
+        name: contract.name,
+        description: contract.description ?? undefined,
+        functions: [{
+            name: CONTRACT_FUNCTION,
+            kind: 'contract',
+            parameters: contract.parameters,
+            returnType: contract.returnType,
+            exec: async () => {
+                throw new Error('Contracts are run by the resource invoker');
+            },
+            paymentManifest: { priceMicroUsdPerMillionTokens, recipientOrganizationId },
+        }],
+    };
+}
+
+/** Where a `ResourceRepository` finds this node's contracts, and what it charges for them. */
+export interface ContractSource {
+    repository: ContractRepository;
+    /** This node's listed price per million tokens. */
+    price: () => number;
+    /** This node's organization, which is paid for contract calls. It may be learned after the node starts. */
+    organizationId: () => string | undefined;
+}
 
 export interface StellariumResourceFunctionParameter extends ResourceFunctionParameter {
     description?: string;
@@ -93,34 +149,44 @@ function optionalWebsite(value: unknown): string | null {
 const resourceKey = (resource: { path: string, name: string }) => `${resource.path}.${resource.name}`;
 
 export class ResourceRepository {
-    // The connection is shared, so transactions are serialized to keep them from nesting.
-    private writes: Promise<unknown> = Promise.resolve();
+    /**
+     * `organizationId` is the operator organization this node is enrolled in, which is paid for its functions.
+     * The contracts deployed to the node are its resources too, after the registered ones.
+     */
+    constructor(
+        private readonly db: NodeDatabase,
+        private resources: StellariumResource[] = [],
+        private readonly baseUrl: string = '',
+        private readonly organizationId?: string,
+        private readonly contracts?: ContractSource,
+    ) {}
 
-    /** `organizationId` is the operator organization this node is enrolled in, which is paid for its functions. */
-    constructor(private readonly db: Database, private resources: StellariumResource[] = [], private readonly baseUrl: string = '', private readonly organizationId?: string) {}
-
-    private serialize<T>(work: () => Promise<T>): Promise<T> {
-        const run = this.writes.then(work, work);
-        this.writes = run.catch(() => undefined);
-        return run;
-    }
-
-    private transaction<T>(work: () => Promise<T>): Promise<T> {
-        return this.serialize(async () => {
-            await this.db.exec('BEGIN IMMEDIATE');
-            try {
-                const result = await work();
-                await this.db.exec('COMMIT');
-                return result;
-            } catch (error) {
-                await this.db.exec('ROLLBACK');
-                throw error;
-            }
-        });
-    }
-
-    private isInternal(resource: { path: string, name: string }): boolean {
+    /** A resource registered on this node. */
+    isRegistered(resource: { path: string, name: string }): boolean {
         return this.resources.some(r => r.path === resource.path && r.name === resource.name);
+    }
+
+    /** A resource this node hosts: registered, or a contract deployed to it. */
+    private async isInternal(resource: { path: string, name: string }): Promise<boolean> {
+        return this.isRegistered(resource) || await this.contracts?.repository.owner(resource.path, resource.name) !== undefined;
+    }
+
+    /** A resource learned from a peer. */
+    async isLearned(path: string, name: string): Promise<boolean> {
+        return await this.db.get('SELECT id FROM resource WHERE path = ? AND name = ?', [path, name]) !== undefined;
+    }
+
+    private async contractResources(): Promise<StellariumResource[]> {
+        if (!this.contracts) {
+            return [];
+        }
+        const { repository, price, organizationId } = this.contracts;
+        return (await repository.allLatest()).map(contract => contractResource(contract, this.baseUrl, price(), organizationId()));
+    }
+
+    private async contractResource(path: string, name: string): Promise<StellariumResource | undefined> {
+        const contract = await this.contracts?.repository.latest(path, name);
+        return contract && contractResource(contract, this.baseUrl, this.contracts!.price(), this.contracts!.organizationId());
     }
 
     /**
@@ -128,13 +194,13 @@ export class ResourceRepository {
      * by this node and resources already known are left alone, so startup can run on every boot.
      */
     async learn(resource: StellariumResource): Promise<void> {
-        if (this.isInternal(resource) || resource.baseUrl === this.baseUrl) {
+        if (await this.isInternal(resource) || resource.baseUrl === this.baseUrl) {
             return;
         }
-        await this.transaction(async () => {
-            const existing = await this.db.get('SELECT id FROM resource WHERE path = ? AND name = ?', [resource.path, resource.name]);
+        await this.db.transaction(async (tx) => {
+            const existing = await tx.get('SELECT id FROM resource WHERE path = ? AND name = ?', [resource.path, resource.name]);
             if (!existing) {
-                await this.insert(resource, null);
+                await this.insert(tx, resource, null);
             }
         });
     }
@@ -152,16 +218,18 @@ export class ResourceRepository {
         }
 
         const rejected: string[] = [];
-        await this.transaction(async () => {
-            for (const resource of resources) {
-                if (resource.baseUrl !== peer.baseUrl || this.isInternal(resource)) {
+        // Checked before the transaction, whose work may use only its own connection.
+        const internal = await Promise.all(resources.map(resource => this.isInternal(resource)));
+        await this.db.transaction(async (tx) => {
+            for (const [index, resource] of resources.entries()) {
+                if (resource.baseUrl !== peer.baseUrl || internal[index]) {
                     rejected.push(resourceKey(resource));
                     continue;
                 }
 
-                const existing = await this.db.get<ResourceRow>('SELECT * FROM resource WHERE path = ? AND name = ?', [resource.path, resource.name]);
+                const existing = await tx.get<ResourceRow>('SELECT * FROM resource WHERE path = ? AND name = ?', [resource.path, resource.name]);
                 if (!existing) {
-                    await this.insert(resource, peer.id);
+                    await this.insert(tx, resource, peer.id);
                     continue;
                 }
 
@@ -172,44 +240,44 @@ export class ResourceRepository {
                     continue;
                 }
 
-                await this.deleteFunctions(existing.id);
-                await this.db.run(
+                await this.deleteFunctions(tx, existing.id);
+                await tx.run(
                     'UPDATE resource SET base_url = ?, website = ?, description = ?, peer_id = ?, updated_at = ? WHERE id = ?',
                     [resource.baseUrl, optionalWebsite(resource.website), optionalText(resource.description), peer.id, new Date().toISOString(), existing.id]
                 );
-                await this.insertFunctions(existing.id, resource.functions);
+                await this.insertFunctions(tx, existing.id, resource.functions);
             }
         });
 
         return { ok: true, rejected };
     }
 
-    private async insert(resource: StellariumResource, peerId: number | null): Promise<void> {
+    private async insert(tx: NodeDatabase, resource: StellariumResource, peerId: number | null): Promise<void> {
         const createdAt = new Date().toISOString();
-        const result = await this.db.run(
-            'INSERT INTO resource (path, name, base_url, website, description, peer_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        const row = await tx.get<{ id: number }>(
+            'INSERT INTO resource (path, name, base_url, website, description, peer_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id',
             [resource.path, resource.name, resource.baseUrl, optionalWebsite(resource.website), optionalText(resource.description), peerId, createdAt, createdAt]
         );
 
-        if (!result.changes || result.lastID === undefined) {
+        if (!row) {
             throw new Error('Failed to create resource');
         }
 
-        await this.insertFunctions(result.lastID, resource.functions);
+        await this.insertFunctions(tx, row.id, resource.functions);
     }
 
-    private async insertFunctions(resourceId: number, functions: StellariumResourceFunction[]): Promise<void> {
+    private async insertFunctions(tx: NodeDatabase, resourceId: number, functions: StellariumResourceFunction[]): Promise<void> {
         const createdAt = new Date().toISOString();
         for (const fn of functions) {
-            const functionResult = await this.db.run(
-                'INSERT INTO resource_function (resource_id, name, return_type, description, restricted, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [resourceId, fn.name, fn.returnType, optionalText(fn.description), fn.restricted === true ? 1 : 0, fn.kind === 'inference' ? 'inference' : 'fixed', createdAt, createdAt]
+            const functionRow = await tx.get<{ id: number }>(
+                'INSERT INTO resource_function (resource_id, name, return_type, description, restricted, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id',
+                [resourceId, fn.name, fn.returnType, optionalText(fn.description), fn.restricted === true ? 1 : 0, fn.kind === 'inference' || fn.kind === 'contract' ? fn.kind : 'fixed', createdAt, createdAt]
             );
 
-            const functionId = functionResult.lastID;
+            const functionId = functionRow!.id;
 
             for (const parameter of fn.parameters) {
-                await this.db.run(
+                await tx.run(
                     'INSERT INTO resource_function_parameter (resource_function_id, name, parameter_type, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
                     [functionId, parameter.name, parameter.type, optionalText(parameter.description), createdAt, createdAt]
                 );
@@ -217,14 +285,16 @@ export class ResourceRepository {
 
             const manifest = fn.paymentManifest;
             if (manifest) {
-                const inference = isInferenceManifest(manifest);
-                await this.db.run(
-                    'INSERT INTO resource_function_payment_manifest (resource_function_id, cost_micro_usd, input_cost_micro_usd_per_million_tokens, output_cost_micro_usd_per_million_tokens, recipient_organization_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                const inference = isInferenceManifest(manifest) ? manifest : undefined;
+                const contract = isContractManifest(manifest) ? manifest : undefined;
+                await tx.run(
+                    'INSERT INTO resource_function_payment_manifest (resource_function_id, cost_micro_usd, input_cost_micro_usd_per_million_tokens, output_cost_micro_usd_per_million_tokens, price_micro_usd_per_million_tokens, recipient_organization_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                     [
                         functionId,
-                        inference ? null : manifest.costMicroUsd,
-                        inference ? manifest.inputCostMicroUsdPerMillionTokens : null,
-                        inference ? manifest.outputCostMicroUsdPerMillionTokens : null,
+                        inference || contract ? null : (manifest as StellariumFixedPaymentManifest).costMicroUsd,
+                        inference ? inference.inputCostMicroUsdPerMillionTokens : null,
+                        inference ? inference.outputCostMicroUsdPerMillionTokens : null,
+                        contract ? contract.priceMicroUsdPerMillionTokens : null,
                         manifest.recipientOrganizationId ?? null,
                         createdAt,
                         createdAt,
@@ -234,15 +304,15 @@ export class ResourceRepository {
         }
     }
 
-    private async deleteFunctions(resourceId: number): Promise<void> {
+    private async deleteFunctions(tx: NodeDatabase, resourceId: number): Promise<void> {
         const functionIds = 'SELECT id FROM resource_function WHERE resource_id = ?';
-        await this.db.run(`DELETE FROM resource_function_payment_manifest WHERE resource_function_id IN (${functionIds})`, [resourceId]);
-        await this.db.run(`DELETE FROM resource_function_parameter WHERE resource_function_id IN (${functionIds})`, [resourceId]);
-        await this.db.run('DELETE FROM resource_function WHERE resource_id = ?', [resourceId]);
+        await tx.run(`DELETE FROM resource_function_payment_manifest WHERE resource_function_id IN (${functionIds})`, [resourceId]);
+        await tx.run(`DELETE FROM resource_function_parameter WHERE resource_function_id IN (${functionIds})`, [resourceId]);
+        await tx.run('DELETE FROM resource_function WHERE resource_id = ?', [resourceId]);
     }
 
     async getInternalResource(path: string, name: string): Promise<StellariumResource | undefined> {
-        return this.resources.find(r => r.path === path && r.name === name);
+        return this.resources.find(r => r.path === path && r.name === name) ?? await this.contractResource(path, name);
     }
 
     async getResource(key: string): Promise<Resource | undefined> {
@@ -253,8 +323,13 @@ export class ResourceRepository {
 
         // Split the key with format path.path.path.*.Name
         const pathName = key.split('.');
-        const name = pathName.pop();
+        const name = pathName.pop()!;
         const path = pathName.join('.');
+
+        const contract = await this.contractResource(path, name);
+        if (contract) {
+            return contract;
+        }
 
         const result = await this.db.get<ResourceRow>(
             'SELECT * FROM resource WHERE path = ? AND name = ?',
@@ -276,22 +351,27 @@ export class ResourceRepository {
         }
     }
 
-    /** This node's resources, with its base URL and its organization as the recipient of every paid function. */
+    /**
+     * This node's resources, with its base URL and its organization as the recipient of every paid function:
+     * the registered ones, then its contracts by path and name.
+     */
     async getInternalResources(): Promise<StellariumResource[]> {
-        return this.resources.map(r => ({
+        const registered = this.resources.map(r => ({
             ...r,
             baseUrl: this.baseUrl,
             functions: r.functions.map((fn: StellariumResourceFunction) => fn.paymentManifest
                 ? { ...fn, paymentManifest: { ...fn.paymentManifest, recipientOrganizationId: this.organizationId } }
                 : fn),
         }));
+        return [...registered, ...await this.contractResources()];
     }
 
     /** Learned resources in insertion order. A negative `limit` means no limit. */
     async getExternalResources(offset = 0, limit = -1): Promise<StellariumResource[]> {
         const results = await this.db.all<ResourceRow[]>(
             'SELECT * FROM resource ORDER BY id LIMIT ? OFFSET ?',
-            [limit, offset],
+            // Postgres refuses a negative limit, and SQLite needs one before an offset.
+            [limit < 0 ? Number.MAX_SAFE_INTEGER : limit, offset],
         );
 
         return Promise.all(results.map(async (r) => ({
@@ -326,12 +406,12 @@ export class ResourceRepository {
             exec: async () => undefined,
             paymentManifest: await this.getResourceFunctionPaymentManifest(fn.id),
             restricted: fn.restricted === 1 || undefined,
-            kind: fn.kind === 'inference' ? 'inference' : undefined,
+            kind: fn.kind === 'inference' || fn.kind === 'contract' ? fn.kind : undefined,
         };
     }
 
     async getResourceFunctions(resourceId: number): Promise<StellariumResourceFunction[]> {
-        const rows = await this.db.all('SELECT * FROM resource_function WHERE resource_id = ?', [resourceId]);
+        const rows = await this.db.all('SELECT * FROM resource_function WHERE resource_id = ? ORDER BY name', [resourceId]);
         return Promise.all(rows.map(async (f) => ({
             id: f.id as number,
             name: f.name as string,
@@ -341,7 +421,7 @@ export class ResourceRepository {
             exec: async () => undefined,
             paymentManifest: await this.getResourceFunctionPaymentManifest(f.id),
             restricted: f.restricted === 1 || undefined,
-            kind: f.kind === 'inference' ? 'inference' as const : undefined,
+            kind: f.kind === 'inference' || f.kind === 'contract' ? f.kind as StellariumResourceFunctionKind : undefined,
         })));
     }
 
@@ -357,6 +437,13 @@ export class ResourceRepository {
         const result = await this.db.get('SELECT * FROM resource_function_payment_manifest WHERE resource_function_id = ?', [resourceFunctionId]);
         if (!result) {
             return undefined;
+        }
+        if (result.price_micro_usd_per_million_tokens !== null) {
+            return {
+                id: result.id,
+                priceMicroUsdPerMillionTokens: result.price_micro_usd_per_million_tokens as number,
+                recipientOrganizationId: result.recipient_organization_id ?? undefined,
+            };
         }
         if (result.cost_micro_usd === null) {
             return {
@@ -378,12 +465,13 @@ export class ResourceRepository {
      * Both are in a fixed order, so offsets stay stable as resources are learned.
      */
     async getResources(offset: number, limit: number): Promise<StellariumResource[]> {
-        const internal = (await this.getInternalResources()).slice(offset, offset + limit);
+        const all = await this.getInternalResources();
+        const internal = all.slice(offset, offset + limit);
         const remaining = limit - internal.length;
         if (remaining <= 0) {
             return internal;
         }
-        const externalOffset = Math.max(0, offset - this.resources.length);
+        const externalOffset = Math.max(0, offset - all.length);
         return [...internal, ...await this.getExternalResources(externalOffset, remaining)];
     }
 }

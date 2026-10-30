@@ -13,6 +13,54 @@ export const STARTUP_PAGE_SIZE = 100;
 // 10 minutes
 const SIGNATURE_LIFETIME_MS = 1000 * 60 * 10;
 
+/** PUT to every peer, logging failures instead of throwing so one bad peer doesn't stop the rest. */
+async function putToPeers(log: FastifyBaseLogger, peers: Peer[], path: string, body: unknown, description: string): Promise<void> {
+    for (const peer of peers) {
+        try {
+            const response = await fetch(`${peer.baseUrl}/v1${path}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(body),
+                signal: AbortSignal.timeout(STARTUP_REQUEST_TIMEOUT_MS),
+            });
+
+            if (!response.ok) {
+                log.warn(`Failed to broadcast ${description} to node ${peer.baseUrl}: ${response.status} ${await response.text()}`);
+            }
+        } catch (error) {
+            log.warn(error, `Failed to broadcast ${description} to node ${peer.baseUrl}`);
+        }
+    }
+}
+
+/** The peers this node knows, other than itself. */
+async function otherPeers(service: Service): Promise<Peer[]> {
+    const { baseUrl, publicKey } = service.config;
+    return (await service.peerRepository.getPeerList()).filter(peer => peer.publicKey !== publicKey && peer.baseUrl !== baseUrl);
+}
+
+/** Sends this node's resources, signed, to every peer it knows. Run at startup, and when a contract is deployed or deleted. */
+export async function announceResources(log: FastifyBaseLogger, service: Service): Promise<void> {
+    log.info(`Broadcasting resources to peers`);
+
+    const peers = await otherPeers(service);
+    const resources = await service.resourceRepository.getInternalResources();
+
+    const expiry = new Date(Date.now() + SIGNATURE_LIFETIME_MS).toISOString();
+    const signature = signData(resourceAnnouncementPayload(resources, expiry), service.config.privateKey);
+
+    await putToPeers(log, peers, '/all-resources', {
+        publicKey: service.config.publicKey,
+        resources,
+        expiry,
+        signature,
+    }, 'resources');
+
+    log.info(`Broadcasted ${resources.length} resources to ${peers.length} peers`);
+}
+
 export class StartupService {
     constructor(
         private readonly log: FastifyBaseLogger,
@@ -108,28 +156,6 @@ export class StartupService {
         this.log.info(`Learned up to ${count} resources`);
     }
 
-    /** PUT to every peer, logging failures instead of throwing so one bad peer doesn't stop the rest. */
-    private async putToPeers(peers: Peer[], path: string, body: unknown, description: string): Promise<void> {
-        for (const peer of peers) {
-            try {
-                const response = await fetch(`${peer.baseUrl}/v1${path}`, {
-                    method: 'PUT',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(body),
-                    signal: AbortSignal.timeout(STARTUP_REQUEST_TIMEOUT_MS),
-                });
-
-                if (!response.ok) {
-                    this.log.warn(`Failed to broadcast ${description} to node ${peer.baseUrl}: ${response.status} ${await response.text()}`);
-                }
-            } catch (error) {
-                this.log.warn(error, `Failed to broadcast ${description} to node ${peer.baseUrl}`);
-            }
-        }
-    }
-
     async broadcastSelf(): Promise<void> {
         this.log.info(`Broadcasting self to peers`);
 
@@ -140,25 +166,10 @@ export class StartupService {
         const peerSignatureExpiry = new Date(Date.now() + SIGNATURE_LIFETIME_MS).toISOString();
         const peerSignature = signData(peerAnnouncementPayload(self, peerSignatureExpiry), this.privateKey);
 
-        await this.putToPeers(peers, '/peers', { ...self, signature: peerSignature, expiry: peerSignatureExpiry }, 'self');
+        await putToPeers(this.log, peers, '/peers', { ...self, signature: peerSignature, expiry: peerSignatureExpiry }, 'self');
 
         this.log.info(`Broadcasted self to ${peers.length} peers`);
 
-        this.log.info(`Broadcasting resources to peers`);
-
-        // Let the peers know about the resources available on this node.
-        const resources = await this.service.resourceRepository.getInternalResources();
-
-        const resourceSignatureExpiry = new Date(Date.now() + SIGNATURE_LIFETIME_MS).toISOString();
-        const resourceSignature = signData(resourceAnnouncementPayload(resources, resourceSignatureExpiry), this.privateKey);
-
-        await this.putToPeers(peers, '/all-resources', {
-            publicKey: this.publicKey,
-            resources,
-            expiry: resourceSignatureExpiry,
-            signature: resourceSignature,
-        }, 'resources');
-
-        this.log.info(`Broadcasted ${resources.length} resources to ${peers.length} peers`);
+        await announceResources(this.log, this.service);
     }
 }

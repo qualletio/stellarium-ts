@@ -97,11 +97,15 @@ export interface ApiClient {
   monthToDateMicroUsd: number;
 }
 
-/** One script an API client ran on another organization's node. Its paid calls are receipts. */
+/** One script an API client ran on another organization's node, or one call to a contract on a node. Its paid calls are receipts. */
 export interface Run {
   id: number;
   runId: string;
-  clientId: string;
+  kind: 'script' | 'contract';
+  /** Null for a contract call, which a node authorizes with a voucher instead of a run token. */
+  clientId: string | null;
+  /** For a contract call made by another run: that run's id. */
+  parentRunId: number | null;
   payerOrganizationId: string;
   recipientOrganizationId: string;
   nodePublicKey: string;

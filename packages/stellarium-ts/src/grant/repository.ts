@@ -1,4 +1,4 @@
-import type { Database } from "sqlite";
+import type { NodeDatabase } from "../db/database.js";
 import type { Capability, Grant } from "./grant.js";
 
 export interface IssuedGrant {
@@ -51,7 +51,7 @@ const isoTime = (time: string | number) => new Date(typeof time === 'string' ? D
 
 /** Grants this node issued, grants it holds, grants it revoked, nonces it has seen, and caller keys it blocked. */
 export class GrantRepository {
-    constructor(private readonly db: Database) {}
+    constructor(private readonly db: NodeDatabase) {}
 
     async saveIssued(grant: IssuedGrant): Promise<void> {
         await this.db.run(
@@ -140,7 +140,7 @@ export class GrantRepository {
     /** False when `key` was already claimed. */
     async claimNonce(key: string, expiresAt: number): Promise<boolean> {
         const result = await this.db.run('INSERT INTO seen_nonce (key, expires_at) VALUES (?, ?) ON CONFLICT (key) DO NOTHING', [key, expiresAt]);
-        return (result.changes ?? 0) > 0;
+        return result.changes > 0;
     }
 
     async deleteExpiredNonces(now: number): Promise<void> {
@@ -158,7 +158,7 @@ export class GrantRepository {
     /** False when the key wasn't blocked. */
     async unblock(publicKey: string): Promise<boolean> {
         const result = await this.db.run('DELETE FROM blocked_caller WHERE public_key = ?', [publicKey]);
-        return (result.changes ?? 0) > 0;
+        return result.changes > 0;
     }
 
     async anyBlocked(publicKeys: string[]): Promise<boolean> {

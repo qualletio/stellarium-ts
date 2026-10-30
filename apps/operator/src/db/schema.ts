@@ -1,4 +1,4 @@
-import { bigint, boolean, index, integer, pgTable, text, timestamp, unique, uuid, varchar } from "drizzle-orm/pg-core";
+import { type AnyPgColumn, bigint, boolean, index, integer, pgTable, text, timestamp, unique, uuid, varchar } from "drizzle-orm/pg-core";
 
 // Amounts are micro-USD (1 USD = 1,000,000). Integer columns would overflow above ~$2,147.
 // Drizzle supplies timestamps in UTC. now() would use the session's time zone, which drizzle reads back as UTC.
@@ -97,18 +97,24 @@ export const enrollmentTokensTable = pgTable("enrollment_tokens", {
  * - released: the call failed, cost nothing, or the hold expired. Nothing was charged.
  */
 export const RECEIPT_STATUSES = ['held', 'captured', 'released'] as const;
+export const RUN_KINDS = ['script', 'contract'] as const;
 export type ReceiptStatus = typeof RECEIPT_STATUSES[number];
 
 /**
- * One script run by an API client on another organization's node, from its authorization to its capture
- * or release. Its hold covers the script's tokens and the paid calls the script makes: a voucher naming
- * the run moves part of the hold to its own receipt.
+ * One script run by an API client on another organization's node, or one call to a contract on a node,
+ * from its authorization to its capture or release. Its hold covers the script's tokens and the paid calls
+ * the script makes: a voucher naming the run moves part of the hold to its own receipt.
  */
 export const runsTable = pgTable("runs", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   // Chosen by the node, so a retried authorization finds the same run.
   runId: uuid().notNull().unique(),
-  clientId: varchar({ length: 64 }).notNull().references(() => apiClientsTable.id),
+  // 'script' for a request script an API client ran, 'contract' for a call to a contract on the node.
+  kind: varchar({ length: 16, enum: RUN_KINDS }).notNull().default('script'),
+  // The API client that ran the script. Null for a contract call, which a node authorizes with a voucher.
+  clientId: varchar({ length: 64 }).references(() => apiClientsTable.id),
+  // A contract call made by another run: its hold came out of that run's hold, and what's left goes back.
+  parentRunId: integer().references((): AnyPgColumn => runsTable.id),
   payerOrganizationId: varchar({ length: 64 }).notNull().references(() => organizationsTable.id),
   recipientOrganizationId: varchar({ length: 64 }).notNull().references(() => organizationsTable.id),
   nodePublicKey: varchar({ length: 255 }).notNull(),

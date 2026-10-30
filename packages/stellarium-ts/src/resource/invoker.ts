@@ -3,7 +3,7 @@ import type { OperatorClient } from "../client/operatorClient.js";
 import { hashData, signData } from "../crypto/utils.js";
 import type { GrantService } from "../grant/service.js";
 import { estimateInputTokens, inferenceCharge, type InferenceUsage, isInferenceFunction, isInferenceManifest, parseInferenceResult, parseMaxTokens } from "./inference.js";
-import { ResourceRepository, type StellariumInferencePaymentManifest, type StellariumResourceFunction } from "./repository.js";
+import { isContractFunction, isContractManifest, ResourceRepository, type StellariumFixedPaymentManifest, type StellariumInferencePaymentManifest, type StellariumResourceFunction } from "./repository.js";
 import { type InvokeResult, settlePaidCall } from "./settlement.js";
 
 export interface PaymentVoucher {
@@ -38,6 +38,26 @@ export interface InferencePaymentVoucher {
     invocationHash: string;
     publicKey: string;
     /** Set for a call made by a script run billed to an API client: the run's hold pays instead of this node's organization. */
+    runId?: string;
+}
+
+/**
+ * A voucher for a call to a contract on another node. It signs the provider's price per million tokens and
+ * the most the caller will pay, `maxAmount`: the provider authorizes a run with it, which holds up to
+ * `maxAmount` for the contract's tokens and for the paid calls the contract makes.
+ */
+export interface ContractPaymentVoucher {
+    kind: 'contract';
+    requestId: string;
+    invocationId: string;
+    maxAmount: number;
+    priceMicroUsdPerMillionTokens: number;
+    recipientOrganizationId: string;
+    signature: string;
+    expiresAt: string;
+    invocationHash: string;
+    publicKey: string;
+    /** Set for a call made by a billed run: that run's hold pays, and the contract's run is held from it. */
     runId?: string;
 }
 
@@ -84,6 +104,19 @@ export function inferenceVoucherPayload(voucher: Omit<InferencePaymentVoucher, "
     return { kind, requestId, invocationId, maxAmount, inputCostMicroUsdPerMillionTokens, outputCostMicroUsdPerMillionTokens, maxTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey, ...runPayload(voucher.runId) };
 }
 
+/**
+ * The object `createContractVoucher` signs: every contract voucher field except `signature`.
+ * Key order is part of the signed bytes.
+ */
+export function contractVoucherPayload(voucher: Omit<ContractPaymentVoucher, "signature">) {
+    const { kind, requestId, invocationId, maxAmount, priceMicroUsdPerMillionTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey } = voucher;
+    return { kind, requestId, invocationId, maxAmount, priceMicroUsdPerMillionTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey, ...runPayload(voucher.runId) };
+}
+
+export function isContractVoucher(voucher: unknown): voucher is ContractPaymentVoucher {
+    return (voucher as ContractPaymentVoucher | undefined)?.kind === 'contract';
+}
+
 export function isInferenceVoucher(voucher: PaymentVoucher | InferencePaymentVoucher): voucher is InferencePaymentVoucher {
     return (voucher as InferencePaymentVoucher).kind === 'inference';
 }
@@ -91,6 +124,8 @@ export function isInferenceVoucher(voucher: PaymentVoucher | InferencePaymentVou
 export const PAYMENT_VOUCHER_LIFETIME_MS = 1000 * 60 * 2;
 /** Inference can run for minutes, and the operator refuses a voucher that expired before the provider settled it. */
 export const INFERENCE_VOUCHER_LIFETIME_MS = 1000 * 60 * 10;
+/** A contract may make inference calls of its own. */
+export const CONTRACT_VOUCHER_LIFETIME_MS = INFERENCE_VOUCHER_LIFETIME_MS;
 
 export const EXTERNAL_INVOKE_MAX_RETRIES = 3;
 export const EXTERNAL_INVOKE_BASE_DELAY_MS = 500;
@@ -129,6 +164,36 @@ export interface RunContext {
     runId: string;
 }
 
+/** The script, request or contract, that calls are made from. */
+export interface ScriptContext {
+    /** A billed run's id: the run's hold pays the script's paid calls. */
+    runId?: string;
+    /** What the script reads as `jwt`, which contracts it calls on this node read too. Null when absent. */
+    jwt?: unknown;
+    /** How many contracts deep the script is: 0 for a request script. */
+    depth?: number;
+}
+
+/** Contracts may call each other, so each call goes one deeper, and a call past this depth fails. */
+export const MAX_CONTRACT_DEPTH = 8;
+
+/** Runs the contracts deployed to this node, for scripts on this node. */
+export interface ContractHost {
+    /**
+     * Runs the contract served as `resource`, one level deeper than `context`. A billed script's call is held
+     * from its run's hold, as a call from another node is held from the caller's balance.
+     */
+    invokeLocal(resource: Resource, parameters: ResourceFunctionCallParameter[], context: ScriptContext): Promise<InvokeResult>;
+}
+
+/** How this node calls contracts. */
+export interface ContractInvocation {
+    /** The most a call to a contract on another node may hold: its voucher's `maxAmount`. */
+    costLimitMicroUsd: number;
+    /** Runs contracts on this node. Without one, calls to them fail. */
+    host?: ContractHost;
+}
+
 /** How a node settles its own paid functions when a billed run calls them. */
 export interface LocalSettlement {
     operatorClient: OperatorClient;
@@ -153,13 +218,24 @@ export class CombinationResourceInvoker implements ResourceInvoker {
         private readonly localSettlement?: LocalSettlement,
     ) {}
 
+    /** Set once the node's contract host exists, since the host calls back into this invoker. */
+    contracts?: ContractInvocation;
+
     /**
      * An invoker for one billed run. Its paid calls, remote or to this node's own paid functions, carry
      * the run's id, so the run's hold pays for them. The run's hold limits what they cost, in place of the
      * cost limits.
      */
     forRun(run: RunContext): ResourceInvoker {
-        return { invoke: (resource, functionName, parameters) => this.invokeIn(resource, functionName, parameters, run) };
+        return this.forScript(run);
+    }
+
+    /**
+     * An invoker for one script. With a `runId`, its paid calls are billed to the run as `forRun`'s are.
+     * Contracts it calls on this node see its `jwt`.
+     */
+    forScript(context: ScriptContext): ResourceInvoker {
+        return { invoke: (resource, functionName, parameters) => this.invokeIn(resource, functionName, parameters, context) };
     }
     /**
      * Invoke a function on a resource.
@@ -178,7 +254,9 @@ export class CombinationResourceInvoker implements ResourceInvoker {
         return this.invokeIn(resource, functionName, parameters, undefined);
     }
 
-    private async invokeIn(resource: Resource, functionName: string, parameters: ResourceFunctionCallParameter[], run: RunContext | undefined): Promise<{ value: any, error: { message: string } | null, usage?: InferenceUsage }> {
+    private async invokeIn(resource: Resource, functionName: string, parameters: ResourceFunctionCallParameter[], context: ScriptContext | undefined): Promise<{ value: any, error: { message: string } | null, usage?: InferenceUsage }> {
+        // Only a billed run has a run id. Its hold limits what its calls cost, in place of the cost limits.
+        const run = context?.runId === undefined ? undefined : { runId: context.runId };
         if (resource.metadata.baseUrl) {
             let requestBody: Record<string, any> = {
                 resourcePath: resource.path,
@@ -205,10 +283,23 @@ export class CombinationResourceInvoker implements ResourceInvoker {
 
             const manifest = resourceFunction.paymentManifest;
             const inference = isInferenceFunction(resourceFunction);
+            const contract = isContractFunction(resourceFunction);
             if (manifest && !manifest.recipientOrganizationId) {
                 return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: its payment manifest names no recipient organization` } };
             }
-            if (manifest && inference) {
+            if (contract) {
+                // A contract may make paid calls of its own, so a call always carries a voucher, even at a price of 0.
+                if (!manifest || !isContractManifest(manifest) || !Number.isSafeInteger(manifest.priceMicroUsdPerMillionTokens) || manifest.priceMicroUsdPerMillionTokens < 0) {
+                    return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: it is a contract without a valid price` } };
+                }
+                const depth = (context?.depth ?? 0) + 1;
+                if (depth > MAX_CONTRACT_DEPTH) {
+                    return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: contracts may call each other at most ${MAX_CONTRACT_DEPTH} deep` } };
+                }
+                const costLimit = this.contracts?.costLimitMicroUsd ?? this.costLimitMicroUsd;
+                requestBody.paymentVoucher = this.createContractVoucher(manifest.recipientOrganizationId!, manifest.priceMicroUsdPerMillionTokens, costLimit, resource.path, resource.name, functionName, parameters, run?.runId);
+                requestBody.contractDepth = depth;
+            } else if (manifest && inference) {
                 console.log(`Resource function ${resource.name}.${functionName} is a paid inference function, creating payment voucher...`);
                 // Peers' manifests aren't validated on receipt.
                 if (!isInferenceManifest(manifest) || !Number.isSafeInteger(manifest.inputCostMicroUsdPerMillionTokens) || manifest.inputCostMicroUsdPerMillionTokens < 0
@@ -233,7 +324,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 requestBody.paymentVoucher = this.createInferenceVoucher(manifest, estimate.maxAmount, maxTokens, resource.path, resource.name, functionName, parameters, run?.runId);
             } else if (manifest) {
                 console.log(`Resource function ${resource.name}.${functionName} has a payment manifest, creating payment voucher...`);
-                if (isInferenceManifest(manifest)) {
+                if (isInferenceManifest(manifest) || isContractManifest(manifest)) {
                     return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: it has per-token pricing but isn't an inference function` } };
                 }
                 if (!run && manifest.costMicroUsd > this.costLimitMicroUsd) {
@@ -251,7 +342,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-            }), inference ? INFERENCE_INVOKE_TIMEOUT_MS : EXTERNAL_INVOKE_TIMEOUT_MS);
+            }), inference || contract ? INFERENCE_INVOKE_TIMEOUT_MS : EXTERNAL_INVOKE_TIMEOUT_MS);
 
             if (!result.ok) {
                 // The provider's JSON error is more useful than the status text, which can be empty.
@@ -266,6 +357,12 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             const fn = resource.functions.find(f => f.name === functionName) as StellariumResourceFunction | undefined;
             if (!fn) {
                 return { value: null, error: { message: `Function ${functionName} not found in resource ${resource.name}` } };
+            }
+            if (isContractFunction(fn)) {
+                if (!this.contracts?.host) {
+                    return { value: null, error: { message: `Failed to invoke ${resource.name}.${fn.name}: this node doesn't run contracts` } };
+                }
+                return this.contracts.host.invokeLocal(resource, parameters, context ?? {});
             }
             // A billed run pays for this node's own paid functions as a remote caller would.
             if (run && fn.paymentManifest) {
@@ -310,8 +407,8 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             }
             const maxAmount = inferenceCharge(manifest, inputTokens, maxTokens);
             voucher = this.createInferenceVoucher({ ...manifest, recipientOrganizationId: organizationId }, maxAmount, maxTokens, resource.path, resource.name, fn.name, parameters, run.runId);
-        } else if (!isInferenceManifest(manifest)) {
-            voucher = this.createPaymentVoucher(organizationId, manifest.costMicroUsd, resource.path, resource.name, fn.name, parameters, run.runId);
+        } else if (!isInferenceManifest(manifest) && !isContractManifest(manifest)) {
+            voucher = this.createPaymentVoucher(organizationId, (manifest as StellariumFixedPaymentManifest).costMicroUsd, resource.path, resource.name, fn.name, parameters, run.runId);
         } else {
             return failed('it has per-token pricing but isn\'t an inference function');
         }
@@ -375,5 +472,22 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             ...runPayload(runId),
         };
         return { ...unsigned, signature: signData(inferenceVoucherPayload(unsigned), this.privateKey) };
+    }
+
+    /** With `runId`, the run's hold pays, and the contract's run is held from it. */
+    createContractVoucher(recipientOrganizationId: string, priceMicroUsdPerMillionTokens: number, maxAmount: number, resourcePath: string, resourceName: string, functionName: string, parameters: ResourceFunctionCallParameter[], runId?: string): ContractPaymentVoucher {
+        const unsigned: Omit<ContractPaymentVoucher, "signature"> = {
+            kind: 'contract',
+            requestId: crypto.randomUUID(),
+            invocationId: crypto.randomUUID(),
+            maxAmount,
+            priceMicroUsdPerMillionTokens,
+            recipientOrganizationId,
+            expiresAt: new Date(Date.now() + CONTRACT_VOUCHER_LIFETIME_MS).toISOString(),
+            invocationHash: invocationHash(resourcePath, resourceName, functionName, parameters),
+            publicKey: this.publicKey,
+            ...runPayload(runId),
+        };
+        return { ...unsigned, signature: signData(contractVoucherPayload(unsigned), this.privateKey) };
     }
 }

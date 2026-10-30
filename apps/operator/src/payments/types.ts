@@ -67,3 +67,33 @@ export function voucherPayload(voucher: Voucher): object {
     const { requestId, invocationId, amount, recipientOrganizationId, expiresAt, invocationHash, publicKey } = voucher;
     return { requestId, invocationId, amount, recipientOrganizationId, expiresAt, invocationHash, publicKey, ...run };
 }
+
+/**
+ * A voucher for a call to a contract on another node. It doesn't pay a fixed amount: the provider authorizes
+ * a run with it (`RunService.authorizeContract`), holding up to `maxAmount` for the contract's tokens at
+ * `priceMicroUsdPerMillionTokens` and for the paid calls the contract makes. Matches ContractPaymentVoucher
+ * in stellarium-ts/resource/invoker.ts.
+ */
+export interface ContractVoucher {
+    kind: 'contract';
+    requestId: string;
+    invocationId: string;
+    maxAmount: number;
+    priceMicroUsdPerMillionTokens: number;
+    recipientOrganizationId: string;
+    signature: string;
+    expiresAt: string;
+    invocationHash: string;
+    publicKey: string;
+    /** Set when a billed run made the call: that run's hold pays, and the contract's run is held from it. */
+    runId?: string;
+}
+
+/** The bytes the caller signed: stellarium-ts's contractVoucherPayload. Key order is part of the signed bytes. */
+export function contractVoucherPayload(voucher: ContractVoucher): object {
+    const { kind, requestId, invocationId, maxAmount, priceMicroUsdPerMillionTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey } = voucher;
+    return {
+        kind, requestId, invocationId, maxAmount, priceMicroUsdPerMillionTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey,
+        ...(voucher.runId === undefined ? {} : { runId: voucher.runId }),
+    };
+}
