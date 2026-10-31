@@ -1,6 +1,7 @@
 import { type Auth, type AuthConfig, createAuth } from './auth/betterAuth.js';
 import { BetterAuthAuthenticator, type DashboardAuthenticator } from './auth/dashboardAuth.js';
 import { type BillingConfig, BillingService } from './billing/billingService.js';
+import { type ComposerPolicy, ComposerService } from './composer/composerService.js';
 import type { Database } from './db/database.js';
 import { type NodeVerifier, OrganizationService } from './organizations.js';
 import { type PaymentPolicy, PaymentService } from './payments/paymentService.js';
@@ -30,6 +31,13 @@ export interface ServiceConfig extends PaymentPolicy {
     runTokenPrivateKey?: string;
     /** Replaces fetching `{baseUrl}/v1/self` when a node is listed, in tests. */
     verifyNode?: NodeVerifier;
+    /** Rates and the per-turn hold for the dashboard's Composer. */
+    composer?: ComposerPolicy;
+    /**
+     * Shared with the dashboard's server, which sends it with the Composer turns it holds and completes.
+     * Without it, Composer turns are refused.
+     */
+    dashboardServiceSecret?: string;
 }
 
 export interface Service {
@@ -37,6 +45,8 @@ export interface Service {
     payments: PaymentService;
     clients: ApiClientService;
     runs: RunService;
+    composer: ComposerService;
+    dashboardServiceSecret?: string;
     runTokens?: RunTokenSigner;
     billing?: BillingService;
     payouts?: PayoutService;
@@ -56,6 +66,8 @@ export function createService(db: Database, config: ServiceConfig): Service {
         payments,
         clients,
         runs: new RunService(db, organizations, clients, payments, runTokens),
+        composer: new ComposerService(db, config.composer),
+        dashboardServiceSecret: config.dashboardServiceSecret,
         runTokens,
         dashboardAuthenticator: config.dashboardAuthenticator,
     };

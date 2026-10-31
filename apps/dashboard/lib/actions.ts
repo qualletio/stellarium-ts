@@ -3,6 +3,7 @@
 import { refresh } from 'next/cache';
 import { redirect } from 'next/navigation';
 import * as api from './api';
+import { reachableNodeUrl } from './composer/catalog';
 
 /** What a form's action reports back. Undefined until it has run. */
 export type ActionState = {
@@ -137,4 +138,60 @@ export async function revokeClientAction(_state: ActionState, formData: FormData
   if ('error' in result) return result;
   refresh();
   return undefined;
+}
+
+/** What a node answered for a script the Composer proposed. */
+export type ScriptOutcome =
+  | { ok: true; kind: 'run'; returnValue: unknown; tokens: number }
+  | { ok: true; kind: 'deploy'; contract: { path: string; name: string; version: string; feeMicroUsd: number } }
+  | { ok: false; error: string };
+
+/** POSTs `body` to the API client's node with a fresh run token, which the operator issues for admins. */
+async function callNode(clientId: string, path: '/v1/run' | '/v1/contracts', body: object): Promise<{ status: number; json: Record<string, unknown> } | { error: string }> {
+  const issued = await attempt(() => api.issueRunToken(clientId));
+  if ('error' in issued) return issued;
+  if (!issued.value.nodeBaseUrl) return { error: 'The API client\'s node has not reported its URL.' };
+  let response: Response;
+  try {
+    response = await fetch(`${reachableNodeUrl(issued.value.nodeBaseUrl)}${path}`, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { Authorization: `Bearer ${issued.value.access_token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return { error: 'The node could not be reached.' };
+  }
+  const json = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  return { status: response.status, json };
+}
+
+function nodeError(status: number, json: Record<string, unknown>): string {
+  const error = typeof json.error === 'string' ? json.error : `The node answered ${status}`;
+  return typeof json.details === 'string' ? `${error}: ${json.details}` : error;
+}
+
+/** Runs a request script on the API client's node, billed like any of the client's runs. */
+export async function runScriptAction(clientId: string, source: string): Promise<ScriptOutcome> {
+  const result = await callNode(clientId, '/v1/run', { source });
+  if ('error' in result) return { ok: false, error: result.error };
+  if (result.status !== 200) return { ok: false, error: nodeError(result.status, result.json) };
+  refresh();
+  const usage = result.json.usage as { tokens?: number } | undefined;
+  return { ok: true, kind: 'run', returnValue: result.json.returnValue ?? null, tokens: usage?.tokens ?? 0 };
+}
+
+/** Deploys a contract to the API client's node, owned by the organization. Another organization's node may charge a deploy fee. */
+export async function deployContractAction(clientId: string, source: string, description: string): Promise<ScriptOutcome> {
+  const result = await callNode(clientId, '/v1/contracts', { source, ...(description && { description: description.slice(0, 1024) }) });
+  if ('error' in result) return { ok: false, error: result.error };
+  if (result.status !== 201) return { ok: false, error: nodeError(result.status, result.json) };
+  refresh();
+  return { ok: true, kind: 'deploy', contract: result.json as { path: string; name: string; version: string; feeMicroUsd: number } };
+}
+
+export async function deleteConversationAction(_state: ActionState, formData: FormData): Promise<ActionState> {
+  const result = await attempt(() => api.deleteComposerConversation(String(formData.get('id'))));
+  if ('error' in result) return result;
+  redirect('/composer');
 }

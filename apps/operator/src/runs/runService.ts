@@ -34,8 +34,11 @@ export interface ContractRunAuthorizationRequest {
     source: string;
 }
 
-/** A contract call by the node's own organization isn't billed, and gets no run. */
-export type ContractRunAuthorization = RunAuthorization | { status: 'free' };
+/**
+ * A contract call by the node's own organization isn't billed, and gets no run. Either way the node learns
+ * the paying organization, which the contract sees as `caller.org`.
+ */
+export type ContractRunAuthorization = (RunAuthorization | { status: 'free' }) & { payerOrganizationId: string };
 export type RunCaptureResult = { status: 'captured', amountMicroUsd: number } | { status: 'released' };
 
 /** Micro-USD for `tokens` script tokens at `price` per million, rounded up. */
@@ -213,7 +216,7 @@ export class RunService {
         }
         const payerOrganizationId = parent ? parent.payerOrganizationId : signer.organizationId;
         if (payerOrganizationId === node.organizationId) {
-            return { status: 'free' };
+            return { status: 'free', payerOrganizationId };
         }
         if (!node.listed) {
             throw new OperationError(403, 'Node is not listed');
@@ -239,7 +242,7 @@ export class RunService {
                 if (existing) {
                     // A retried call with the same voucher gets the same hold.
                     if (existing.kind === 'contract' && existing.nodePublicKey === nodePublicKey && existing.status === 'held') {
-                        return { status: 'held' as const, heldMicroUsd: existing.holdMicroUsd, maxTokens: existing.maxTokens, tokenBudgetMicroUsd: existing.tokenBudgetMicroUsd };
+                        return { status: 'held' as const, heldMicroUsd: existing.holdMicroUsd, maxTokens: existing.maxTokens, tokenBudgetMicroUsd: existing.tokenBudgetMicroUsd, payerOrganizationId };
                     }
                     throw new OperationError(409, 'Voucher has already been used');
                 }
@@ -278,7 +281,7 @@ export class RunService {
                     tokenBudgetMicroUsd: tokenBudget,
                     expiresAt: new Date(Math.max(expiresAt, Date.now() + RUN_LIFETIME_MS)),
                 });
-                return { status: 'held' as const, heldMicroUsd: hold, maxTokens: contractTokens, tokenBudgetMicroUsd: tokenBudget };
+                return { status: 'held' as const, heldMicroUsd: hold, maxTokens: contractTokens, tokenBudgetMicroUsd: tokenBudget, payerOrganizationId };
             });
         } catch (error) {
             // Another node's run used the same id.

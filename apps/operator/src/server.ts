@@ -9,6 +9,7 @@ import Fastify from 'fastify';
 import type { AuthConfig } from './auth/betterAuth.js';
 import { LogMailer, ResendMailer } from './auth/email.js';
 import { DEFAULT_MAXIMUM_TOP_UP_CENTS, DEFAULT_MINIMUM_TOP_UP_CENTS } from './billing/billingService.js';
+import { DEFAULT_COMPOSER_POLICY } from './composer/composerService.js';
 import { DEFAULT_PLATFORM_FEE_BPS } from './payments/paymentService.js';
 import { DEFAULT_PAYOUT_POLICY } from './payouts/payoutService.js';
 import routes from './routes/index.js';
@@ -97,7 +98,18 @@ fastify.log.info('Applied database migrations');
 // API clients' run tokens are signed with this key, and nodes verify them against /v1/.well-known/jwks.json.
 const runTokenPrivateKey = process.env.RUN_TOKEN_PRIVATE_KEY || undefined;
 if (!runTokenPrivateKey) fastify.log.warn('RUN_TOKEN_PRIVATE_KEY is not set: API clients can\'t get run tokens');
-const service = createService(db, { platformFeeBps, stripe, auth, runTokenPrivateKey });
+// The dashboard's server sends this with the Composer turns it charges for.
+const dashboardServiceSecret = process.env.DASHBOARD_SERVICE_SECRET || undefined;
+if (!dashboardServiceSecret) fastify.log.warn('DASHBOARD_SERVICE_SECRET is not set: the dashboard\'s Composer is disabled');
+const composer = {
+  rates: {
+    inputMicroUsdPerMillionTokens: integer('COMPOSER_INPUT_MICRO_USD_PER_MILLION_TOKENS', DEFAULT_COMPOSER_POLICY.rates.inputMicroUsdPerMillionTokens, 0),
+    cacheReadMicroUsdPerMillionTokens: integer('COMPOSER_CACHE_READ_MICRO_USD_PER_MILLION_TOKENS', DEFAULT_COMPOSER_POLICY.rates.cacheReadMicroUsdPerMillionTokens, 0),
+    outputMicroUsdPerMillionTokens: integer('COMPOSER_OUTPUT_MICRO_USD_PER_MILLION_TOKENS', DEFAULT_COMPOSER_POLICY.rates.outputMicroUsdPerMillionTokens, 0),
+  },
+  turnHoldMicroUsd: integer('COMPOSER_TURN_HOLD_MICRO_USD', DEFAULT_COMPOSER_POLICY.turnHoldMicroUsd, 1),
+};
+const service = createService(db, { platformFeeBps, stripe, auth, runTokenPrivateKey, composer, dashboardServiceSecret });
 
 // Applies to every operator route. Limits are per client IP.
 await fastify.register(rateLimit, {
@@ -119,6 +131,8 @@ const maintenanceTimer = setInterval(async () => {
     if (released > 0) fastify.log.info({ released }, 'Released expired holds');
     const releasedRuns = await service.runs.releaseExpiredRuns();
     if (releasedRuns > 0) fastify.log.info({ releasedRuns }, 'Released expired runs');
+    const releasedTurns = await service.composer.releaseExpired();
+    if (releasedTurns > 0) fastify.log.info({ releasedTurns }, 'Released expired Composer turns');
     if (service.payouts) {
       const { stale, ...retried } = await service.payouts.reconcilePending();
       if (retried.paid + retried.failed > 0) fastify.log.info(retried, 'Retried pending payouts');

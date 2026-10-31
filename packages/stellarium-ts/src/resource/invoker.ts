@@ -164,6 +164,14 @@ export interface RunContext {
     runId: string;
 }
 
+/** Who a contract is running for, which it reads as the built-in `caller`. */
+export interface CallerIdentity {
+    /** The organization paying for the call, or null when that isn't known (a node not enrolled in one). */
+    org: string | null;
+    /** The public key of the node that made the call. */
+    node: string;
+}
+
 /** The script, request or contract, that calls are made from. */
 export interface ScriptContext {
     /** A billed run's id: the run's hold pays the script's paid calls. */
@@ -172,6 +180,10 @@ export interface ScriptContext {
     jwt?: unknown;
     /** How many contracts deep the script is: 0 for a request script. */
     depth?: number;
+    /** Who the script runs for. Contracts it calls on this node see it as `caller`. */
+    caller?: CallerIdentity;
+    /** The contracts (`path.Name`) this script runs inside on this node, outermost first. */
+    contracts?: string[];
 }
 
 /** Contracts may call each other, so each call goes one deeper, and a call past this depth fails. */

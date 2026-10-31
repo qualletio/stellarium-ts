@@ -18,6 +18,7 @@ const GROUPS = [
       { href: '/nodes', label: 'Nodes' },
       { href: '/explore', label: 'Explore' },
       { href: '/clients', label: 'API clients' },
+      { href: '/composer', label: 'Composer' },
     ],
   },
   {

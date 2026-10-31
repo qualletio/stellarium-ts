@@ -321,7 +321,7 @@ describe('RunService', () => {
         test('holds up to maxAmount on the signer\'s organization, and charges the tokens at the node\'s price', async () => {
             const voucher = contractVoucher();
 
-            expect(await authorizeContract(voucher)).toEqual({ status: 'held', heldMicroUsd: 20_000, maxTokens: 4, tokenBudgetMicroUsd: 1_000 });
+            expect(await authorizeContract(voucher)).toEqual({ status: 'held', heldMicroUsd: 20_000, maxTokens: 4, tokenBudgetMicroUsd: 1_000, payerOrganizationId: PAYER_ORGANIZATION });
             expect(await run(voucher.invocationId)).toMatchObject({ kind: 'contract', clientId: null, parentRunId: null, payerOrganizationId: PAYER_ORGANIZATION });
             expect(await balances(PAYER_ORGANIZATION)).toMatchObject({ held: 20_000 });
             // A retried call with the same voucher finds the same run.
@@ -349,7 +349,7 @@ describe('RunService', () => {
         test('is free for the node\'s own organization, without a run', async () => {
             const voucher = contractVoucher({ keys: provider });
 
-            expect(await authorizeContract(voucher)).toEqual({ status: 'free' });
+            expect(await authorizeContract(voucher)).toEqual({ status: 'free', payerOrganizationId: PROVIDER_ORGANIZATION });
             expect(await db.select().from(runsTable)).toEqual([]);
         });
 
@@ -361,7 +361,7 @@ describe('RunService', () => {
             const voucher = contractVoucher({ keys: provider, runId: parent.runId, recipientOrganizationId: DOWNSTREAM_ORGANIZATION });
 
             // At most the parent's hold less its own token budget.
-            expect(await authorizeContract(voucher, downstream)).toMatchObject({ status: 'held', heldMicroUsd: 20_000 });
+            expect(await authorizeContract(voucher, downstream)).toMatchObject({ status: 'held', heldMicroUsd: 20_000, payerOrganizationId: PAYER_ORGANIZATION });
             expect(await run(parent.runId)).toMatchObject({ heldMicroUsd: 30_000 });
             expect(await run(voucher.invocationId)).toMatchObject({ payerOrganizationId: PAYER_ORGANIZATION, parentRunId: (await run(parent.runId)).id });
 

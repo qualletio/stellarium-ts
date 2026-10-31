@@ -3,6 +3,7 @@ import { OperationError } from '../errors.js';
 import type { Service } from '../service.js';
 import { StripeRequestError } from '../stripe/gateway.js';
 import authRoutes from './auth.js';
+import composerRoutes from './composer.js';
 import dashboardRoutes from './dashboard.js';
 import nodeRoutes from './nodes.js';
 import oauthRoutes from './oauth.js';
@@ -45,6 +46,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async function (fastify, { serv
     }
     if (service.dashboardAuthenticator) {
         await fastify.register(dashboardRoutes, { service, authenticator: service.dashboardAuthenticator });
+        await fastify.register(composerRoutes, { service, authenticator: service.dashboardAuthenticator });
     }
     if (service.stripe && service.webhooks) {
         const { gateway, webhookSecret, connectWebhookSecret } = service.stripe;

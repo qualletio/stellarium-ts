@@ -222,6 +222,22 @@ export async function createTables(db: NodeDatabase) {
             PRIMARY KEY (path, name, version)
         );
 
+        -- The state variables of the contracts deployed to this node, kept across versions. scope_key is ''
+        -- for a variable's shared copy, and 's:<string>' or 'i:<integer>' for a scoped one. value is the
+        -- variable's encoded JSON, and version counts its writes, so a call can't save over a newer copy.
+        CREATE TABLE IF NOT EXISTS contract_state (
+            path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            var_name TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            type TEXT NOT NULL,
+            version ${t.bigint} NOT NULL,
+            updated_at TEXT NOT NULL,
+
+            PRIMARY KEY (path, name, var_name, scope_key)
+        );
+
         -- Keys an admin blocked from calling this node or getting grants from it.
         CREATE TABLE IF NOT EXISTS blocked_caller (
             public_key TEXT PRIMARY KEY,

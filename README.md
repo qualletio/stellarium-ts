@@ -88,6 +88,7 @@ await node.start(fastify, {
 | `contractCostLimitMicroUsd` | `CONTRACT_COST_LIMIT_MICRO_USD`, then `costLimitMicroUsd` | Most one call to a [contract](#contracts) on another node may cost, with the paid calls it makes (its voucher's `maxAmount`) |
 | `contractDeployFeeMicroUsd` | `CONTRACT_DEPLOY_FEE_MICRO_USD`, then `0` | What another organization pays to deploy a [contract](#contracts) to this node |
 | `maxContractSourceBytes` | `MAX_CONTRACT_SOURCE_BYTES`, then `65536` | Largest contract this node accepts |
+| `maxContractStateBytes` | `MAX_CONTRACT_STATE_BYTES`, then `65536` | Most one contract's [state](#contract-state) may hold in one scope |
 | `databasePath`      | `DATABASE_PATH`, then `./requestscript.db` | SQLite file. `:memory:` keeps everything in memory |
 | `databaseUrl`       | `DATABASE_URL`                      | A `postgres://` or `postgresql://` URL. When set, the node uses [Postgres](#postgres) instead of SQLite, and `databasePath` must not be set |
 | `databaseSchema`    | `DATABASE_SCHEMA`                   | Postgres schema for the node's tables, created if missing, so several nodes can share one database |
@@ -108,6 +109,7 @@ Importing `StellariumNode` loads [dotenv](https://github.com/motdotla/dotenv), s
 | `INFERENCE_COST_LIMIT_MICRO_USD` | Most this node signs for in one remote inference call, in micro-USD. Defaults to the cost limit.                                                                                    |
 | `CONTRACT_COST_LIMIT_MICRO_USD` | Most one call to a contract on another node may cost, with the paid calls it makes, in micro-USD. Defaults to the cost limit.                                                       |
 | `CONTRACT_DEPLOY_FEE_MICRO_USD` | What another organization pays to deploy a contract to this node, in micro-USD. Defaults to `0`.                                                                                     |
+| `MAX_CONTRACT_STATE_BYTES` | Most one contract's state may hold in one scope, in bytes. Defaults to 64 KiB.                                                                                                         |
 | `MAX_CONTRACT_SOURCE_BYTES` | Largest contract this node accepts. Defaults to 64 KiB.                                                                                                                                  |
 | `DATABASE_PATH`       | SQLite file the node keeps peers, learned resources, grants and contracts in. Defaults to `./requestscript.db`. In a container, point it at a persistent volume, for example `/data/requestscript.db`. |
 | `DATABASE_URL`        | A `postgres://` or `postgresql://` URL. When set, the node keeps its data in Postgres instead of SQLite. Don't set `DATABASE_PATH` too.                                                     |
@@ -165,7 +167,8 @@ Routes are mounted at `/v1`.
 | `POST /v1/run/resource/estimate`              | One function call         | Called by peers to price a call to a paid inference function hosted here: `{ "inputTokens", "maxAmount" }`                     |
 | `POST /v1/contracts`                          | `{ "source", "description"? }` | Deploy a version of a [contract](#contracts). Requires the API key or a run token. Responds `201` with `{ "path", "name", "version", "feeMicroUsd" }` |
 | `GET /v1/contracts`                           | —                         | One page of every contract version on this node, with its source: `{ "contracts", "nextOffset" }`                              |
-| `DELETE /v1/contracts/:ref`                   | —                         | Delete `path.Name@version`, or every version of `path.Name`. Requires the API key, or a run token from the owner's organization |
+| `DELETE /v1/contracts/:ref`                   | —                         | Delete `path.Name@version`, or every version of `path.Name` and its state. Requires the API key, or a run token from the owner's organization |
+| `GET /v1/contracts/:ref/state`                | —                         | A contract's [state](#contract-state), every variable and scope: `{ "variables": [{ "name", "scope", "value", "updatedAt" }] }`. Requires the API key, or a run token from the owner's organization |
 | `POST /v1/grants/request`                     | Signed grant request      | Ask for a new grant, decided by the node's `approveGrant` hook: `{ "grants" }`                                                 |
 | `POST /v1/grants/renew`                       | Signed renewal request    | Re-issue a grant this node issued to its audience: `{ "grants" }`                                                              |
 | `PUT /v1/admin/revoked-grants/:grantId`       | —                         | Revoke a grant this node issued, or another issuer's grant with `?issuer=<key>`. Requires the API key                          |
@@ -336,6 +339,28 @@ Calls are charged for the [script tokens](https://github.com/qualletio/requestsc
 A contract that fails, for example by dividing by zero, is reported as the call's `error`, and its tokens are still charged. A call by the node's own organization isn't billed. Contracts may call other contracts, at most 8 deep. Set `contractCostLimitMicroUsd` above the cost of the paid calls the contracts you call make, since the default, `costLimitMicroUsd`, covers a single call. A contract reads the calling run's token as `jwt` when it's called from a script on the same node, and `null` otherwise.
 
 The node learns its price from the operator at startup, and checks it again every five minutes. When it changes, the node announces its contracts again.
+
+#### Contract state
+
+A contract keeps values between calls in **state variables** (requestscript 1.5.0 or later), declared with `var state` at the top level of its body. Only the contract's own code can change them:
+
+```
+contract com.example.Visits(page: string): int32 {
+    var state total: int32 = 0
+    var state(caller.org) mine: int32 = 0
+
+    total = total + 1
+    mine = mine + 1
+    return mine
+}
+```
+
+- `var state name = value` is one copy shared by every caller. `var state(scope) name = value` keeps a copy per value of `scope`, any expression that evaluates to a string or an integer. The initializer runs the first time a copy is used.
+- **`caller`** is a built-in every contract reads: `{ org, node }`, the organization paying for the call and the node that made it. For a call from another node, `org` is the payer the operator authorized and `node` is the key that signed the voucher. For a script on this node, `org` is the run token's organization, or this node's own. So `var state(caller.org) …` gives each paying organization its own copy, which no one else can reach.
+- **State is saved only if the call succeeds.** A call that fails, or would grow a scope past `maxContractStateBytes`, saves nothing, and its tokens are still charged.
+- **Calls to a stateful contract run one at a time on its node.** A call waits at most 30 seconds for earlier ones, which also breaks a cycle of calls between nodes. A contract that calls itself, directly or through other contracts, fails its outer call rather than lose the inner call's update: the call that saves second finds the state changed.
+- **State belongs to the contract, not a version**, so a new version keeps it. A stored value is converted to the new version's declared type, and a value that doesn't fit fails the call. Deleting every version deletes the state.
+- **State is private.** A contract shares it through what it returns. Its owner and the node's admin can read all of it with `GET /v1/contracts/:ref/state`.
 
 ### Restricted functions and grants
 
@@ -611,6 +636,22 @@ docker compose up -d --build local-caller-node
 Each node presents its token at startup and joins its organization. After that it needs only its signing key, so the used token can stay in its `.env`. A provider that isn't enrolled refuses to start and says how to enroll it.
 
 The provider's paid calls are refused until its organization can receive payouts ("Organization ... can't receive payouts yet"), and the caller has no credit yet. Part 3 sets up both.
+
+##### The Composer
+
+The dashboard's **Composer** is a chat with Claude that writes RequestScript for the resources one node knows, checks each script against that node's catalog, and proposes it. An admin runs a proposed request script, or deploys a proposed contract, with one click. The dashboard gets a short-lived run token for one of the organization's API clients, so the run is billed like any of that client's runs. Each message is charged to the organization's balance for the Claude tokens it used, at the operator's `COMPOSER_*` rates (Claude Opus 5.5's list prices by default). The operator holds `COMPOSER_TURN_HOLD_MICRO_USD` ($0.50 by default) while a message is answered. Conversations are saved per user.
+
+Add to `apps/dashboard/.env`:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+# Matches the operator's DASHBOARD_SERVICE_SECRET in compose.yaml.
+DASHBOARD_SERVICE_SECRET=local-only-dashboard-secret
+# The compose nodes report container hostnames. The dashboard runs on the host, so it reaches them on localhost.
+NODE_URL_REWRITES=http://local-resource-node:3002=http://127.0.0.1:3002,http://local-caller-node:3003=http://127.0.0.1:3003
+```
+
+The organization needs credit (part 3), and an API client for a node: on **Explore**, click **Create API client** for "Local resource node". Then open **Composer**, choose the client, and ask for something like "get the temperature in Oslo and Paris and return the warmer city".
 
 #### 3. Stripe end to end
 

@@ -11,6 +11,7 @@ import { GrantRepository } from "./grant/repository.js";
 import { type ApproveGrant, GrantService } from "./grant/service.js";
 import { ContractRepository } from "./contract/repository.js";
 import { ContractService } from "./contract/service.js";
+import { ContractStateRepository } from "./contract/state.js";
 
 /** Settings a node runs with. `StellariumNode.start` fills these from its options, then the environment. */
 export interface NodeConfig {
@@ -39,6 +40,8 @@ export interface NodeConfig {
     contractDeployFeeMicroUsd?: number;
     /** Largest contract source this node accepts. Defaults to 64 KiB. */
     maxContractSourceBytes?: number;
+    /** Most one contract's state may hold in one scope, its variables' encoded values together. Defaults to 64 KiB. */
+    maxContractStateBytes?: number;
     /**
      * This node's listed price per million script tokens, which its contracts are charged at. `StellariumNode.start`
      * learns it from the operator.
@@ -62,6 +65,7 @@ export interface Service {
     grantService: GrantService;
     contractRepository: ContractRepository;
     contractService: ContractService;
+    contractStateRepository: ContractStateRepository;
     /** Verifies the run tokens `POST /v1/run` accepts. Set when the node has an operator URL. */
     runTokenVerifier?: RunTokenVerifier;
 }
@@ -93,7 +97,8 @@ export function createService(db: NodeDatabase, resources: StellariumResource[],
         organizationId: config.organizationId,
     });
 
-    const contractService = new ContractService(contractRepository, resourceRepository, resourceResolver, resourceInvoker, operatorClient, config);
+    const contractStateRepository = new ContractStateRepository(db);
+    const contractService = new ContractService(contractRepository, contractStateRepository, resourceRepository, resourceResolver, resourceInvoker, operatorClient, config);
     resourceInvoker.contracts = { costLimitMicroUsd: config.contractCostLimitMicroUsd ?? config.costLimitMicroUsd, host: contractService };
 
     return {
@@ -106,6 +111,7 @@ export function createService(db: NodeDatabase, resources: StellariumResource[],
         grantService,
         contractRepository,
         contractService,
+        contractStateRepository,
         runTokenVerifier: config.operatorUrl ? new RunTokenVerifier(config.operatorUrl, config.publicKey, options.runTokenKeys) : undefined,
     };
 }
