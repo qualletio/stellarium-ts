@@ -637,6 +637,22 @@ Each node presents its token at startup and joins its organization. After that i
 
 The provider's paid calls are refused until its organization can receive payouts ("Organization ... can't receive payouts yet"), and the caller has no credit yet. Part 3 sets up both.
 
+##### The Composer
+
+The dashboard's **Composer** is a chat with Claude that writes RequestScript for the resources one node knows, checks each script against that node's catalog, and proposes it. An admin runs a proposed request script, or deploys a proposed contract, with one click. The dashboard gets a short-lived run token for one of the organization's API clients, so the run is billed like any of that client's runs. Each message is charged to the organization's balance for the Claude tokens it used, at the operator's `COMPOSER_*` rates (Claude Opus 5.5's list prices by default). The operator holds `COMPOSER_TURN_HOLD_MICRO_USD` ($0.50 by default) while a message is answered. Conversations are saved per user.
+
+Add to `apps/dashboard/.env`:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+# Matches the operator's DASHBOARD_SERVICE_SECRET in compose.yaml.
+DASHBOARD_SERVICE_SECRET=local-only-dashboard-secret
+# The compose nodes report container hostnames. The dashboard runs on the host, so it reaches them on localhost.
+NODE_URL_REWRITES=http://local-resource-node:3002=http://127.0.0.1:3002,http://local-caller-node:3003=http://127.0.0.1:3003
+```
+
+The organization needs credit (part 3), and an API client for a node: on **Explore**, click **Create API client** for "Local resource node". Then open **Composer**, choose the client, and ask for something like "get the temperature in Oslo and Paris and return the warmer city".
+
 #### 3. Stripe end to end
 
 In the [Stripe dashboard](https://dashboard.stripe.com), turn on **Test mode**. Then:

@@ -33,6 +33,8 @@ services:
       BETTER_AUTH_SECRET: local-only-better-auth-secret-0123456789
       # Signs API clients' run tokens (an Ed25519 PKCS#8 key, base64url). Local only: production needs its own key.
       RUN_TOKEN_PRIVATE_KEY: MC4CAQAwBQYDK2VwBCIEIF3fP6TT6BvfrSEi_gSWQ0bRJ9iHucuxcV-XRxMeQC7O
+      # Shared with the dashboard's server, which sends it with the Composer turns it charges for. Local only.
+      DASHBOARD_SERVICE_SECRET: local-only-dashboard-secret
       # Stripe keys, RESEND_API_KEY/EMAIL_FROM and GitHub OAuth credentials are optional and come from apps/operator/.env,
       # which the image includes like the nodes' .env files. Setting them here, even empty, would shadow that file.
       # Without RESEND_API_KEY, verification and invitation links are in `docker compose logs operator`.

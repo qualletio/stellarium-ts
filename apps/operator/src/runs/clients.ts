@@ -132,11 +132,33 @@ export class ApiClientService {
      * or, for another organization's client, unlisted.
      */
     async issueToken(clientId: string, clientSecret: string): Promise<{ token: string, expiresIn: number }> {
-        if (!this.tokens) throw new OperationError(503, 'Run tokens are not configured on this operator');
         const client = await this.get(clientId);
         if (!client || client.revokedAt || !secretsEqual(clientSecret, client.secretHash)) {
             throw new OperationError(401, 'Invalid client credentials');
         }
+        return (await this.sign(client)).token;
+    }
+
+    /**
+     * A run token for one of the organization's clients, without its secret, for the dashboard to run a
+     * script for a signed-in admin. The same limits apply as to any of the client's runs. Also returns the
+     * node's base URL.
+     */
+    async issueTokenForOrganization(organizationId: string, clientId: string): Promise<{ token: string, expiresIn: number, nodeBaseUrl: string | null }> {
+        const client = await this.get(clientId);
+        if (!client || client.organizationId !== organizationId) {
+            throw new OperationError(404, 'API client not found');
+        }
+        if (client.revokedAt) {
+            throw new OperationError(409, 'API client has been revoked');
+        }
+        const { token, nodeBaseUrl } = await this.sign(client);
+        return { ...token, nodeBaseUrl };
+    }
+
+    /** Refuses (403) a frozen organization or a node that is revoked or, for another organization's client, unlisted. */
+    private async sign(client: ApiClient): Promise<{ token: { token: string, expiresIn: number }, nodeBaseUrl: string | null }> {
+        if (!this.tokens) throw new OperationError(503, 'Run tokens are not configured on this operator');
         const [row] = await this.db.select({ node: nodesTable, organization: organizationsTable })
             .from(nodesTable)
             .innerJoin(organizationsTable, eq(organizationsTable.id, client.organizationId))
@@ -148,6 +170,7 @@ export class ApiClientService {
         if (row!.node.revokedAt || (row!.node.organizationId !== client.organizationId && !row!.node.listed)) {
             throw new OperationError(403, 'The client\'s node is no longer available');
         }
-        return this.tokens.sign({ clientId: client.id, organizationId: client.organizationId, nodePublicKey: client.nodePublicKey });
+        const token = await this.tokens.sign({ clientId: client.id, organizationId: client.organizationId, nodePublicKey: client.nodePublicKey });
+        return { token, nodeBaseUrl: row!.node.baseUrl };
     }
 }

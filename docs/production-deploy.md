@@ -20,6 +20,8 @@ Do the whole procedure with Stripe in test mode first. The README's [Running Loc
 | `RUN_TOKEN_PRIVATE_KEY` | Operator | Signs API clients' run tokens. An Ed25519 key in the format of a node's `SIGNING_PRIVATE_KEY` (generate one with the README's key script). Changing it invalidates outstanding tokens, which last 15 minutes. Nodes refetch the new public key when they see an unknown key id. |
 | `RESEND_API_KEY` | Operator | Sends the dashboard's emails. |
 | `GITHUB_CLIENT_SECRET` | Operator | Optional, for GitHub sign-in. |
+| `DASHBOARD_SERVICE_SECRET` | Operator and dashboard | The same value on both. The dashboard's server sends it with the Composer's charges, which the operator accepts only with it. Generate one with `openssl rand -base64 32`. Without it, the Composer is off. |
+| `ANTHROPIC_API_KEY` | Dashboard | The Composer's Claude calls. Organizations are charged for their tokens at the operator's `COMPOSER_*` rates. |
 | `DATABASE_URL` | Operator | Contains the database password. |
 
 Keep them in your platform's secrets manager, not in files.
@@ -75,6 +77,9 @@ Configure it with environment variables:
 | `MIN_TOP_UP_CENTS`, `MAX_TOP_UP_CENTS` | Optional. Default 1000 ($10) and 100000 ($1,000). |
 | `PAYOUT_HOLD_DAYS`, `PAYOUT_INTERVAL_DAYS`, `PAYOUT_MIN_MICRO_USD` | Optional. Default 7, 7 and 10000000 ($10). Never use the test-mode overrides from the local guide. |
 | `RATE_LIMIT_MAX`, `RATE_LIMIT_TIME_WINDOW` | Optional. Per-IP limit on every route but the webhooks. Default 100 per minute. |
+| `DASHBOARD_SERVICE_SECRET` | From step 1. Without it, the dashboard's Composer is off. |
+| `COMPOSER_INPUT_MICRO_USD_PER_MILLION_TOKENS`, `COMPOSER_CACHE_READ_MICRO_USD_PER_MILLION_TOKENS`, `COMPOSER_OUTPUT_MICRO_USD_PER_MILLION_TOKENS` | Optional. What organizations pay per million Claude tokens in the Composer; cache writes are charged as input. Default 4000000, 400000 and 20000000, Claude Opus 5.5's list prices. Raise them to earn a margin. |
+| `COMPOSER_TURN_HOLD_MICRO_USD` | Optional. Held for each Composer message, and the most one can cost. Default 500000 ($0.50). |
 
 Leave `SEED_DEV` unset. The seed creates development organizations with free credit, and the image's entrypoint runs it only when `SEED_DEV=1`.
 
@@ -110,8 +115,9 @@ Deploy `apps/dashboard` as a Next.js app on the domain `platform.stellarium.sh`,
 | --- | --- |
 | `OPERATOR_URL` | `https://<operator host>/v1`. Read on the server only. |
 | `GITHUB_SIGN_IN` | `true` if the operator has GitHub credentials. |
+| `ANTHROPIC_API_KEY`, `DASHBOARD_SERVICE_SECRET` | From step 1, for the Composer. |
 
-The dashboard forwards `/api/auth/*` to the operator, so it holds no auth secrets of its own.
+The dashboard forwards `/api/auth/*` to the operator, so it holds no auth secrets of its own. The Composer's two secrets are the exception. The dashboard's server calls nodes directly to read their resources and to run and deploy scripts, so it needs outbound access to the nodes' public URLs. Those URLs come from the nodes: if the dashboard can reach internal services, restrict its egress to public addresses, as for the operator.
 
 ## 8. Smoke test
 

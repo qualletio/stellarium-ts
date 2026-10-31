@@ -18,7 +18,7 @@ export const accounts = {
     payouts: 'platform:payouts',
 } as const;
 
-export type LedgerKind = 'capture' | 'run_capture' | 'promotion' | 'top_up' | 'refund' | 'dispute' | 'dispute_won' | 'payout' | 'payout_returned';
+export type LedgerKind = 'capture' | 'run_capture' | 'promotion' | 'top_up' | 'refund' | 'dispute' | 'dispute_won' | 'payout' | 'payout_returned' | 'composer_capture';
 
 /** What a ledger transaction records. */
 export interface LedgerReference {
@@ -26,6 +26,7 @@ export interface LedgerReference {
     runId?: number;
     topUpId?: number;
     payoutId?: number;
+    composerChargeId?: string;
     stripeObjectId?: string;
 }
 

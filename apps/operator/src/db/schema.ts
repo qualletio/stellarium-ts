@@ -1,4 +1,4 @@
-import { type AnyPgColumn, bigint, boolean, index, integer, pgTable, text, timestamp, unique, uuid, varchar } from "drizzle-orm/pg-core";
+import { type AnyPgColumn, bigint, boolean, index, integer, jsonb, pgTable, text, timestamp, unique, uuid, varchar } from "drizzle-orm/pg-core";
 
 // Amounts are micro-USD (1 USD = 1,000,000). Integer columns would overflow above ~$2,147.
 // Drizzle supplies timestamps in UTC. now() would use the session's time zone, which drizzle reads back as UTC.
@@ -184,6 +184,63 @@ export const receiptsTable = pgTable("receipts", {
   index("receipts_runId_index").on(table.runId),
 ]);
 
+export const COMPOSER_ROLES = ['user', 'assistant'] as const;
+
+/** A dashboard user's Composer chat, in one organization. Only that user can read it. */
+export const composerConversationsTable = pgTable("composer_conversations", {
+  id: uuid().primaryKey().$defaultFn(() => crypto.randomUUID()),
+  organizationId: varchar({ length: 64 }).notNull().references(() => organizationsTable.id),
+  // The Better Auth user who owns it.
+  userId: text().notNull(),
+  title: varchar({ length: 255 }).notNull(),
+  createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
+  updatedAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
+}, (table) => [
+  index("composer_conversations_userId_organizationId_updatedAt_index").on(table.userId, table.organizationId, table.updatedAt),
+]);
+
+/**
+ * One message of a Composer conversation, as the Claude Messages API takes it. Append-only: an assistant
+ * message's thinking blocks are only valid in the history that produced them.
+ */
+export const composerMessagesTable = pgTable("composer_messages", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  conversationId: uuid().notNull().references(() => composerConversationsTable.id, { onDelete: 'cascade' }),
+  role: varchar({ length: 16, enum: COMPOSER_ROLES }).notNull(),
+  // The message's content blocks.
+  content: jsonb().notNull(),
+  createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
+}, (table) => [
+  index("composer_messages_conversationId_index").on(table.conversationId),
+]);
+
+/**
+ * One Composer turn's charge, from its hold to its capture or release. The organization pays the platform
+ * for the Claude tokens the turn used, at the operator's Composer rates, at most the hold.
+ */
+export const composerChargesTable = pgTable("composer_charges", {
+  id: uuid().primaryKey().$defaultFn(() => crypto.randomUUID()),
+  organizationId: varchar({ length: 64 }).notNull().references(() => organizationsTable.id),
+  userId: text().notNull(),
+  // Null once its conversation is deleted. The charge stays, since the ledger references it.
+  conversationId: uuid().references(() => composerConversationsTable.id, { onDelete: 'set null' }),
+  status: varchar({ length: 16, enum: RECEIPT_STATUSES }).notNull().default('held'),
+  holdMicroUsd: bigint({ mode: 'number' }).notNull(),
+  // The usage the dashboard reported, and what it was charged. Null until captured.
+  inputTokens: bigint({ mode: 'number' }),
+  cacheWriteTokens: bigint({ mode: 'number' }),
+  cacheReadTokens: bigint({ mode: 'number' }),
+  outputTokens: bigint({ mode: 'number' }),
+  amountMicroUsd: bigint({ mode: 'number' }),
+  expiresAt: timestamp().notNull(),
+  capturedAt: timestamp(),
+  releasedAt: timestamp(),
+  createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
+}, (table) => [
+  index("composer_charges_organizationId_index").on(table.organizationId),
+  index("composer_charges_status_expiresAt_index").on(table.status, table.expiresAt),
+]);
+
 /**
  * Append-only double-entry ledger. The entries of one `transactionId` sum to zero. Accounts are
  * `org:<id>:balance`, `org:<id>:payable`, or a `platform:` account (see ledger.ts).
@@ -199,6 +256,7 @@ export const ledgerEntriesTable = pgTable("ledger_entries", {
   runId: integer().references(() => runsTable.id),
   topUpId: integer().references(() => topUpsTable.id),
   payoutId: integer().references(() => payoutsTable.id),
+  composerChargeId: uuid().references(() => composerChargesTable.id),
   // The Stripe object behind the entry, such as a refund's charge or a dispute.
   stripeObjectId: varchar({ length: 255 }),
   createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),

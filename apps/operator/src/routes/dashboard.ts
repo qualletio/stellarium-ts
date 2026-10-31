@@ -124,6 +124,12 @@ const dashboardRoutes: FastifyPluginAsync<RouteOptions & { authenticator: Dashbo
         return { client };
     });
 
+    // For the dashboard to run a script or deploy a contract with the client, for a signed-in admin.
+    fastify.post<{ Params: { id: string } }>('/org/clients/:id/token', { preHandler: requireAdmin }, async (request) => {
+        const { token, expiresIn, nodeBaseUrl } = await service.clients.issueTokenForOrganization(organization(request).id, request.params.id);
+        return { access_token: token, token_type: 'Bearer', expires_in: expiresIn, nodeBaseUrl };
+    });
+
     fastify.delete<{ Params: { id: string } }>('/org/clients/:id', { preHandler: requireAdmin }, async (request) => {
         await service.clients.revoke(organization(request).id, request.params.id);
         return { revoked: true };

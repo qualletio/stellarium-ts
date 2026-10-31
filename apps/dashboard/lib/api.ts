@@ -191,12 +191,15 @@ export class OperatorError extends Error {
   }
 }
 
-/** Calls the operator as the signed-in user, acting on their active organization. Balances change constantly, so nothing is cached. */
-async function request<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
+/**
+ * Calls the operator as the signed-in user, acting on their active organization. Balances change constantly, so nothing is cached.
+ * `extraHeaders` carries the dashboard server's secret, for the calls that need it.
+ */
+async function request<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown, extraHeaders: Record<string, string> = {}): Promise<T> {
   const response = await fetch(`${OPERATOR_URL}${path}`, {
     method,
     cache: 'no-store',
-    headers: { ...(await cookieHeader()), ...(body !== undefined && { 'Content-Type': 'application/json' }) },
+    headers: { ...(await cookieHeader()), ...extraHeaders, ...(body !== undefined && { 'Content-Type': 'application/json' }) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   // The session ended between the layout's check and this call.
@@ -270,3 +273,54 @@ export const revokeClient = (id: string) => request<{ revoked: boolean }>('DELET
 
 export const listRuns = (as: 'payer' | 'provider', before?: number) =>
   request<{ runs: Run[] }>('GET', `/org/runs?as=${as}&${page(before)}`).then((r) => r.runs);
+
+/** A short-lived run token for one of the organization's API clients, for running or deploying a script. Admins only. */
+export const issueRunToken = (clientId: string) =>
+  request<{ access_token: string; expires_in: number; nodeBaseUrl: string | null }>('POST', `/org/clients/${encodeURIComponent(clientId)}/token`);
+
+export interface ComposerConversation {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A message as the Claude Messages API takes it. */
+export interface ComposerMessage {
+  role: 'user' | 'assistant';
+  content: unknown[];
+}
+
+export const listComposerConversations = () =>
+  request<{ conversations: ComposerConversation[] }>('GET', '/org/composer/conversations').then((r) => r.conversations);
+
+export const getComposerConversation = (id: string) =>
+  request<{ conversation: ComposerConversation; messages: ComposerMessage[] }>('GET', `/org/composer/conversations/${encodeURIComponent(id)}`);
+
+export const deleteComposerConversation = (id: string) => request<{ deleted: boolean }>('DELETE', `/org/composer/conversations/${encodeURIComponent(id)}`);
+
+/**
+ * The header proving a call comes from the dashboard's server. Composer turns move the organization's money on
+ * usage the server reports, so the operator accepts them only with it. Throws 503 when DASHBOARD_SERVICE_SECRET is unset.
+ */
+function dashboardServerHeaders(): Record<string, string> {
+  const secret = process.env.DASHBOARD_SERVICE_SECRET;
+  if (!secret) throw new OperatorError('DASHBOARD_SERVICE_SECRET is not set: the Composer is disabled', 503);
+  return { 'x-stellarium-dashboard-secret': secret };
+}
+
+export const holdComposerTurn = (turn: { conversationId?: string; title: string }) =>
+  request<{ chargeId: string; conversationId: string; holdMicroUsd: number }>('POST', '/org/composer/turns', turn, dashboardServerHeaders());
+
+export interface ComposerUsage {
+  inputTokens: number;
+  cacheWriteTokens: number;
+  cacheReadTokens: number;
+  outputTokens: number;
+}
+
+export const completeComposerTurn = (chargeId: string, turn: { messages: ComposerMessage[]; usage: ComposerUsage }) =>
+  request<{ amountMicroUsd: number }>('POST', `/org/composer/turns/${encodeURIComponent(chargeId)}/complete`, turn, dashboardServerHeaders());
+
+export const releaseComposerTurn = (chargeId: string) =>
+  request<{ released: boolean }>('POST', `/org/composer/turns/${encodeURIComponent(chargeId)}/release`, undefined, dashboardServerHeaders());
