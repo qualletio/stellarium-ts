@@ -255,7 +255,7 @@ A caller attaches a `paymentVoucher` signed with its key, as long as the cost is
 - it has not expired, and has a valid signature, and
 - the operator **authorizes** it, holding the amount on the caller organization's balance.
 
-A paid call without a voucher responds `402`; an invalid voucher responds `400`. If the operator refuses the hold, the function doesn't run and the caller gets the operator's status: `402` for an unenrolled caller or an insufficient balance, `403` for a revoked node or frozen organization, `422` if the caller and provider are the same organization or the provider can't receive payouts yet, and `503` if the operator can't be reached. After the call, the node **captures** the voucher, which charges the caller and credits the provider's organization less a 20% platform fee. If the function returned an error, it **releases** the hold instead. Vouchers sent to free functions are ignored.
+A paid call without a voucher responds `402`; an invalid voucher responds `400`. If the operator refuses the hold, the function doesn't run and the caller gets the operator's status: `402` for an unenrolled caller or an insufficient balance, `403` for a revoked node or frozen organization, `422` if the caller and provider are the same organization or the provider can't receive payouts yet, and `503` if the operator can't be reached. After the call, the node **captures** the voucher, which charges the caller and credits the provider's organization less a 1% platform fee. If the function returned an error, it **releases** the hold instead. Vouchers sent to free functions are ignored.
 
 See [`apps/operator/README.md`](apps/operator/README.md) for the operator's routes, top-ups and payouts, and the [Payments](https://docs.stellarium.sh/concepts/payments) page of the docs for the full flow.
 
@@ -546,7 +546,7 @@ curl -s -X POST http://localhost:3003/v1/run \
 { "returnValue": { "value": 12, "error": null }, "usage": { "tokens": 17 } }
 ```
 
-The provider held $0.01 of the caller's credit before running the function, then captured it. Check the balances in Postgres. The caller has $9.99, and the provider is owed $0.008 after the 20% platform fee:
+The provider held $0.01 of the caller's credit before running the function, then captured it. Check the balances in Postgres. The caller has $9.99, and the provider is owed $0.0099 after the 1% platform fee:
 
 ```sh
 docker compose exec postgres psql -U stellarium -d stellarium \

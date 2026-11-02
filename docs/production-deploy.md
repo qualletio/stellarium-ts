@@ -73,7 +73,7 @@ Configure it with environment variables:
 | `RESEND_API_KEY`, `EMAIL_FROM` | From step 3. `EMAIL_FROM` is an address on the verified domain, such as `Stellarium <no-reply@stellarium.sh>`. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Optional, from step 3. |
 | `DASHBOARD_URL` | `https://platform.stellarium.sh`. The only CORS origin and the only origin Better Auth accepts. Links in emails, and Stripe, send users to pages under it. |
-| `PLATFORM_FEE_BPS` | Optional. The platform's share of each captured payment, in basis points. Defaults to 2000 (20%). |
+| `PLATFORM_FEE_BPS` | Optional. The platform's share of each captured payment, in basis points. Defaults to 100 (1%). |
 | `MIN_TOP_UP_CENTS`, `MAX_TOP_UP_CENTS` | Optional. Default 1000 ($10) and 100000 ($1,000). |
 | `PAYOUT_HOLD_DAYS`, `PAYOUT_INTERVAL_DAYS`, `PAYOUT_MIN_MICRO_USD` | Optional. Default 7, 7 and 10000000 ($10). Never use the test-mode overrides from the local guide. |
 | `RATE_LIMIT_MAX`, `RATE_LIMIT_TIME_WINDOW` | Optional. Per-IP limit on every route but the webhooks. Default 100 per minute. |

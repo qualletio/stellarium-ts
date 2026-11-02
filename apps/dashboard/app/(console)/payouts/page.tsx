@@ -43,7 +43,7 @@ export default async function PayoutsPage({ searchParams }: PageProps<'/payouts'
           <div>
             <h2 className={ui.sectionTitle}>Earnings</h2>
             <p className={ui.description}>
-              Calls to your functions earn their charge less a 20% platform fee. Earnings become payable 7 days after the call, and are paid
+              Calls to your functions earn their charge less a 1% platform fee. Earnings become payable 7 days after the call, and are paid
               weekly once at least $10 is payable. Smaller amounts carry over.
             </p>
           </div>

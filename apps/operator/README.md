@@ -13,7 +13,7 @@ All amounts are integer micro-USD (1 USD = 1,000,000).
 
 - `DATABASE_URL`: PostgreSQL connection string. Migrations in `drizzle/` are applied at startup.
 - `PLATFORM_FEE_BPS`: the platform's share of each captured payment, in basis
-  points. Defaults to 2000 (20%).
+  points. Defaults to 100 (1%).
 - `RATE_LIMIT_MAX` / `RATE_LIMIT_TIME_WINDOW`: per-IP limit on every route;
   defaults to 100 per minute.
 - `MAINTENANCE_INTERVAL_MS`: how often expired holds and runs are released and

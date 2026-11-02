@@ -10,12 +10,12 @@ export const metadata: Metadata = { title: 'Usage' };
 
 const TABS = [
   { as: 'payer', view: 'calls', label: 'Spent', description: 'Paid calls your nodes and API clients\' runs made, charged to your balance.' },
-  { as: 'provider', view: 'calls', label: 'Earned', description: 'Paid calls to your nodes\' functions. You earn each charge less the 20% platform fee.' },
+  { as: 'provider', view: 'calls', label: 'Earned', description: 'Paid calls to your nodes\' functions. You earn each charge less the 1% platform fee.' },
   {
     as: 'payer', view: 'runs', label: 'Runs spent',
     description: 'Scripts your API clients ran on other organizations\' nodes, charged per token executed. Their paid calls are under Spent.',
   },
-  { as: 'provider', view: 'runs', label: 'Runs earned', description: 'Scripts other organizations ran on your listed nodes. You earn each charge less the 20% platform fee.' },
+  { as: 'provider', view: 'runs', label: 'Runs earned', description: 'Scripts other organizations ran on your listed nodes. You earn each charge less the 1% platform fee.' },
 ] as const;
 
 const tabHref = (tab: (typeof TABS)[number]) => `/usage?as=${tab.as}${tab.view === 'runs' ? '&view=runs' : ''}`;

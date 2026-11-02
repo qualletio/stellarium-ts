@@ -92,7 +92,7 @@ export default async function NodesPage() {
               <h2 className={ui.sectionTitle}>Listings</h2>
               <p className={ui.description}>
                 A listed node shows on Explore, and other organizations can create API clients that run scripts on it. They pay your price
-                for each million script tokens their runs execute, plus your paid functions' prices. You earn both less the 20% platform fee.
+                for each million script tokens their runs execute, plus your paid functions' prices. You earn both less the 1% platform fee.
                 Your own API clients always run free. Listing checks that the node&apos;s URL answers with its key.
               </p>
             </div>

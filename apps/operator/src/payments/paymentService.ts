@@ -16,7 +16,7 @@ export interface PaymentPolicy {
     platformFeeBps: number;
 }
 
-export const DEFAULT_PLATFORM_FEE_BPS = 2000;
+export const DEFAULT_PLATFORM_FEE_BPS = 100;
 
 /** A hold outlives its voucher's expiry by this long before it is released, so a slow capture still lands. */
 export const HOLD_GRACE_MS = 1000 * 60 * 10;
