@@ -420,4 +420,69 @@ describe('RunService', () => {
             expect(await rejection(authorizeContract(contractVoucher()))).toMatchObject({ status: 403 });
         });
     });
+    describe('event mandates', () => {
+        /** Four tokens, like CONTRACT. */
+        const CONSUMER = 'contract com.example.OnSum consumes com.example.Summed {\n  var b = a + 2\n}';
+
+        async function mandate(consumer = 'com.example.OnSum') {
+            return (await service.createEventMandate(provider.publicKey, { token: await token(), consumer })).mandateId;
+        }
+
+        const authorizeEvent = async (mandateId: string, runId: string = crypto.randomUUID(), node: NodeKeys = provider) =>
+            ({ runId, result: await service.authorizeEvent(node.publicKey, { mandateId, runId, source: CONSUMER }) });
+
+        test('holds and charges an event run like a run by the mandate\'s client', async () => {
+            const { runId, result } = await authorizeEvent(await mandate());
+
+            expect(result).toEqual({ status: 'held', heldMicroUsd: 50_000, maxTokens: contractMaxTokens(CONSUMER), tokenBudgetMicroUsd: tokenCharge(contractMaxTokens(CONSUMER), PRICE) });
+            expect(await run(runId)).toMatchObject({ kind: 'event', clientId, payerOrganizationId: PAYER_ORGANIZATION, recipientOrganizationId: PROVIDER_ORGANIZATION });
+            expect(await service.capture(provider.publicKey, { runId, tokens: 4 })).toEqual({ status: 'captured', amountMicroUsd: 1_000 });
+            expect(await balances(PAYER_ORGANIZATION)).toEqual({ balance: 99_000, held: 0, payable: 0 });
+            await expectLedgerConsistent();
+        });
+
+        test('keeps one mandate per client and contract, and lists it for the organization', async () => {
+            const first = await mandate();
+            expect(await mandate()).toBe(first);
+            expect(await mandate('com.example.Other')).not.toBe(first);
+            expect((await service.listEventMandates(PAYER_ORGANIZATION)).map(row => row.consumer).sort()).toEqual(['com.example.OnSum', 'com.example.Other']);
+            expect(await service.listEventMandates(PROVIDER_ORGANIZATION)).toEqual([]);
+        });
+
+        test('stops holding once the mandate is revoked, until the contract is deployed again', async () => {
+            const mandateId = await mandate();
+            expect(await service.revokeEventMandate(PROVIDER_ORGANIZATION, mandateId)).toBe(false);
+            expect(await service.revokeEventMandate(PAYER_ORGANIZATION, mandateId)).toBe(true);
+            expect(await service.revokeEventMandate(PAYER_ORGANIZATION, mandateId)).toBe(false);
+            expect(await rejection(authorizeEvent(mandateId))).toMatchObject({ status: 403 });
+
+            expect(await mandate()).toBe(mandateId);
+            expect((await authorizeEvent(mandateId)).result.status).toBe('held');
+        });
+
+        test('stops holding once the API client is revoked', async () => {
+            const mandateId = await mandate();
+            await clients.revoke(PAYER_ORGANIZATION, clientId);
+            expect(await rejection(authorizeEvent(mandateId))).toMatchObject({ status: 403 });
+        });
+
+        test('refuses another node\'s mandate, an unknown one, and a run token for another node', async () => {
+            const mandateId = await mandate();
+            expect(await rejection(authorizeEvent(mandateId, crypto.randomUUID(), downstream))).toMatchObject({ status: 404 });
+            expect(await rejection(authorizeEvent('mnd_missing'))).toMatchObject({ status: 404 });
+            expect(await rejection(service.createEventMandate(downstream.publicKey, { token: await token(), consumer: 'com.example.OnSum' }))).toMatchObject({ status: 401 });
+        });
+
+        test('refuses a mandate for the node\'s own organization, whose runs are free', async () => {
+            const { client: own } = await clients.create(PROVIDER_ORGANIZATION, { nodePublicKey: provider.publicKey });
+            expect(await rejection(service.createEventMandate(provider.publicKey, { token: await token(own.id), consumer: 'com.example.OnSum' }))).toMatchObject({ status: 422 });
+        });
+
+        test('is idempotent per run', async () => {
+            const mandateId = await mandate();
+            const { runId, result } = await authorizeEvent(mandateId);
+            expect((await authorizeEvent(mandateId, runId)).result).toEqual(result);
+            expect(await balances(PAYER_ORGANIZATION)).toMatchObject({ held: 50_000 });
+        });
+    });
 });

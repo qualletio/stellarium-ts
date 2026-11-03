@@ -97,11 +97,14 @@ export interface ApiClient {
   monthToDateMicroUsd: number;
 }
 
-/** One script an API client ran on another organization's node, or one call to a contract on a node. Its paid calls are receipts. */
+/**
+ * One script an API client ran on another organization's node, one call to a contract on a node, or one event an
+ * event contract consumed under its mandate. Its paid calls are receipts.
+ */
 export interface Run {
   id: number;
   runId: string;
-  kind: 'script' | 'contract';
+  kind: 'script' | 'contract' | 'event';
   /** Null for a contract call, which a node authorizes with a voucher instead of a run token. */
   clientId: string | null;
   /** For a contract call made by another run: that run's id. */
@@ -270,6 +273,25 @@ export const updateClientLimits = (id: string, limits: ApiClientLimits) =>
   request<{ client: Omit<ApiClient, 'monthToDateMicroUsd'> }>('PATCH', `/org/clients/${encodeURIComponent(id)}`, limits).then((r) => r.client);
 
 export const revokeClient = (id: string) => request<{ revoked: boolean }>('DELETE', `/org/clients/${encodeURIComponent(id)}`);
+
+/**
+ * A node's permission to run one of the organization's event contracts with each event it consumes, billed like
+ * runs of the API client that deployed it.
+ */
+export interface EventMandate {
+  id: string;
+  organizationId: string;
+  clientId: string;
+  nodePublicKey: string;
+  /** The event contract, as path.Name. */
+  consumer: string;
+  createdAt: string;
+  revokedAt: string | null;
+}
+
+export const listEventMandates = () => request<{ mandates: EventMandate[] }>('GET', '/org/event-mandates').then((r) => r.mandates);
+
+export const revokeEventMandate = (id: string) => request<{ revoked: boolean }>('DELETE', `/org/event-mandates/${encodeURIComponent(id)}`);
 
 export const listRuns = (as: 'payer' | 'provider', before?: number) =>
   request<{ runs: Run[] }>('GET', `/org/runs?as=${as}&${page(before)}`).then((r) => r.runs);

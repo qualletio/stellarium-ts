@@ -27,7 +27,7 @@ export {
 export { inferenceCharge, MAX_TOKENS_PARAMETER, type InferenceResult, type InferenceUsage } from './resource/inference.js';
 export type { FixedPaymentVoucher, InferencePaymentSubmission, InferenceVoucher, PaymentSubmission, RunAuthorizationRequest } from './client/operatorClient.js';
 // Run token verification, so the operator can test its tokens against the real verifier.
-export { RUN_TOKEN_ISSUER, RunTokenVerifier, type RunTokenClaims } from './client/runTokens.js';
+export { MEMBERSHIP_TOKEN_AUDIENCE, RUN_TOKEN_ISSUER, RunTokenVerifier, type Membership, type RunTokenClaims } from './client/runTokens.js';
 // The operator request signature, so the operator can test against the real signer.
 export { OPERATOR_AUTH_SCHEME, operatorAuthorization, operatorRequestPayload } from './client/operatorAuth.js';
 // Grant wire format, so other implementations can test against the real signer.
@@ -50,3 +50,19 @@ export {
 } from './grant/grant.js';
 export type { ApproveGrant, GrantApproval, GrantOptions } from './grant/service.js';
 export type { GrantKey } from './grant/repository.js';
+// Event wire format, so other implementations can test against the real signer.
+export {
+    DEFAULT_MAX_EVENT_DATA_BYTES,
+    DEFAULT_MAX_EVENTS_PER_RUN,
+    EVENT_MAX_AGE_MS,
+    eventAnnouncementPayload,
+    eventEnvelopePayload,
+    MAX_EVENT_DEPTH,
+    type AnnouncedEventType,
+    type EventAnnouncement,
+    type EventEnvelope,
+    type EventField,
+    type EventLineage,
+    type EventSubscription,
+    type EventTypeDefinition,
+} from './event/types.js';

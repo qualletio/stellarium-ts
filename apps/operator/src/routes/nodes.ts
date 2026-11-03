@@ -17,8 +17,13 @@ const nodeRoutes: FastifyPluginAsync<RouteOptions> = async function (fastify, { 
     fastify.addHook('preValidation', authenticateNode);
 
     // A node calls this at startup to learn its organization, enrolling with a dashboard token the first time.
+    // It also gets a membership token, which proves its organization to the nodes that receive its events.
     fastify.post<{ Body: { enrollmentToken?: string, baseUrl?: string } }>('/nodes/session', { schema: { body: sessionSchema } }, async (request) => {
-        return service.organizations.session(request.nodePublicKey!, request.body?.enrollmentToken, request.body?.baseUrl?.replace(/\/+$/, ''));
+        const session = await service.organizations.session(request.nodePublicKey!, request.body?.enrollmentToken, request.body?.baseUrl?.replace(/\/+$/, ''));
+        if (!service.runTokens) {
+            return session;
+        }
+        return { ...session, membershipToken: await service.runTokens.signMembership(request.nodePublicKey!, session.organizationId) };
     });
 };
 

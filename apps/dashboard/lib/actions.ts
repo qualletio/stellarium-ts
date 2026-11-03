@@ -140,6 +140,14 @@ export async function revokeClientAction(_state: ActionState, formData: FormData
   return undefined;
 }
 
+/** Stops a node from running an event contract billed to the organization. Deploying the contract again renews it. */
+export async function revokeEventMandateAction(_state: ActionState, formData: FormData): Promise<ActionState> {
+  const result = await attempt(() => api.revokeEventMandate(String(formData.get('id'))));
+  if ('error' in result) return result;
+  refresh();
+  return undefined;
+}
+
 /** What a node answered for a script the Composer proposed. */
 export type ScriptOutcome =
   | { ok: true; kind: 'run'; returnValue: unknown; tokens: number }

@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { authenticateNode } from '../auth/nodeAuth.js';
-import type { ContractRunAuthorizationRequest, RunAuthorizationRequest } from '../runs/runService.js';
+import type { ContractRunAuthorizationRequest, EventMandateRequest, EventRunAuthorizationRequest, RunAuthorizationRequest } from '../runs/runService.js';
 import type { RouteOptions } from './index.js';
 
 const runId = { type: 'string', format: 'uuid' } as const;
@@ -49,6 +49,25 @@ const contractAuthorizeSchema = {
     },
 } as const;
 
+const eventMandateSchema = {
+    type: 'object',
+    required: ['token', 'consumer'],
+    properties: {
+        token: { type: 'string', minLength: 1, maxLength: 4096 },
+        consumer: { type: 'string', minLength: 1, maxLength: 512 },
+    },
+} as const;
+
+const eventAuthorizeSchema = {
+    type: 'object',
+    required: ['mandateId', 'runId', 'source'],
+    properties: {
+        mandateId: { type: 'string', minLength: 1, maxLength: 64 },
+        runId,
+        source: { type: 'string', maxLength: 100_000 },
+    },
+} as const;
+
 /**
  * A node authorizes a script run by another organization's API client, or a call to one of its contracts,
  * before running it, then captures it with the tokens executed, or releases it. Requests are signed by the node.
@@ -62,6 +81,15 @@ const runRoutes: FastifyPluginAsync<RouteOptions> = async function (fastify, { s
 
     fastify.post<{ Body: ContractRunAuthorizationRequest }>('/runs/contract/authorize', { schema: { body: contractAuthorizeSchema } }, async (request) => {
         return service.runs.authorizeContract(request.nodePublicKey!, request.body);
+    });
+
+    // When an API client deploys an event contract, and before each event the contract consumes.
+    fastify.post<{ Body: EventMandateRequest }>('/runs/event/mandates', { schema: { body: eventMandateSchema } }, async (request) => {
+        return service.runs.createEventMandate(request.nodePublicKey!, request.body);
+    });
+
+    fastify.post<{ Body: EventRunAuthorizationRequest }>('/runs/event/authorize', { schema: { body: eventAuthorizeSchema } }, async (request) => {
+        return service.runs.authorizeEvent(request.nodePublicKey!, request.body);
     });
 
     fastify.post<{ Body: { runId: string, tokens: number } }>('/runs/capture', { schema: { body: captureSchema } }, async (request) => {

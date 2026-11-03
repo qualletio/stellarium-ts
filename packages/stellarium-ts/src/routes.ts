@@ -14,6 +14,8 @@ import type { Service } from './service.js';
 import { safeVerifyData } from './crypto/utils.js';
 import type { Grant, GrantRenewalRequest, GrantRequest } from './grant/grant.js';
 import { InvalidPublicKeyError } from './grant/service.js';
+import type { EventAnnouncement, EventEnvelope, EventLineage } from './event/types.js';
+import { MAX_EVENT_DEPTH } from './event/types.js';
 
 export interface RateLimitConfig {
     max: number;
@@ -56,6 +58,8 @@ interface ResourceRunRequest extends ResourceCallRequest {
     paymentVoucher?: PaymentVoucher | InferencePaymentVoucher | ContractPaymentVoucher;
     /** For a contract: how many contracts deep the call is, so contracts calling each other across nodes stop. */
     contractDepth?: number;
+    /** For a contract called from a script that an event started: the chain of events, so it can't call back into it. */
+    eventLineage?: EventLineage;
 }
 
 interface RunRequest {
@@ -202,6 +206,58 @@ const resourceRunRequestSchema = {
         // Inference and contract vouchers have their own `kind`, and no `amount`, so at most one shape matches.
         paymentVoucher: { oneOf: [fixedVoucherSchema, inferenceVoucherSchema, contractVoucherSchema] },
         contractDepth: { type: 'integer', minimum: 1 },
+        eventLineage: {
+            type: 'object',
+            required: ['depth', 'types', 'contracts'],
+            properties: {
+                depth: { type: 'integer', minimum: 1, maximum: MAX_EVENT_DEPTH },
+                types: { type: 'array', maxItems: 64, items: { type: 'string' } },
+                contracts: { type: 'array', maxItems: 64, items: { type: 'string' } },
+            },
+        },
+    },
+} as const;
+
+const stringList = { type: 'array', maxItems: 64, items: { type: 'string', maxLength: 512 } } as const;
+
+// The envelope is signed, so its data is only checked to be an object.
+const eventEnvelopeSchema = {
+    type: 'object',
+    required: ['id', 'type', 'version', 'ownerOrganizationId', 'data', 'publishedAt', 'depth', 'lineage', 'publisherPublicKey', 'membershipToken', 'signature'],
+    properties: {
+        id: { type: 'string', minLength: 1, maxLength: 64 },
+        type: { type: 'string', minLength: 1, maxLength: 512 },
+        version: { type: 'string', minLength: 1, maxLength: 64 },
+        ownerOrganizationId: { type: 'string', minLength: 1, maxLength: 64 },
+        data: { type: 'object' },
+        publishedAt: { type: 'string', minLength: 1, maxLength: 64 },
+        depth: { type: 'integer' },
+        lineage: { type: 'object', required: ['types', 'contracts'], properties: { types: stringList, contracts: stringList } },
+        publisherPublicKey: { type: 'string', minLength: 1, maxLength: 255 },
+        membershipToken: { type: 'string', minLength: 1, maxLength: 4096 },
+        signature: { type: 'string', minLength: 1, maxLength: 1024 },
+    },
+} as const;
+
+// Signed: the types and subscriptions inside are checked by the service, not coerced here.
+const eventAnnouncementSchema = {
+    type: 'object',
+    required: ['publicKey', 'membershipToken', 'eventTypes', 'subscriptions', 'expiry', 'signature'],
+    properties: {
+        publicKey: nonEmptyString,
+        membershipToken: { type: ['string', 'null'] },
+        eventTypes: { type: 'array', maxItems: 1000, items: { type: 'object', required: ['path', 'name', 'version', 'fields', 'restricted', 'ownerOrganizationId'] } },
+        subscriptions: { type: 'array', maxItems: 1000, items: { type: 'object', required: ['eventPath', 'eventName', 'eventVersion', 'consumer'] } },
+        expiry: nonEmptyString,
+        signature: nonEmptyString,
+    },
+} as const;
+
+const queueQuerySchema = {
+    type: 'object',
+    properties: {
+        ...pageQuerySchema.properties,
+        status: { type: 'string', enum: ['pending', 'sending', 'delivered', 'running', 'done', 'failed'] },
     },
 } as const;
 
@@ -504,6 +560,8 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         const settle = (outcome: 'capture' | 'release', tokens: number) => runId
             && settleRunLater(options.service.operatorClient, runId, outcome, tokens, (error, message) => fastify.log.error(error, message));
 
+        // The script's events are published as its organization's, which only this node's own organization may.
+        const emitter = options.service.eventService.emitter({ scriptOwner: runFor.org });
         const meter = new TokenMeter();
         try {
             const result = await interpretParsed(script, {
@@ -511,8 +569,14 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
                 resourceInvoker,
                 meter,
                 builtins: { jwt },
+                events: emitter.resolver,
             });
             settle('capture', meter.tokens);
+            const unpublishable = emitter.check(result.events);
+            if (unpublishable) {
+                return reply.status(422).send({ error: 'Script failed', details: `${unpublishable}, so no events were published`, usage: { tokens: meter.tokens } });
+            }
+            await emitter.publish(result.events).catch(error => fastify.log.error(error, 'Failed to publish a run\'s events'));
             return reply.status(200).send({ returnValue: result.returnValue ?? null, usage: { tokens: meter.tokens } });
         } catch (error) {
             // A script that fails at runtime is the caller's mistake, and is charged for what it executed.
@@ -635,7 +699,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             if (depth > MAX_CONTRACT_DEPTH) {
                 return reply.status(400).send({ error: `Contracts may call each other at most ${MAX_CONTRACT_DEPTH} deep` });
             }
-            const result = await options.service.contractService.serve(paymentVoucher, contract, resourceRequest.parameters, depth);
+            const result = await options.service.contractService.serve(paymentVoucher, contract, resourceRequest.parameters, depth, resourceRequest.eventLineage);
             if ('refused' in result) {
                 return reply.status(result.refused.status).send({ error: result.refused.error });
             }
@@ -748,6 +812,82 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     });
 
     // End Contract Routes
+
+    // Start Event Routes
+
+    /** Declares a version of an event type, owned by this node's organization. */
+    fastify.post('/events', { schema: { body: contractRequestSchema }, preValidation: requireRunAuthorization }, async (request, reply) => {
+        const { source, description } = request.body as { source: string, description?: string };
+        const result = await options.service.eventService.deployType(source, description, contractCaller(request));
+        if (!result.ok) {
+            return reply.status(result.status).send({ error: result.error });
+        }
+        return reply.status(201).send(result.eventType);
+    });
+
+    /** Every event type this node knows: the ones it declared, then the ones it learned from peers. */
+    fastify.get('/events', { schema: { querystring: pageQuerySchema } }, async (request) => {
+        const { items, nextOffset } = await getPage(request.query as PageQuery, (offset, limit) => options.service.eventService.repository.listTypes(offset, limit));
+        return { eventTypes: items, nextOffset };
+    });
+
+    /** Deletes `path.Name@version`, or every version of `path.Name`, of an event type this node declared. */
+    fastify.delete('/events/:ref', { preValidation: requireRunAuthorization }, async (request, reply) => {
+        const ref = contractRef((request.params as { ref: string }).ref);
+        if (!ref) {
+            return reply.status(400).send({ error: 'Name an event type as path.Name or path.Name@version' });
+        }
+        const result = await options.service.eventService.deleteType(ref.path, ref.name, ref.version, contractCaller(request));
+        if (!result.ok) {
+            return reply.status(result.status).send({ error: result.error });
+        }
+        return { success: true };
+    });
+
+    /** An event a peer published, for this node's event contracts. Accepted once queued; they run afterwards. */
+    fastify.post('/events/deliver', {
+        schema: { body: eventEnvelopeSchema },
+        config: { rateLimit: options.rateLimit ?? { max: 100, timeWindow: '1 minute' } },
+    }, async (request, reply) => {
+        const result = await options.service.eventService.receive(request.body as EventEnvelope);
+        if (!result.ok) {
+            return reply.status(result.status).send({ error: result.error });
+        }
+        return reply.status(202).send({ accepted: result.accepted });
+    });
+
+    /** This node's event types and event contracts, signed, for a peer learning them. */
+    fastify.get('/events/announcement', async () => options.service.eventService.announcement());
+
+    /** A peer's event types and event contracts, replacing what it announced before. */
+    fastify.put('/all-events', { schema: { body: eventAnnouncementSchema } }, async (request, reply) => {
+        const announcement = request.body as EventAnnouncement;
+        const peer = await options.service.peerRepository.getPeerByPublicKey(announcement.publicKey);
+        if (!peer) {
+            return reply.status(400).send({ error: 'Peer not found' });
+        }
+        const result = await options.service.eventService.applyAnnouncement(announcement, peer.baseUrl);
+        if (!result.ok) {
+            return reply.status(result.status).send({ error: result.error });
+        }
+        return { success: true, rejected: result.rejected };
+    });
+
+    /** Events this node is delivering to peers, newest first. */
+    fastify.get('/admin/events/outbox', { preValidation: requireApiKey, schema: { querystring: queueQuerySchema } }, async (request) => {
+        const { status, ...page } = request.query as PageQuery & { status?: string };
+        const { items, nextOffset } = await getPage(page, (offset, limit) => options.service.eventService.repository.listOutbox(status, offset, limit));
+        return { deliveries: items, nextOffset };
+    });
+
+    /** Events delivered to this node's event contracts, newest first, with the error of each that failed. */
+    fastify.get('/admin/events/inbox', { preValidation: requireApiKey, schema: { querystring: queueQuerySchema } }, async (request) => {
+        const { status, ...page } = request.query as PageQuery & { status?: string };
+        const { items, nextOffset } = await getPage(page, (offset, limit) => options.service.eventService.repository.listInbox(status, offset, limit));
+        return { events: items, nextOffset };
+    });
+
+    // End Event Routes
 
     // Start Grant Routes
 

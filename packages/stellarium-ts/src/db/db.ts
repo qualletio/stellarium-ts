@@ -244,6 +244,87 @@ export async function createTables(db: NodeDatabase) {
             reason TEXT,
             blocked_at TEXT NOT NULL
         );
+
+        -- Event types this node declared (local = 1), and those it learned from the nodes that declared them.
+        -- fields is JSON: [{ name, type }]. Versions are immutable, and every version of a type has one owner.
+        CREATE TABLE IF NOT EXISTS event_type (
+            path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            version TEXT NOT NULL,
+            fields TEXT NOT NULL,
+            restricted INTEGER NOT NULL,
+            owner_organization_id TEXT NOT NULL,
+            base_url TEXT NOT NULL,
+            local INTEGER NOT NULL,
+            source TEXT,
+            description TEXT,
+            created_at TEXT NOT NULL,
+
+            PRIMARY KEY (path, name, version)
+        );
+
+        -- This node's event contracts: which contract consumes which event type, at the version it was deployed
+        -- against. An event contract isn't one of the node's resources: it runs only with events. mandate_id is
+        -- the operator's event mandate that bills another organization for its runs, null when they are free.
+        CREATE TABLE IF NOT EXISTS event_consumer (
+            path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            event_path TEXT NOT NULL,
+            event_name TEXT NOT NULL,
+            event_version TEXT NOT NULL,
+            owner_organization_id TEXT,
+            mandate_id TEXT,
+
+            PRIMARY KEY (path, name)
+        );
+
+        -- Peers' event contracts, from their announcements, so this node knows where to deliver its events.
+        CREATE TABLE IF NOT EXISTS event_subscription (
+            base_url TEXT NOT NULL,
+            event_path TEXT NOT NULL,
+            event_name TEXT NOT NULL,
+            event_version TEXT NOT NULL,
+            consumer TEXT NOT NULL,
+            owner_organization_id TEXT,
+
+            PRIMARY KEY (base_url, event_path, event_name, event_version, consumer)
+        );
+
+        -- Events this node published, one row per node subscribed to them, until delivered or given up on.
+        -- status is 'pending', 'sending', 'delivered' or 'failed'. next_attempt_at is in epoch milliseconds.
+        CREATE TABLE IF NOT EXISTS event_outbox (
+            id ${t.id},
+            event_id TEXT NOT NULL,
+            target_base_url TEXT NOT NULL,
+            envelope TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL,
+            next_attempt_at ${t.bigint} NOT NULL,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+
+            UNIQUE (event_id, target_base_url)
+        );
+        CREATE INDEX IF NOT EXISTS event_outbox_status_next_attempt_at ON event_outbox (status, next_attempt_at);
+
+        -- Events delivered to this node, one row per event contract that consumes them. The key makes a
+        -- redelivered event a no-op. status is 'pending', 'running', 'done' or 'failed'.
+        CREATE TABLE IF NOT EXISTS event_inbox (
+            event_id TEXT NOT NULL,
+            consumer_path TEXT NOT NULL,
+            consumer_name TEXT NOT NULL,
+            envelope TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL,
+            next_attempt_at ${t.bigint} NOT NULL,
+            last_error TEXT,
+            received_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+
+            PRIMARY KEY (event_id, consumer_path, consumer_name)
+        );
+        CREATE INDEX IF NOT EXISTS event_inbox_status_next_attempt_at ON event_inbox (status, next_attempt_at);
     `);
 
     await setSchemaVersion(db, SCHEMA_VERSION);

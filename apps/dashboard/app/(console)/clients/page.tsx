@@ -5,8 +5,8 @@ import { ClientLimitsForm } from '@/components/ClientLimitsForm';
 import { RevokeButton } from '@/components/RevokeButton';
 import { StatusBadge } from '@/components/StatusBadge';
 import ui from '@/components/ui.module.css';
-import { revokeClientAction } from '@/lib/actions';
-import { getOrganization, listClients, listListings, listNodes } from '@/lib/api';
+import { revokeClientAction, revokeEventMandateAction } from '@/lib/actions';
+import { getOrganization, listClients, listEventMandates, listListings, listNodes } from '@/lib/api';
 import { formatDate, formatPreciseUsd, formatTokenPrice, shortKey } from '@/lib/format';
 import { publicOperatorUrl } from '@/lib/site';
 
@@ -14,7 +14,7 @@ export const metadata: Metadata = { title: 'API clients' };
 
 export default async function ClientsPage({ searchParams }: PageProps<'/clients'>) {
   const query = await searchParams;
-  const [organization, clients, nodes, listings] = await Promise.all([getOrganization(), listClients(), listNodes(), listListings()]);
+  const [organization, clients, nodes, listings, mandates] = await Promise.all([getOrganization(), listClients(), listNodes(), listListings(), listEventMandates()]);
   const admin = organization.admin;
 
   // The organization's own nodes run free, listed or not. Other organizations' nodes must be listed.
@@ -106,6 +106,52 @@ export default async function ClientsPage({ searchParams }: PageProps<'/clients'
                     <td>{client.revokedAt ? <StatusBadge status="revoked" /> : <StatusBadge status="active" />}</td>
                     <td className={ui.numeric}>{formatPreciseUsd(client.monthToDateMicroUsd)}</td>
                     {admin && <td className={ui.numeric}>{!client.revokedAt && <RevokeButton action={revokeClientAction} name="id" value={client.id} />}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className={ui.section}>
+        <div className={ui.sectionHead}>
+          <div>
+            <h2 className={ui.sectionTitle}>Event contracts</h2>
+            <p className={ui.description}>
+              An event contract runs on its node with each event it consumes, long after the deploy. When one of your API clients deploys one
+              to another organization&apos;s node, that node may bill each run to your balance like the client&apos;s own runs. Revoke one to stop
+              it; revoking its API client stops it too. Deploying the contract again allows it again.
+            </p>
+          </div>
+        </div>
+        {mandates.length === 0 ? (
+          <p className={ui.empty}>No event contracts on other organizations&apos; nodes.</p>
+        ) : (
+          <div className={ui.tableWrap}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th>Event contract</th>
+                  <th>Node</th>
+                  <th>API client</th>
+                  <th>Created</th>
+                  <th>Status</th>
+                  {admin && <th aria-label="Actions" />}
+                </tr>
+              </thead>
+              <tbody>
+                {mandates.map((mandate) => (
+                  <tr key={mandate.id}>
+                    <td><span className={ui.mono}>{mandate.consumer}</span></td>
+                    <td>
+                      {nodeNames.get(mandate.nodePublicKey) ?? <span className={ui.secondary}>No longer listed</span>}
+                      <span className={`${ui.secondary} ${ui.mono}`} title={mandate.nodePublicKey}>{shortKey(mandate.nodePublicKey)}</span>
+                    </td>
+                    <td><span className={ui.mono}>{mandate.clientId}</span></td>
+                    <td>{formatDate(mandate.createdAt)}</td>
+                    <td>{mandate.revokedAt ? <StatusBadge status="revoked" /> : <StatusBadge status="active" />}</td>
+                    {admin && <td className={ui.numeric}>{!mandate.revokedAt && <RevokeButton action={revokeEventMandateAction} name="id" value={mandate.id} />}</td>}
                   </tr>
                 ))}
               </tbody>

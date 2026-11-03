@@ -12,6 +12,8 @@ import { type ApproveGrant, GrantService } from "./grant/service.js";
 import { ContractRepository } from "./contract/repository.js";
 import { ContractService } from "./contract/service.js";
 import { ContractStateRepository } from "./contract/state.js";
+import { EventRepository } from "./event/repository.js";
+import { EventService } from "./event/service.js";
 
 /** Settings a node runs with. `StellariumNode.start` fills these from its options, then the environment. */
 export interface NodeConfig {
@@ -53,6 +55,15 @@ export interface NodeConfig {
     databaseUrl?: string;
     /** Postgres schema the node's tables live in. */
     databaseSchema?: string;
+    /**
+     * The operator's statement that this node belongs to `organizationId`, attached to the events it publishes.
+     * `StellariumNode.start` gets it with the node's session. Without it, the node can't publish events.
+     */
+    membershipToken?: string;
+    /** The most events one run may emit. Defaults to 16. */
+    maxEventsPerRun?: number;
+    /** The most one event's data may take, as JSON, in bytes. Defaults to 32 KiB. */
+    maxEventDataBytes?: number;
 }
 
 export interface Service {
@@ -66,6 +77,7 @@ export interface Service {
     contractRepository: ContractRepository;
     contractService: ContractService;
     contractStateRepository: ContractStateRepository;
+    eventService: EventService;
     /** Verifies the run tokens `POST /v1/run` accepts. Set when the node has an operator URL. */
     runTokenVerifier?: RunTokenVerifier;
 }
@@ -101,6 +113,11 @@ export function createService(db: NodeDatabase, resources: StellariumResource[],
     const contractService = new ContractService(contractRepository, contractStateRepository, resourceRepository, resourceResolver, resourceInvoker, operatorClient, config);
     resourceInvoker.contracts = { costLimitMicroUsd: config.contractCostLimitMicroUsd ?? config.costLimitMicroUsd, host: contractService };
 
+    const runTokenVerifier = config.operatorUrl ? new RunTokenVerifier(config.operatorUrl, config.publicKey, options.runTokenKeys) : undefined;
+    const eventService = new EventService(new EventRepository(db), config, runTokenVerifier);
+    contractService.events = eventService;
+    eventService.contracts = contractService;
+
     return {
         config,
         peerRepository: new PeerRepository(db),
@@ -112,6 +129,7 @@ export function createService(db: NodeDatabase, resources: StellariumResource[],
         contractRepository,
         contractService,
         contractStateRepository,
-        runTokenVerifier: config.operatorUrl ? new RunTokenVerifier(config.operatorUrl, config.publicKey, options.runTokenKeys) : undefined,
+        eventService,
+        runTokenVerifier,
     };
 }

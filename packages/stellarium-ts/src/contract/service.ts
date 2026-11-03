@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { interpretParsed, parseScript, RequestScriptError, type Resource, type ResourceFunctionCallParameter, type ResourceResolver, type Script, TokenMeter, typeToString } from "requestscript";
 import type { OperatorClient } from "../client/operatorClient.js";
+import type { EventConsumer } from "../event/repository.js";
+import type { EventContractHost, EventService } from "../event/service.js";
+import { type EventEnvelope, type EventLineage, qualifiedName } from "../event/types.js";
 import { type CallerIdentity, type CombinationResourceInvoker, type ContractHost, type ContractPaymentVoucher, MAX_CONTRACT_DEPTH, type ScriptContext } from "../resource/invoker.js";
 import { CONTRACT_FUNCTION, type ResourceRepository } from "../resource/repository.js";
 import { type InvokeResult, settlePaidCall, settleRunLater } from "../resource/settlement.js";
@@ -19,6 +22,10 @@ interface RunContext {
     depth: number;
     contracts?: string[];
     runId?: string;
+    /** The chain of events the contract runs in, when an event started it. */
+    event?: EventLineage;
+    /** For an event contract: the event, which it reads as the built-in `event`, and its type at the version it consumes. */
+    consuming?: { event: Record<string, unknown>, data: Record<string, unknown>, type: { path: string, name: string, version: string } };
 }
 
 /** Who deploys or deletes a contract: the node's admin with its API key, or an organization's API client with a run token. */
@@ -43,9 +50,11 @@ const refuse = (status: number, error: string): ContractRefusal => ({ ok: false,
  * operator holds on the caller's organization or on the caller's own run, which also pays for the paid calls
  * the contract makes.
  */
-export class ContractService implements ContractHost {
+export class ContractService implements ContractHost, EventContractHost {
     /** Tells peers about this node's resources again, after a contract is deployed or deleted. Set once the node listens. */
     announce?: () => void;
+    /** Publishes the events contracts emit, and knows the event types they consume. Without it, contracts can't emit or consume events. */
+    events?: EventService;
     /** The latest call holding each stateful contract (`path.Name`) on this node. */
     private readonly locks = new Map<string, Promise<void>>();
     /** How long a call waits for earlier calls of the same stateful contract. */
@@ -84,7 +93,7 @@ export class ContractService implements ContractHost {
         if (declaration.path.length === 0) {
             return refuse(400, 'Invalid contract: give it a path, such as com.example.Name');
         }
-        if (!declaration.returnType) {
+        if (!declaration.returnType && !declaration.consumes) {
             return refuse(400, 'Invalid contract: declare its return type, such as contract com.example.Name(...): string');
         }
         const path = declaration.path.join('.');
@@ -99,18 +108,74 @@ export class ContractService implements ContractHost {
             return refuse(409, `${path}.${name} belongs to another organization`);
         }
 
-        const save = () => this.contracts.save({
-            path,
-            name,
-            version,
-            source,
-            parameters: declaration.parameters.map(parameter => ({ name: parameter.name, type: typeToString(parameter.type) })),
-            returnType: typeToString(declaration.returnType!),
-            ownerOrganizationId,
-            description: description ?? null,
-        });
+        // Events: what an event contract consumes, and what any contract emits, are checked before anything is saved.
+        const existingConsumer = owner === undefined ? undefined : await this.events?.repository.consumer(path, name);
+        if (owner !== undefined && (existingConsumer !== undefined) !== (declaration.consumes !== undefined)) {
+            return refuse(409, declaration.consumes
+                ? `${path}.${name} is a contract callers call, so a new version can't be an event contract`
+                : `${path}.${name} is an event contract, so every version must consume an event`);
+        }
+        let consumer: EventConsumer | undefined;
+        if (declaration.consumes) {
+            if (!this.events) {
+                return refuse(400, 'Invalid contract: this node doesn\'t run event contracts');
+            }
+            // The organization a contract runs for: its owner's, or this node's for its admin's.
+            const deployer = owner ?? ownerOrganizationId ?? this.config.organizationId ?? null;
+            const consumed = await this.events.consumedType(declaration.consumes, deployer);
+            if (!consumed.ok) {
+                return consumed;
+            }
+            consumer = {
+                path,
+                name,
+                eventPath: consumed.eventType.path,
+                eventName: consumed.eventType.name,
+                eventVersion: consumed.eventType.version,
+                ownerOrganizationId: owner ?? ownerOrganizationId,
+                mandateId: existingConsumer?.mandateId ?? null,
+            };
+        }
+        const emits = this.events ? await this.events.checkEmits(script, owner ?? ownerOrganizationId) : undefined;
+        if (emits) {
+            return emits;
+        }
+        if (!this.events && script.body.some(function emits(statement): boolean {
+            return statement.kind === 'emit' || (statement.kind === 'if' && [...statement.branches.flatMap(branch => branch.body), ...statement.elseBody ?? []].some(emits));
+        })) {
+            return refuse(400, 'Invalid contract: this node doesn\'t publish events');
+        }
+        // Another organization's event contract is billed to it under a mandate its API client grants now.
+        if (consumer && caller.kind === 'client' && caller.organizationId !== this.config.organizationId) {
+            const mandate = await this.operatorClient.createEventMandate({ token: caller.token, consumer: `${path}.${name}` });
+            if (!mandate.ok) {
+                return refuse(mandate.status, mandate.error);
+            }
+            consumer.mandateId = mandate.mandateId;
+        }
+
+        const save = async () => {
+            const result = await this.contracts.save({
+                path,
+                name,
+                version,
+                source,
+                parameters: declaration.parameters.map(parameter => ({ name: parameter.name, type: typeToString(parameter.type) })),
+                // An event contract returns nothing.
+                returnType: declaration.returnType ? typeToString(declaration.returnType) : '',
+                ownerOrganizationId,
+                description: description ?? null,
+            });
+            if (result.ok && consumer) {
+                await this.events!.repository.saveConsumer(consumer);
+            }
+            return result;
+        };
         const saved = (feeMicroUsd: number) => {
             this.announce?.();
+            if (consumer) {
+                this.events?.announce?.();
+            }
             return { ok: true as const, contract: { path, name, version, feeMicroUsd } };
         };
         const versionExists = () => refuse(409, `${path}.${name}@${version} already exists: contracts are immutable, so deploy a new version`);
@@ -164,6 +229,10 @@ export class ContractService implements ContractHost {
         // State outlives a version, so a new one keeps it, but not the contract.
         if (await this.contracts.owner(path, name) === undefined) {
             await this.state.deleteContract(path, name);
+            if (await this.events?.repository.consumer(path, name)) {
+                await this.events!.repository.deleteConsumer(path, name);
+                this.events!.announce?.();
+            }
         }
         this.announce?.();
         return { ok: true };
@@ -187,12 +256,15 @@ export class ContractService implements ContractHost {
      * node's organization. `depth` is how many contracts deep the call is. The contract sees the payer the
      * operator authorized, and the voucher's key, as `caller`.
      */
-    async serve(voucher: ContractPaymentVoucher, contract: StoredContract, parameters: ResourceFunctionCallParameter[], depth: number): Promise<InvokeResult | { refused: { status: number, error: string } }> {
+    async serve(voucher: ContractPaymentVoucher, contract: StoredContract, parameters: ResourceFunctionCallParameter[], depth: number, event?: EventLineage): Promise<InvokeResult | { refused: { status: number, error: string } }> {
+        if (event?.contracts.includes(`${contract.path}.${contract.name}`)) {
+            return { refused: { status: 400, error: `${contract.path}.${contract.name} is earlier in this chain of events, so it can't be called` } };
+        }
         const authorization = await this.operatorClient.authorizeContractRun({ voucher, source: contract.source });
         if (!authorization.ok) {
             return { refused: { status: authorization.status, error: authorization.error } };
         }
-        const context = { jwt: null, depth, caller: { org: authorization.payerOrganizationId ?? null, node: voucher.publicKey } };
+        const context = { jwt: null, depth, caller: { org: authorization.payerOrganizationId ?? null, node: voucher.publicKey }, event };
         if (authorization.free) {
             return this.run(contract, parameters, context);
         }
@@ -211,7 +283,7 @@ export class ContractService implements ContractHost {
         }
         // A script that doesn't say who it runs for is this node's own.
         const caller = context.caller ?? { org: this.config.organizationId ?? null, node: this.config.publicKey };
-        const runContext = { jwt: context.jwt ?? null, depth, caller, contracts: context.contracts };
+        const runContext = { jwt: context.jwt ?? null, depth, caller, contracts: context.contracts, event: context.event };
         if (context.runId === undefined) {
             return this.run(contract, parameters, runContext);
         }
@@ -227,6 +299,50 @@ export class ContractService implements ContractHost {
             return failed(authorization.error);
         }
         return this.runBilled(voucher.invocationId, contract, parameters, runContext);
+    }
+
+    /**
+     * Runs an event contract with one event. It runs free for this node's organization and its admin, and
+     * otherwise under the mandate its deployer's API client granted, held and charged like the client's runs.
+     * The contract sees the event's owner and publisher as `caller`, and the event as `event`.
+     */
+    async runEvent(consumer: EventConsumer, envelope: EventEnvelope): Promise<{ ok: true } | { ok: false, error: string, retry: boolean }> {
+        const contract = await this.contracts.latest(consumer.path, consumer.name);
+        if (!contract) {
+            return { ok: false, error: 'The event contract was deleted', retry: false };
+        }
+        const label = qualifiedName(consumer.path, consumer.name);
+        const context: RunContext = {
+            jwt: null,
+            depth: 1,
+            caller: { org: envelope.ownerOrganizationId, node: envelope.publisherPublicKey },
+            event: {
+                depth: envelope.depth,
+                types: [...envelope.lineage.types, envelope.type],
+                contracts: envelope.lineage.contracts.includes(label) ? [...envelope.lineage.contracts] : [...envelope.lineage.contracts, label],
+            },
+            consuming: {
+                event: { id: envelope.id, type: envelope.type, version: envelope.version, publishedAt: envelope.publishedAt, depth: envelope.depth },
+                data: envelope.data,
+                type: { path: consumer.eventPath, name: consumer.eventName, version: consumer.eventVersion },
+            },
+        };
+        let result: InvokeResult;
+        if (consumer.ownerOrganizationId === null || consumer.ownerOrganizationId === this.config.organizationId) {
+            result = await this.run(contract, [], context);
+        } else {
+            if (!consumer.mandateId) {
+                return { ok: false, error: 'The event contract has no mandate to bill its owner with', retry: false };
+            }
+            const runId = randomUUID();
+            const authorization = await this.operatorClient.authorizeEventRun({ mandateId: consumer.mandateId, runId, source: contract.source });
+            if (!authorization.ok) {
+                // A balance may be topped up, or the operator come back, but a revoked mandate stays revoked.
+                return { ok: false, error: authorization.error, retry: authorization.status === 402 || authorization.status >= 500 };
+            }
+            result = await this.runBilled(runId, contract, [], context);
+        }
+        return result.error ? { ok: false, error: result.error.message, retry: true } : { ok: true };
     }
 
     /** Runs a contract under a held run, then captures the tokens it executed, or releases the run if it couldn't run. */
@@ -262,15 +378,22 @@ export class ContractService implements ContractHost {
                 return failed(`it is busy: other calls held it for ${this.lockTimeoutMs / 1000} seconds`);
             }
         }
+        const emitter = this.events?.emitter({ scriptOwner: contract.ownerOrganizationId, lineage: context.event, consumes: context.consuming?.type, contract: label });
         try {
+            const { jwt, caller, depth, runId, event } = context;
             const result = await interpretParsed(script, {
                 resourceResolver: this.resolver,
-                resourceInvoker: this.invoker.forScript({ ...context, contracts: [...context.contracts ?? [], label] }),
-                parameters: Object.fromEntries(parameters.map(parameter => [parameter.name, parameter.value])),
+                resourceInvoker: this.invoker.forScript({ jwt, caller, depth, runId, event, contracts: [...context.contracts ?? [], label] }),
+                parameters: context.consuming ? context.consuming.data : Object.fromEntries(parameters.map(parameter => [parameter.name, parameter.value])),
                 meter,
-                builtins: { jwt: context.jwt, caller: context.caller },
+                builtins: { jwt, caller, ...(context.consuming ? { event: context.consuming.event } : {}) },
                 state: stateful ? { get: (variable, scope) => this.state.get(contract.path, contract.name, variable, scope) } : undefined,
+                events: emitter?.resolver,
             });
+            const unpublishable = emitter?.check(result.events);
+            if (unpublishable) {
+                return failed(`${unpublishable}, so nothing was saved`);
+            }
             if (result.state.length > 0) {
                 const maxBytes = this.config.maxContractStateBytes ?? DEFAULT_MAX_CONTRACT_STATE_BYTES;
                 const committed = await this.state.commit(contract.path, contract.name, result.state, maxBytes);
@@ -279,6 +402,10 @@ export class ContractService implements ContractHost {
                         ? 'its state changed during the call, so nothing was saved; try again'
                         : `its state would be ${committed.bytes} bytes, more than this node's ${maxBytes}, so nothing was saved`);
                 }
+            }
+            if (emitter && result.events.length > 0) {
+                // The run has succeeded and saved its state, so a failure here loses its events but not the call.
+                await emitter.publish(result.events).catch(error => this.log(error, `Failed to publish the events of ${label}@${contract.version}`));
             }
             return { value: result.returnValue, error: null };
         } catch (error) {

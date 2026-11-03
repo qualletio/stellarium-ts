@@ -113,6 +113,43 @@ describe('API client and run routes', () => {
         expect((await post('/v1/runs/release', { runId: 'not-a-uuid' })).statusCode).toBe(400);
     });
 
+    test('POST /v1/runs/event/* creates a mandate with a run token and holds an event run under it', async () => {
+        const post = (path: string, body: object) => fastify.inject({
+            method: 'POST', url: path, payload: body,
+            headers: { authorization: operatorAuthorization('POST', `http://operator${path}`, body, provider.publicKey, provider.privateKey) },
+        });
+        const token = (await tokenRequest(form({ grant_type: 'client_credentials', client_id: clientId, client_secret: clientSecret }))).json().access_token;
+
+        const created = await post('/v1/runs/event/mandates', { token, consumer: 'com.example.OnGreeted' });
+        expect(created.statusCode).toBe(200);
+        const { mandateId } = created.json();
+        expect(mandateId).toMatch(/^mnd_/);
+
+        const runId = crypto.randomUUID();
+        const authorized = await post('/v1/runs/event/authorize', { mandateId, runId, source: 'contract com.example.OnGreeted consumes com.example.Greeted {\n  var x = 1\n}' });
+        expect(authorized.statusCode).toBe(200);
+        expect(authorized.json()).toMatchObject({ status: 'held', maxTokens: expect.any(Number) });
+        expect((await post('/v1/runs/capture', { runId, tokens: 2 })).json()).toEqual({ status: 'captured', amountMicroUsd: 2 });
+    });
+
+    test('POST /v1/nodes/session gives the node a membership token that stellarium-ts verifies, and that is no run token', async () => {
+        const body = {};
+        const session = await fastify.inject({
+            method: 'POST', url: '/v1/nodes/session', payload: body,
+            headers: { authorization: operatorAuthorization('POST', 'http://operator/v1/nodes/session', body, provider.publicKey, provider.privateKey) },
+        });
+        expect(session.statusCode).toBe(200);
+        const { membershipToken } = session.json();
+        const nodeVerifier = await verifier();
+
+        expect(await nodeVerifier.verifyMembership(membershipToken)).toEqual({ publicKey: provider.publicKey, organizationId: PROVIDER_ORGANIZATION });
+        expect(await nodeVerifier.verify(membershipToken)).toBeUndefined();
+        const runToken = (await tokenRequest(form({ grant_type: 'client_credentials', client_id: clientId, client_secret: clientSecret }))).json().access_token;
+        expect(await nodeVerifier.verifyMembership(runToken)).toBeUndefined();
+        // Valid only while it lasts.
+        expect(await nodeVerifier.verifyMembership(membershipToken, new Date(Date.now() + 2 * 60 * 60 * 1000))).toBeUndefined();
+    });
+
     test('without a signing key, tokens and the key set are unavailable', async () => {
         const plain = Fastify();
         await plain.register(routes, { prefix: '/v1', service: createService(db, { platformFeeBps: 2000 }) });

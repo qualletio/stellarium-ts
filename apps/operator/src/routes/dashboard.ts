@@ -135,6 +135,16 @@ const dashboardRoutes: FastifyPluginAsync<RouteOptions & { authenticator: Dashbo
         return { revoked: true };
     });
 
+    // Event contracts the organization's API clients deployed, which nodes may run and bill to it.
+    fastify.get('/org/event-mandates', async (request) => ({ mandates: await service.runs.listEventMandates(organization(request).id) }));
+
+    fastify.delete<{ Params: { id: string } }>('/org/event-mandates/:id', { preHandler: requireAdmin }, async (request) => {
+        if (!await service.runs.revokeEventMandate(organization(request).id, request.params.id)) {
+            throw new OperationError(404, 'No such active event mandate');
+        }
+        return { revoked: true };
+    });
+
     fastify.patch<{ Params: { publicKey: string }, Body: ListingUpdate }>('/org/nodes/:publicKey', { preHandler: requireAdmin, schema: { body: listingSchema } }, async (request) => {
         return { node: await service.organizations.updateListing(organization(request).id, request.params.publicKey, request.body) };
     });

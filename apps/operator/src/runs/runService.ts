@@ -1,17 +1,19 @@
-import { and, desc, eq, lt } from "drizzle-orm";
+import { and, desc, eq, isNull, lt } from "drizzle-orm";
 import { maxTokens, parseScript } from "requestscript";
-import { verifySignature } from "../crypto.js";
+import { newId, verifySignature } from "../crypto.js";
 import type { Database, Transaction } from "../db/database.js";
-import { runsTable } from "../db/schema.js";
+import { eventMandatesTable, runsTable } from "../db/schema.js";
 import { OperationError } from "../errors.js";
 import { accounts, adjustOrganization, lockOrganizations, postLedgerTransaction } from "../ledger.js";
 import type { OrganizationService } from "../organizations.js";
 import { HOLD_GRACE_MS, type PaymentService, TOP_UP_URL } from "../payments/paymentService.js";
 import { type ContractVoucher, contractVoucherPayload } from "../payments/types.js";
-import { type ApiClientService, clientSpend, monthStart } from "./clients.js";
+import { type ApiClient, type ApiClientService, clientSpend, monthStart } from "./clients.js";
 import type { RunTokenSigner } from "./tokens.js";
 
 export type Run = typeof runsTable.$inferSelect;
+export type EventMandate = typeof eventMandatesTable.$inferSelect;
+type Node = NonNullable<Awaited<ReturnType<OrganizationService['getNode']>>>;
 
 /** How long a run's hold lasts before maintenance releases it. Long enough for a script making several inference calls. */
 export const RUN_LIFETIME_MS = 1000 * 60 * 15;
@@ -39,6 +41,21 @@ export interface ContractRunAuthorizationRequest {
  * the paying organization, which the contract sees as `caller.org`.
  */
 export type ContractRunAuthorization = (RunAuthorization | { status: 'free' }) & { payerOrganizationId: string };
+export interface EventMandateRequest {
+    /** The run token of the API client deploying the event contract. Its organization pays for the contract's runs. */
+    token: string;
+    /** The event contract, as path.Name. */
+    consumer: string;
+}
+
+export interface EventRunAuthorizationRequest {
+    mandateId: string;
+    /** Chosen by the node, so a retried authorization finds the same run. */
+    runId: string;
+    /** The event contract's source, from which the operator computes the most tokens it can execute. */
+    source: string;
+}
+
 export type RunCaptureResult = { status: 'captured', amountMicroUsd: number } | { status: 'released' };
 
 /** Micro-USD for `tokens` script tokens at `price` per million, rounded up. */
@@ -95,8 +112,17 @@ export class RunService {
     ) {}
 
     async authorize(nodePublicKey: string, request: RunAuthorizationRequest): Promise<RunAuthorization> {
+        const { client, node } = await this.billedClient(nodePublicKey, request.token);
+        return this.holdClientRun(client, node, request.runId, scriptMaxTokens(request.source), 'script');
+    }
+
+    /**
+     * The API client a run token names, and the node it runs on, which must belong to another organization
+     * and be listed. Throws 401, 403 or 422 otherwise.
+     */
+    private async billedClient(nodePublicKey: string, token: string): Promise<{ client: ApiClient, node: Node }> {
         if (!this.tokens) throw new OperationError(503, 'Run tokens are not configured on this operator');
-        const claims = await this.tokens.verify(request.token, nodePublicKey);
+        const claims = await this.tokens.verify(token, nodePublicKey);
         const client = await this.clients.get(claims.clientId);
         if (!client || client.organizationId !== claims.organizationId || client.nodePublicKey !== nodePublicKey) {
             throw new OperationError(401, 'Invalid run token');
@@ -104,6 +130,10 @@ export class RunService {
         if (client.revokedAt) {
             throw new OperationError(401, 'API client has been revoked');
         }
+        return { client, node: await this.billingNode(nodePublicKey, client) };
+    }
+
+    private async billingNode(nodePublicKey: string, client: ApiClient): Promise<Node> {
         const node = await this.organizations.getNode(nodePublicKey);
         if (!node || node.revokedAt) {
             throw new OperationError(403, 'Node has been revoked');
@@ -114,8 +144,14 @@ export class RunService {
         if (!node.listed) {
             throw new OperationError(403, 'Node is not listed');
         }
+        return node;
+    }
 
-        const scriptTokens = scriptMaxTokens(request.source);
+    /**
+     * Holds a run paid by an API client's organization: up to the client's maximum run cost, or less when the
+     * balance or the client's monthly cap is lower, as long as the script's tokens fit. Idempotent per run.
+     */
+    private async holdClientRun(client: ApiClient, node: Node, runId: string, scriptTokens: number, kind: 'script' | 'event'): Promise<RunAuthorization> {
         const price = node.priceMicroUsdPerMillionTokens;
         const tokenBudget = tokenCharge(scriptTokens, price);
         if (tokenBudget > client.maxRunCostMicroUsd) {
@@ -134,16 +170,15 @@ export class RunService {
                     throw new OperationError(422, `Organization ${recipient.id} can't receive payouts yet`);
                 }
 
-                const [existing] = await tx.select().from(runsTable).where(eq(runsTable.runId, request.runId)).limit(1);
+                const [existing] = await tx.select().from(runsTable).where(eq(runsTable.runId, runId)).limit(1);
                 if (existing) {
                     // A retried authorization of the same run gets the same hold.
-                    if (existing.clientId === client.id && existing.status === 'held') {
+                    if (existing.clientId === client.id && existing.kind === kind && existing.status === 'held') {
                         return { status: 'held' as const, heldMicroUsd: existing.holdMicroUsd, maxTokens: existing.maxTokens, tokenBudgetMicroUsd: existing.tokenBudgetMicroUsd };
                     }
                     throw new OperationError(409, 'Run has already been authorized');
                 }
 
-                // Holds what the client allows per run, or less when the balance or monthly cap is lower, as long as the script's tokens fit.
                 const available = payer.balanceMicroUsd - payer.heldMicroUsd;
                 const capRemaining = client.monthlyCapMicroUsd === null
                     ? Number.POSITIVE_INFINITY
@@ -156,11 +191,12 @@ export class RunService {
                 }
 
                 await tx.insert(runsTable).values({
-                    runId: request.runId,
+                    runId,
+                    kind,
                     clientId: client.id,
                     payerOrganizationId: payer.id,
                     recipientOrganizationId: recipient.id,
-                    nodePublicKey,
+                    nodePublicKey: node.publicKey,
                     priceMicroUsdPerMillionTokens: price,
                     maxTokens: scriptTokens,
                     holdMicroUsd: hold,
@@ -176,6 +212,56 @@ export class RunService {
             if (isUniqueViolation(error)) throw new OperationError(409, 'Run has already been authorized');
             throw error;
         }
+    }
+
+    /**
+     * Lets the calling node run an event contract an API client deployed to it, billed to the client's
+     * organization like the client's own runs. The node asks with the client's run token when the client
+     * deploys the contract, which is the organization's consent. Deploying it again after a revocation renews
+     * the mandate. Idempotent per client and contract.
+     */
+    async createEventMandate(nodePublicKey: string, request: EventMandateRequest): Promise<{ mandateId: string }> {
+        const { client } = await this.billedClient(nodePublicKey, request.token);
+        const [mandate] = await this.db.insert(eventMandatesTable)
+            .values({ id: newId('mnd'), organizationId: client.organizationId, clientId: client.id, nodePublicKey, consumer: request.consumer })
+            .onConflictDoUpdate({ target: [eventMandatesTable.clientId, eventMandatesTable.consumer], set: { revokedAt: null } })
+            .returning();
+        return { mandateId: mandate!.id };
+    }
+
+    /**
+     * Holds a run for one event an event contract consumes, under its mandate, as `authorize` holds a script
+     * run by the mandate's API client. Refused once the mandate or the client is revoked.
+     */
+    async authorizeEvent(nodePublicKey: string, request: EventRunAuthorizationRequest): Promise<RunAuthorization> {
+        const [mandate] = await this.db.select().from(eventMandatesTable).where(eq(eventMandatesTable.id, request.mandateId)).limit(1);
+        if (!mandate || mandate.nodePublicKey !== nodePublicKey) {
+            throw new OperationError(404, 'No such event mandate');
+        }
+        if (mandate.revokedAt) {
+            throw new OperationError(403, 'The event mandate has been revoked');
+        }
+        const client = await this.clients.get(mandate.clientId);
+        if (!client || client.revokedAt) {
+            throw new OperationError(403, 'The event mandate\'s API client has been revoked');
+        }
+        const node = await this.billingNode(nodePublicKey, client);
+        return this.holdClientRun(client, node, request.runId, contractMaxTokens(request.source), 'event');
+    }
+
+    /** The organization's event mandates, newest first. */
+    async listEventMandates(organizationId: string): Promise<EventMandate[]> {
+        return this.db.select().from(eventMandatesTable).where(eq(eventMandatesTable.organizationId, organizationId)).orderBy(desc(eventMandatesTable.createdAt));
+    }
+
+    /** Stops a node from running the event contract for the organization. False when there is no such active mandate. */
+    async revokeEventMandate(organizationId: string, mandateId: string): Promise<boolean> {
+        const revoked = await this.db.update(eventMandatesTable).set({ revokedAt: new Date() }).where(and(
+            eq(eventMandatesTable.id, mandateId),
+            eq(eventMandatesTable.organizationId, organizationId),
+            isNull(eventMandatesTable.revokedAt),
+        )).returning({ id: eventMandatesTable.id });
+        return revoked.length > 0;
     }
 
     /**

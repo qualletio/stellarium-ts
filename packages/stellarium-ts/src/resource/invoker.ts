@@ -2,6 +2,7 @@ import { Resource, ResourceFunctionCallParameter, ResourceInvoker } from "reques
 import type { OperatorClient } from "../client/operatorClient.js";
 import { hashData, signData } from "../crypto/utils.js";
 import type { GrantService } from "../grant/service.js";
+import type { EventLineage } from "../event/types.js";
 import { estimateInputTokens, inferenceCharge, type InferenceUsage, isInferenceFunction, isInferenceManifest, parseInferenceResult, parseMaxTokens } from "./inference.js";
 import { isContractFunction, isContractManifest, ResourceRepository, type StellariumFixedPaymentManifest, type StellariumInferencePaymentManifest, type StellariumResourceFunction } from "./repository.js";
 import { type InvokeResult, settlePaidCall } from "./settlement.js";
@@ -184,6 +185,11 @@ export interface ScriptContext {
     caller?: CallerIdentity;
     /** The contracts (`path.Name`) this script runs inside on this node, outermost first. */
     contracts?: string[];
+    /**
+     * The chain of events the script runs in, when an event started it. It can't call a contract in the chain,
+     * here or on another node, which is sent the chain with the call.
+     */
+    event?: EventLineage;
 }
 
 /** Contracts may call each other, so each call goes one deeper, and a call past this depth fails. */
@@ -299,6 +305,9 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             if (manifest && !manifest.recipientOrganizationId) {
                 return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: its payment manifest names no recipient organization` } };
             }
+            if (contract && context?.event?.contracts.includes(`${resource.path}.${resource.name}`)) {
+                return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: it is earlier in this chain of events` } };
+            }
             if (contract) {
                 // A contract may make paid calls of its own, so a call always carries a voucher, even at a price of 0.
                 if (!manifest || !isContractManifest(manifest) || !Number.isSafeInteger(manifest.priceMicroUsdPerMillionTokens) || manifest.priceMicroUsdPerMillionTokens < 0) {
@@ -311,6 +320,9 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 const costLimit = this.contracts?.costLimitMicroUsd ?? this.costLimitMicroUsd;
                 requestBody.paymentVoucher = this.createContractVoucher(manifest.recipientOrganizationId!, manifest.priceMicroUsdPerMillionTokens, costLimit, resource.path, resource.name, functionName, parameters, run?.runId);
                 requestBody.contractDepth = depth;
+                if (context?.event) {
+                    requestBody.eventLineage = context.event;
+                }
             } else if (manifest && inference) {
                 console.log(`Resource function ${resource.name}.${functionName} is a paid inference function, creating payment voucher...`);
                 // Peers' manifests aren't validated on receipt.
@@ -373,6 +385,9 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             if (isContractFunction(fn)) {
                 if (!this.contracts?.host) {
                     return { value: null, error: { message: `Failed to invoke ${resource.name}.${fn.name}: this node doesn't run contracts` } };
+                }
+                if (context?.event?.contracts.includes(`${resource.path}.${resource.name}`)) {
+                    return { value: null, error: { message: `Failed to invoke ${resource.name}.${fn.name}: it is earlier in this chain of events` } };
                 }
                 return this.contracts.host.invokeLocal(resource, parameters, context ?? {});
             }
