@@ -97,7 +97,7 @@ export const enrollmentTokensTable = pgTable("enrollment_tokens", {
  * - released: the call failed, cost nothing, or the hold expired. Nothing was charged.
  */
 export const RECEIPT_STATUSES = ['held', 'captured', 'released'] as const;
-export const RUN_KINDS = ['script', 'contract'] as const;
+export const RUN_KINDS = ['script', 'contract', 'event'] as const;
 export type ReceiptStatus = typeof RECEIPT_STATUSES[number];
 
 /**
@@ -109,9 +109,11 @@ export const runsTable = pgTable("runs", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   // Chosen by the node, so a retried authorization finds the same run.
   runId: uuid().notNull().unique(),
-  // 'script' for a request script an API client ran, 'contract' for a call to a contract on the node.
+  // 'script' for a request script an API client ran, 'contract' for a call to a contract on the node, 'event'
+  // for an event contract the node ran with an event, under an event mandate.
   kind: varchar({ length: 16, enum: RUN_KINDS }).notNull().default('script'),
-  // The API client that ran the script. Null for a contract call, which a node authorizes with a voucher.
+  // The API client that ran the script, or whose event mandate pays for an event contract. Null for a contract
+  // call, which a node authorizes with a voucher.
   clientId: varchar({ length: 64 }).references(() => apiClientsTable.id),
   // A contract call made by another run: its hold came out of that run's hold, and what's left goes back.
   parentRunId: integer().references((): AnyPgColumn => runsTable.id),
@@ -143,6 +145,27 @@ export const runsTable = pgTable("runs", {
   index("runs_payerOrganizationId_index").on(table.payerOrganizationId),
   index("runs_recipientOrganizationId_index").on(table.recipientOrganizationId),
   index("runs_status_expiresAt_index").on(table.status, table.expiresAt),
+]);
+
+/**
+ * An organization's standing permission for a node to run one of its event contracts, billed like the runs
+ * of the API client that deployed it. The node creates it when the client deploys the event contract, with
+ * the client's run token, and each event the contract consumes is held and charged as a run under it. The
+ * organization stops it by revoking the mandate or the API client.
+ */
+export const eventMandatesTable = pgTable("event_mandates", {
+  // `mnd_` plus random characters.
+  id: varchar({ length: 64 }).primaryKey(),
+  organizationId: varchar({ length: 64 }).notNull().references(() => organizationsTable.id),
+  clientId: varchar({ length: 64 }).notNull().references(() => apiClientsTable.id),
+  nodePublicKey: varchar({ length: 255 }).notNull().references(() => nodesTable.publicKey),
+  // The event contract, as path.Name.
+  consumer: varchar({ length: 512 }).notNull(),
+  createdAt: timestamp().notNull().defaultNow().$defaultFn(() => new Date()),
+  revokedAt: timestamp(),
+}, (table) => [
+  unique("event_mandates_clientId_consumer_unique").on(table.clientId, table.consumer),
+  index("event_mandates_organizationId_index").on(table.organizationId),
 ]);
 
 /** One voucher, from its authorization to its capture or release. */

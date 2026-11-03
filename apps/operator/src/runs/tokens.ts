@@ -7,6 +7,16 @@ export const RUN_TOKEN_ISSUER = 'stellarium';
 
 export const RUN_TOKEN_LIFETIME_SECONDS = 60 * 15;
 
+/**
+ * The `aud` of every membership token. No node's public key can equal it, so a membership token is never a
+ * valid run token, and a run token, whose audience is a node's key, is never a valid membership token.
+ * Copied as MEMBERSHIP_TOKEN_AUDIENCE in stellarium-ts's client/runTokens.ts.
+ */
+export const MEMBERSHIP_TOKEN_AUDIENCE = 'stellarium:membership';
+
+/** A node refreshes its session every five minutes, so its token is always well within this. */
+export const MEMBERSHIP_TOKEN_LIFETIME_SECONDS = 60 * 60;
+
 /** What a run token says: which client runs, on which node, paid by which organization. */
 export interface RunTokenClaims {
     clientId: string;
@@ -45,6 +55,22 @@ export class RunTokenSigner {
             .setJti(crypto.randomUUID())
             .sign(this.privateKey);
         return { token, expiresIn: RUN_TOKEN_LIFETIME_SECONDS };
+    }
+
+    /**
+     * A membership token: the operator's statement that the node with `nodePublicKey` belongs to `organizationId`.
+     * A node attaches it to the events it publishes, so the nodes that receive them can check that the
+     * publisher belongs to the organization that owns the event type.
+     */
+    async signMembership(nodePublicKey: string, organizationId: string): Promise<string> {
+        return new SignJWT({ org: organizationId, use: 'membership' })
+            .setProtectedHeader({ alg: 'EdDSA', kid: this.kid })
+            .setIssuer(RUN_TOKEN_ISSUER)
+            .setSubject(nodePublicKey)
+            .setAudience(MEMBERSHIP_TOKEN_AUDIENCE)
+            .setIssuedAt()
+            .setExpirationTime(`${MEMBERSHIP_TOKEN_LIFETIME_SECONDS}s`)
+            .sign(this.privateKey);
     }
 
     /** Throws 401 unless the token is one of this signer's, unexpired and addressed to `nodePublicKey`. */

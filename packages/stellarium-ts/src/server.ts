@@ -11,13 +11,16 @@ import { validateInferenceFunction } from './resource/inference.js';
 import { StellariumResource } from './resource/repository.js';
 import routes, { RateLimitConfig } from './routes.js';
 import { createService, type NodeConfig, type Service } from './service.js';
-import { announceResources, StartupService } from './startup.js';
+import { announceEvents, announceResources, StartupService } from './startup.js';
+import { DEFAULT_MAX_EVENT_DATA_BYTES, DEFAULT_MAX_EVENTS_PER_RUN } from './event/types.js';
 import { OperatorClient } from './client/operatorClient.js';
 
 export const DEFAULT_COST_LIMIT_MICRO_USD = 10_000;
 export const DEFAULT_GRANT_REFRESH_INTERVAL_MS = 1000 * 60 * 5;
 /** How often a node with an operator asks it again for its organization and price, which may change on the dashboard. */
 export const DEFAULT_SESSION_REFRESH_INTERVAL_MS = 1000 * 60 * 5;
+/** How often the event queues are checked for deliveries and event contract runs that are due, besides when an event is queued. */
+export const DEFAULT_EVENT_WORKER_INTERVAL_MS = 1000 * 5;
 
 export interface StellariumNodeOptions {
     port?: number;
@@ -83,6 +86,12 @@ export interface StellariumNodeOptions {
     grantRefreshIntervalMs?: number;
     /** How often to ask the operator again for this node's organization and price. Defaults to five minutes. */
     sessionRefreshIntervalMs?: number;
+    /** The most events one run may emit. Defaults to `MAX_EVENTS_PER_RUN`, then 16. */
+    maxEventsPerRun?: number;
+    /** The most one event's data may take, as JSON, in bytes. Defaults to `MAX_EVENT_DATA_BYTES`, then 32 KiB. */
+    maxEventDataBytes?: number;
+    /** How often the event queues are checked besides when an event is queued. Defaults to five seconds. */
+    eventWorkerIntervalMs?: number;
     /**
      * Decides callers' requests for grants on this node's resources (`POST /v1/grants/request`).
      * Without it, callers can only get grants from `issueGrant`.
@@ -117,6 +126,8 @@ export function resolveConfig(options: StellariumNodeOptions, resources: Stellar
     const contractDeployFee = nonnegativeInteger('contractDeployFeeMicroUsd', options.contractDeployFeeMicroUsd, process.env.CONTRACT_DEPLOY_FEE_MICRO_USD) ?? 0;
     const maxContractSourceBytes = nonnegativeInteger('maxContractSourceBytes', options.maxContractSourceBytes, process.env.MAX_CONTRACT_SOURCE_BYTES) ?? DEFAULT_MAX_CONTRACT_SOURCE_BYTES;
     const maxContractStateBytes = nonnegativeInteger('maxContractStateBytes', options.maxContractStateBytes, process.env.MAX_CONTRACT_STATE_BYTES) ?? DEFAULT_MAX_CONTRACT_STATE_BYTES;
+    const maxEventsPerRun = nonnegativeInteger('maxEventsPerRun', options.maxEventsPerRun, process.env.MAX_EVENTS_PER_RUN) ?? DEFAULT_MAX_EVENTS_PER_RUN;
+    const maxEventDataBytes = nonnegativeInteger('maxEventDataBytes', options.maxEventDataBytes, process.env.MAX_EVENT_DATA_BYTES) ?? DEFAULT_MAX_EVENT_DATA_BYTES;
     return {
         baseUrl: required('BASE_URL', options.baseUrl ?? process.env.BASE_URL),
         publicKey: required('SIGNING_PUBLIC_KEY', options.publicKey ?? process.env.SIGNING_PUBLIC_KEY),
@@ -132,6 +143,8 @@ export function resolveConfig(options: StellariumNodeOptions, resources: Stellar
         contractDeployFeeMicroUsd: contractDeployFee,
         maxContractSourceBytes,
         maxContractStateBytes,
+        maxEventsPerRun,
+        maxEventDataBytes,
         ...resolveDatabase(options),
     };
 }
@@ -190,7 +203,7 @@ export class StellariumNode {
         const session = () => new OperatorClient(config.operatorUrl, config.publicKey, config.privateKey).session(enrollmentToken, config.baseUrl);
         if (hostsPaidFunctions(this.resources) || enrollmentToken) {
             try {
-                ({ organizationId: config.organizationId, priceMicroUsdPerMillionTokens: config.priceMicroUsdPerMillionTokens } = await session());
+                ({ organizationId: config.organizationId, priceMicroUsdPerMillionTokens: config.priceMicroUsdPerMillionTokens, membershipToken: config.membershipToken } = await session());
             } catch (error) {
                 const hint = enrollmentToken ? '' : '. Create an enrollment token for it at https://platform.stellarium.sh and set ENROLLMENT_TOKEN';
                 throw new Error(`${error instanceof Error ? error.message : String(error)}${hint}`, { cause: error });
@@ -198,9 +211,12 @@ export class StellariumNode {
         } else if (config.operatorUrl) {
             // Serving doesn't depend on it, so it doesn't hold up the start. Until it answers, run tokens from
             // this node's own organization are refused as if billed.
-            session().then(({ organizationId, priceMicroUsdPerMillionTokens }) => {
+            session().then(({ organizationId, priceMicroUsdPerMillionTokens, membershipToken }) => {
                 config.organizationId = organizationId;
                 config.priceMicroUsdPerMillionTokens = priceMicroUsdPerMillionTokens;
+                config.membershipToken = membershipToken;
+                // Peers learn this node's event types once it can prove its organization.
+                this.service?.eventService.announce?.();
             }, (error) => {
                 fastify.log.warn(`No session with the operator, so this node can't be listed: ${error instanceof Error ? error.message : String(error)}`);
             });
@@ -247,8 +263,10 @@ export class StellariumNode {
         const scheduleSessionRefresh = () => {
             sessionRefresher = setTimeout(async () => {
                 try {
-                    const { organizationId, priceMicroUsdPerMillionTokens } = await session();
+                    const { organizationId, priceMicroUsdPerMillionTokens, membershipToken } = await session();
                     const changed = organizationId !== config.organizationId || priceMicroUsdPerMillionTokens !== config.priceMicroUsdPerMillionTokens;
+                    // Renewed every time, well before it expires, so events published now carry a valid one.
+                    config.membershipToken = membershipToken;
                     config.organizationId = organizationId;
                     config.priceMicroUsdPerMillionTokens = priceMicroUsdPerMillionTokens;
                     if (changed && (await service.contractRepository.allLatest()).length > 0) {
@@ -267,16 +285,23 @@ export class StellariumNode {
             scheduleSessionRefresh();
         }
 
+        // Events are delivered and consumed in the background, retried until they succeed or expire.
+        const eventWorkers = service.eventService.startWorkers(options.eventWorkerIntervalMs ?? DEFAULT_EVENT_WORKER_INTERVAL_MS);
+
         fastify.addHook('onClose', async () => {
             closed = true;
             clearTimeout(refresher);
             clearTimeout(sessionRefresher);
+            eventWorkers.stop();
         });
 
         await fastify.register(routes, { prefix: '/v1', service, rateLimit: options.rateLimit });
         // Peers learn of a contract as soon as it is deployed, and forget it when it is deleted.
         service.contractService.announce = () => {
             announceResources(fastify.log, service).catch(error => fastify.log.error(error, 'Failed to announce resources'));
+        };
+        service.eventService.announce = () => {
+            announceEvents(fastify.log, service).catch(error => fastify.log.error(error, 'Failed to announce events'));
         };
 
         const address = await fastify.listen({ port: options.port ?? 3000, host: options.host ?? '0.0.0.0' });

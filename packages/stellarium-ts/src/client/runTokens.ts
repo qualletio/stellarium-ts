@@ -3,6 +3,16 @@ import { createRemoteJWKSet, type JWTPayload, type JWTVerifyGetKey, jwtVerify } 
 /** The `iss` of every run token. Copied from RUN_TOKEN_ISSUER in apps/operator/src/runs/tokens.ts. */
 export const RUN_TOKEN_ISSUER = 'stellarium';
 
+/** The `aud` of every membership token. Copied from MEMBERSHIP_TOKEN_AUDIENCE in apps/operator/src/runs/tokens.ts. */
+export const MEMBERSHIP_TOKEN_AUDIENCE = 'stellarium:membership';
+
+/** What a membership token says: the operator's statement that a node belongs to an organization. */
+export interface Membership {
+    /** The node's public key. */
+    publicKey: string;
+    organizationId: string;
+}
+
 /** Who a run token lets run scripts on this node, and which organization pays. */
 export interface RunTokenClaims {
     clientId: string;
@@ -41,4 +51,27 @@ export class RunTokenVerifier {
             return undefined;
         }
     }
+
+    /**
+     * The membership a node's token states, or undefined unless the operator signed it and it was valid at
+     * `at`. Events are checked at the time they were published, since a delivery may be retried after the
+     * token that came with it expires.
+     */
+    async verifyMembership(token: string, at: Date = new Date()): Promise<Membership | undefined> {
+        try {
+            const { payload } = await jwtVerify(token, this.keys, { issuer: RUN_TOKEN_ISSUER, audience: MEMBERSHIP_TOKEN_AUDIENCE, algorithms: ['EdDSA'], currentDate: at });
+            if (payload.use !== 'membership' || typeof payload.sub !== 'string' || typeof payload.org !== 'string') {
+                return undefined;
+            }
+            if (payload.iat !== undefined && payload.iat * 1000 > at.getTime() + CLOCK_SKEW_MS) {
+                return undefined;
+            }
+            return { publicKey: payload.sub, organizationId: payload.org };
+        } catch {
+            return undefined;
+        }
+    }
 }
+
+/** How far a membership token's issue time may be after the moment it is checked at. */
+const CLOCK_SKEW_MS = 5 * 60 * 1000;

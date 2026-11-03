@@ -3,6 +3,7 @@ import { signData } from "./crypto/utils.js";
 import { Peer, peerAnnouncementPayload } from "./peer/repository.js";
 import { resourceAnnouncementPayload, StellariumResource } from "./resource/repository.js";
 import { Service } from "./service.js";
+import type { EventAnnouncement } from "./event/types.js";
 
 /** Per request to a peer during startup. */
 export const STARTUP_REQUEST_TIMEOUT_MS = 10_000;
@@ -59,6 +60,40 @@ export async function announceResources(log: FastifyBaseLogger, service: Service
     }, 'resources');
 
     log.info(`Broadcasted ${resources.length} resources to ${peers.length} peers`);
+}
+
+/** Sends this node's event types and event contracts, signed, to every peer it knows. Run at startup, and when they change. */
+export async function announceEvents(log: FastifyBaseLogger, service: Service): Promise<void> {
+    const peers = await otherPeers(service);
+    const announcement = await service.eventService.announcement();
+    if (announcement.eventTypes.length === 0 && announcement.subscriptions.length === 0 && !service.eventService.announcedBefore) {
+        return;
+    }
+    service.eventService.announcedBefore = true;
+    await putToPeers(log, peers, '/all-events', announcement, 'events');
+    log.info(`Broadcasted ${announcement.eventTypes.length} event types and ${announcement.subscriptions.length} event contracts to ${peers.length} peers`);
+}
+
+/**
+ * Learns every known peer's event types and event contracts from the signed announcement each serves. Each
+ * peer answers for its own, so a peer can't vouch for another's. Failures are logged and skipped.
+ */
+export async function learnEvents(log: FastifyBaseLogger, service: Service): Promise<void> {
+    for (const peer of await otherPeers(service)) {
+        try {
+            const response = await fetch(`${peer.baseUrl}/v1/events/announcement`, { signal: AbortSignal.timeout(STARTUP_REQUEST_TIMEOUT_MS) });
+            if (!response.ok) {
+                // Peers on an older version have no events.
+                continue;
+            }
+            const result = await service.eventService.applyAnnouncement(await response.json() as EventAnnouncement, peer.baseUrl);
+            if (!result.ok) {
+                log.warn(`Ignored the events of node ${peer.baseUrl}: ${result.error}`);
+            }
+        } catch (error) {
+            log.warn(error, `Failed to learn the events of node ${peer.baseUrl}`);
+        }
+    }
 }
 
 export class StartupService {
@@ -171,5 +206,7 @@ export class StartupService {
         this.log.info(`Broadcasted self to ${peers.length} peers`);
 
         await announceResources(this.log, this.service);
+        await learnEvents(this.log, this.service);
+        await announceEvents(this.log, this.service);
     }
 }

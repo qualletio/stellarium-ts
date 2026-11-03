@@ -181,11 +181,11 @@ export class ResourceRepository {
             return [];
         }
         const { repository, price, organizationId } = this.contracts;
-        return (await repository.allLatest()).map(contract => contractResource(contract, this.baseUrl, price(), organizationId()));
+        return (await repository.allLatestCallable()).map(contract => contractResource(contract, this.baseUrl, price(), organizationId()));
     }
 
     private async contractResource(path: string, name: string): Promise<StellariumResource | undefined> {
-        const contract = await this.contracts?.repository.latest(path, name);
+        const contract = await this.contracts?.repository.latestCallable(path, name);
         return contract && contractResource(contract, this.baseUrl, this.contracts!.price(), this.contracts!.organizationId());
     }
 

@@ -78,6 +78,20 @@ export interface OperatorSession {
     organizationId: string;
     /** The node's listed price per million script tokens. Absent from older operators. */
     priceMicroUsdPerMillionTokens?: number;
+    /**
+     * The operator's signed statement that this node belongs to its organization, which it attaches to the events
+     * it publishes. Absent from operators without run tokens, and from older ones.
+     */
+    membershipToken?: string;
+}
+
+/** What a node sends to run an event contract for another organization. Matches apps/operator/src/runs/runService.ts. */
+export interface EventRunAuthorizationRequest {
+    /** From `createEventMandate`, when the contract was deployed. */
+    mandateId: string;
+    runId: string;
+    /** The event contract's source, which the operator prices. */
+    source: string;
 }
 
 /** The operator's hold for a run: up to `heldMicroUsd` for the script's tokens and its paid calls together. */
@@ -200,6 +214,26 @@ export class OperatorClient {
             free: body?.status === 'free',
             ...(typeof body?.payerOrganizationId === 'string' ? { payerOrganizationId: body.payerOrganizationId } : {}),
         };
+    }
+
+    /**
+     * Asks the operator to let this node run an event contract that another organization's API client is
+     * deploying, billed to that organization. `token` is the client's run token. Returns the mandate's id, or
+     * the operator's refusal.
+     */
+    async createEventMandate(request: { token: string, consumer: string }): Promise<{ ok: true, mandateId: string } | { ok: false, status: number, error: string }> {
+        const result = await this.hold('/runs/event/mandates', request);
+        if (!result.ok) return result;
+        const mandateId = (result.body as { mandateId?: unknown } | undefined)?.mandateId;
+        return typeof mandateId === 'string' ? { ok: true, mandateId } : { ok: false, status: 502, error: 'The operator answered without a mandate' };
+    }
+
+    /** Asks the operator to hold a run of an event contract under its mandate, before running it with an event. */
+    async authorizeEventRun(request: EventRunAuthorizationRequest): Promise<RunAuthorizeResult> {
+        const result = await this.hold('/runs/event/authorize', request);
+        if (!result.ok) return result;
+        const { heldMicroUsd, maxTokens } = result.body as { heldMicroUsd: number, maxTokens: number };
+        return { ok: true, heldMicroUsd, maxTokens };
     }
 
     /** Charges a held run for the tokens its script executed, and releases the rest of its hold. */

@@ -51,6 +51,9 @@ function* calls(statements: Statement[]): Generator<Extract<Expression, { kind: 
         }
         if (statement.elseBody) yield* calls(statement.elseBody);
         break;
+      case 'emit':
+        for (const argument of statement.args) yield* expressionCalls(argument.value);
+        break;
       case 'resourceDecl':
         break;
     }
@@ -121,11 +124,20 @@ export function checkScript(source: string, catalog: Catalog): ScriptCheck {
 
   const problems: string[] = [];
   const declaration = script.declaration;
+  if (declaration.kind === 'event') {
+    return {
+      ok: false,
+      problems: ['This is an event type, which the Composer can\'t run or deploy. Declare it with `POST /v1/events` on one of your organization\'s nodes.'],
+      warnings: [],
+      paidCalls: [],
+    };
+  }
   const result: ScriptCheck = { ok: false, kind: declaration.kind, problems, warnings: [], maxTokens: maxTokens(script), paidCalls: [] };
   if (declaration.kind === 'contract') {
     result.contract = { path: declaration.path.join('.'), name: declaration.name, version: declaration.version, hasReturnType: declaration.returnType !== undefined };
     if (declaration.path.length === 0) problems.push('A contract deployed to a node needs a dotted path before its name, such as `com.example.Name`.');
-    if (!declaration.returnType) problems.push('A contract deployed to a node needs a return type, such as `: int32` after its parameters.');
+    // An event contract consumes events and returns nothing.
+    if (!declaration.returnType && !declaration.consumes) problems.push('A contract deployed to a node needs a return type, such as `: int32` after its parameters.');
     if (findResource(catalog, declaration.path.join('.'), declaration.name)) {
       problems.push(`${declaration.path.join('.')}.${declaration.name} already exists on this node. Deploy a new version with \`@<version>\` only if your organization owns it; otherwise choose another path.`);
     }

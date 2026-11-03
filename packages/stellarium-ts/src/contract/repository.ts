@@ -59,6 +59,9 @@ function latestOf(rows: ContractRow[]): StoredContract[] {
     return [...latest.values()].map(toContract);
 }
 
+/** Excludes event contracts from a query on `contract`. */
+const CALLABLE = 'NOT EXISTS (SELECT 1 FROM event_consumer WHERE event_consumer.path = contract.path AND event_consumer.name = contract.name)';
+
 /** Why `save` refused a contract. */
 export type SaveContractRefusal = 'version_exists' | 'owned_by_another';
 
@@ -101,6 +104,20 @@ export class ContractRepository {
     async owner(path: string, name: string): Promise<string | null | undefined> {
         const row = await this.db.get<{ owner_organization_id: string | null }>('SELECT owner_organization_id FROM contract WHERE path = ? AND name = ? LIMIT 1', [path, name]);
         return row ? row.owner_organization_id : undefined;
+    }
+
+    /**
+     * The contract's latest version, unless it is an event contract, which runs only with events and so is
+     * none of the node's resources.
+     */
+    async latestCallable(path: string, name: string): Promise<StoredContract | undefined> {
+        const rows = await this.db.all<ContractRow[]>(`SELECT * FROM contract WHERE path = ? AND name = ? AND ${CALLABLE}`, [path, name]);
+        return latestOf(rows)[0];
+    }
+
+    /** The latest version of every contract but the event contracts, ordered by path and name. */
+    async allLatestCallable(): Promise<StoredContract[]> {
+        return latestOf(await this.db.all<ContractRow[]>(`SELECT * FROM contract WHERE ${CALLABLE} ORDER BY path, name`));
     }
 
     /** The latest version of every contract, ordered by path and name. */
