@@ -29,6 +29,9 @@ All amounts are integer micro-USD (1 USD = 1,000,000).
   at `/v1/auth/*`) and the dashboard API. It signs session cookies.
 - `RESEND_API_KEY`, `EMAIL_FROM`: send verification, password reset and invitation
   emails through Resend. Without them, the emails are logged instead.
+- `SKIP_EMAIL_VERIFICATION`: `1` signs new dashboard users in at sign-up, without
+  verifying their email, and lets unverified users accept invitations. Local
+  development only (`compose.yaml` sets it); never set it in production.
 - `RUN_TOKEN_PRIVATE_KEY`: an Ed25519 key (PKCS#8 DER, base64url, the format of a
   node's `SIGNING_PRIVATE_KEY`) that signs API clients' run tokens. Its public key is
   served at `/v1/.well-known/jwks.json`. Without it, `/v1/oauth/token` answers 503.

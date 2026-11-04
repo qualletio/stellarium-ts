@@ -20,6 +20,8 @@ export interface AuthConfig {
     github?: { clientId: string, clientSecret: string };
     /** Per-client limits on sign-in, sign-up and the other auth routes. Default true; tests turn it off. */
     rateLimit?: boolean;
+    /** Signs users in without verifying their email, and accepts invitations from unverified users. Local development only. */
+    skipEmailVerification?: boolean;
 }
 
 /**
@@ -29,6 +31,7 @@ export interface AuthConfig {
 export function createAuth(db: Database, config: AuthConfig) {
     // Not awaited, so how long sending takes doesn't reveal whether an account exists.
     const send = (email: Email) => void config.mailer.send(email);
+    const verifyEmail = !config.skipEmailVerification;
     return betterAuth({
         secret: config.secret,
         baseURL: config.dashboardUrl,
@@ -46,7 +49,7 @@ export function createAuth(db: Database, config: AuthConfig) {
         }),
         emailAndPassword: {
             enabled: true,
-            requireEmailVerification: true,
+            requireEmailVerification: verifyEmail,
             sendResetPassword: async ({ user, url }) => send({
                 to: user.email,
                 subject: 'Reset your Stellarium password',
@@ -54,8 +57,8 @@ export function createAuth(db: Database, config: AuthConfig) {
             }),
         },
         emailVerification: {
-            sendOnSignUp: true,
-            sendOnSignIn: true,
+            sendOnSignUp: verifyEmail,
+            sendOnSignIn: verifyEmail,
             autoSignInAfterVerification: true,
             sendVerificationEmail: async ({ user, url }) => send({
                 to: user.email,
@@ -80,7 +83,7 @@ export function createAuth(db: Database, config: AuthConfig) {
             organization({
                 // Balances, nodes and payouts belong to the organization.
                 disableOrganizationDeletion: true,
-                requireEmailVerificationOnInvitation: true,
+                requireEmailVerificationOnInvitation: verifyEmail,
                 sendInvitationEmail: async ({ id, email, organization, inviter }) => send({
                     to: email,
                     subject: `Join ${organization.name} on Stellarium`,

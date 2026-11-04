@@ -76,11 +76,14 @@ if (process.env.BETTER_AUTH_SECRET) {
     process.exit(1);
   }
   if (!RESEND_API_KEY) fastify.log.warn('RESEND_API_KEY is not set: verification, password reset and invitation emails are logged instead of sent');
+  const skipEmailVerification = process.env.SKIP_EMAIL_VERIFICATION === '1';
+  if (skipEmailVerification) fastify.log.warn('SKIP_EMAIL_VERIFICATION=1: new users are signed in without verifying their email. Local development only');
   auth = {
     secret: process.env.BETTER_AUTH_SECRET,
     dashboardUrl,
     mailer: RESEND_API_KEY ? new ResendMailer(RESEND_API_KEY, EMAIL_FROM!, fastify.log) : new LogMailer(fastify.log),
     github: GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET ? { clientId: GITHUB_CLIENT_ID, clientSecret: GITHUB_CLIENT_SECRET } : undefined,
+    skipEmailVerification,
   };
 } else {
   fastify.log.warn('BETTER_AUTH_SECRET is not set: dashboard sign-in and the dashboard API are disabled');

@@ -142,4 +142,28 @@ describe('Better Auth', () => {
         const signedIn = await call('POST', '/sign-in/email', { body: { email: 'ada@example.com', password: 'a new long password' } });
         expect(signedIn.statusCode).toBe(200);
     });
+
+    test('skipping email verification signs a new user in at sign-up, without an email', async () => {
+        await fastify.close();
+        service = createService(db, {
+            platformFeeBps: 2000,
+            auth: { secret: 'a-test-secret-that-is-at-least-32-chars', dashboardUrl: DASHBOARD, mailer, rateLimit: false, skipEmailVerification: true },
+        });
+        fastify = Fastify();
+        await fastify.register(routes, { prefix: '/v1', service });
+        await fastify.ready();
+
+        const signedUp = await call('POST', '/sign-up/email', { body: { email: 'ada@example.com', password: 'correct horse battery', name: 'ada' } });
+        expect(signedUp.statusCode).toBe(200);
+        expect(signedUp.json().token).toEqual(expect.any(String));
+        expect(mailer.sent).toEqual([]);
+
+        const cookie = cookieHeader(signedUp);
+        expect((await call('POST', '/organization/create', { body: { name: 'Acme', slug: 'acme' }, cookie })).statusCode).toBe(200);
+        expect((await org(cookie)).json()).toMatchObject({ name: 'Acme', role: 'owner' });
+
+        const signedIn = await call('POST', '/sign-in/email', { body: { email: 'ada@example.com', password: 'correct horse battery' } });
+        expect(signedIn.statusCode).toBe(200);
+        expect(mailer.sent).toEqual([]);
+    });
 });

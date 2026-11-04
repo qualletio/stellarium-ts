@@ -17,13 +17,15 @@
   align-items: center;
   gap: 10px;
   font-size: 18px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  font-weight: 700;
+  color: var(--fg-strong);
 }
 
 .mark {
   width: 24px;
   height: 24px;
+  color: var(--accent);
+  filter: drop-shadow(0 0 6px var(--accent-dim));
 }
 
 .muted {
@@ -40,13 +42,19 @@
   max-width: 400px;
   padding: 28px;
   border: 1px solid var(--line);
-  background: var(--paper);
+  background: var(--surface);
+  box-shadow: 0 24px 40px -32px var(--shadow);
 }
 
 .title {
-  font-size: 18px;
-  font-weight: 500;
-  letter-spacing: -0.02em;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.title::before {
+  content: "$ ";
+  color: var(--accent);
+  text-shadow: var(--glow);
 }
 
 .subtitle {
@@ -81,7 +89,7 @@
 .divider::after {
   content: "";
   flex: 1;
-  border-top: 1px solid var(--line);
+  border-top: 1px dashed var(--line);
 }
 
 .footer {
@@ -115,4 +123,5 @@
 
 .listItem:hover {
   background: var(--item-hover);
+  color: var(--accent);
 }

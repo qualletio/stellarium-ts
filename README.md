@@ -602,7 +602,7 @@ Create `apps/dashboard/.env`:
 OPERATOR_URL=http://127.0.0.1:3001/v1
 ```
 
-Without `RESEND_API_KEY`, the operator doesn't send email: it logs each verification, password reset and invitation link instead. Find them with `docker compose logs operator | grep Email`. To send real email, or to offer GitHub sign-in, add to `apps/operator/.env`:
+Compose sets `SKIP_EMAIL_VERIFICATION=1` on the operator, so signing up signs you straight in. Set `SKIP_EMAIL_VERIFICATION=0` in the root `.env` to test verification emails. Without `RESEND_API_KEY`, the operator doesn't send email: it logs each verification, password reset and invitation link instead. Find them with `docker compose logs operator | grep Email`. To send real email, or to offer GitHub sign-in, add to `apps/operator/.env`:
 
 ```
 RESEND_API_KEY=re_...

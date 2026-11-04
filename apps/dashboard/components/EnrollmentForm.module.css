@@ -22,12 +22,13 @@
   gap: 8px;
 }
 
-/* A code block, as on stellarium.sh. */
+/* A code block, as in the registry. */
 .code {
   padding: 12px 14px;
   overflow-x: auto;
-  background: #0b1f23;
-  color: #d7e6e3;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg-strong);
   font-family: var(--mono);
   font-size: 13px;
 }

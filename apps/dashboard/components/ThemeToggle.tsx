@@ -7,14 +7,14 @@ import styles from './ThemeToggle.module.css';
 type Theme = 'light' | 'dark';
 
 function currentTheme(): Theme {
-  return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
 }
 
 export function ThemeToggle() {
   // Strict Mode's dev remount clears the attribute the inline script set; put it back.
   useLayoutEffect(() => {
     if (document.documentElement.hasAttribute('data-theme')) return;
-    let theme: Theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    let theme: Theme = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
     try {
       const saved = localStorage.getItem(THEME_STORAGE_KEY);
       if (saved === 'light' || saved === 'dark') theme = saved;

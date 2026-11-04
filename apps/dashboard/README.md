@@ -1,6 +1,6 @@
 # Stellarium Platform dashboard
 
-The console at platform.stellarium.sh. Organization members see their prepaid balance, usage and payouts. Admins buy credits, enroll nodes and set up payouts. It is a Next.js App Router app with CSS Modules (no Tailwind). Sign-in, organizations and roles are [Better Auth](https://www.better-auth.com), hosted by the operator. Its look follows stellarium.sh.
+The console at platform.stellarium.sh. Organization members see their prepaid balance, usage and payouts. Admins buy credits, enroll nodes and set up payouts. It is a Next.js App Router app with CSS Modules (no Tailwind). Sign-in, organizations and roles are [Better Auth](https://www.better-auth.com), hosted by the operator. Its look is stellarium.sh's and the resource registry's: a terminal theme in JetBrains Mono, dark by default.
 
 ## Running locally
 
@@ -20,5 +20,5 @@ A listed node appears on **Explore** with its price per million script tokens. *
 - Data is fetched in server components through `lib/api.ts` (`server-only`), which calls the operator with the browser's session cookie. Mutations are Server Actions in `lib/actions.ts`. Actions that go to Stripe redirect to the URL the operator returns.
 - `proxy.ts` (Next 16's middleware) sends visitors without a session cookie to `/sign-in`, except on the sign-in, sign-up and password pages. The `(console)` layout checks the session and requires an active organization, sending the user to `/select-organization` otherwise.
 - The Composer: `app/api/composer/route.ts` holds a turn at the operator (`/v1/org/composer/turns`), runs a streaming tool loop with Claude (`lib/composer/turn.ts`), streams NDJSON events to `components/Composer.tsx`, then completes the turn with its messages and token usage. Holding and completing a turn send `DASHBOARD_SERVICE_SECRET`, so a browser can't report its own usage. Claude sees the node's `GET /v1/resources` as a catalog (`lib/composer/catalog.ts`), and its `check_script` and `propose_script` tools parse scripts with `requestscript` and check them against it (`lib/composer/check.ts`). Run and Deploy are Server Actions that get a run token for the API client from the operator (`/v1/org/clients/:id/token`) and call the node.
-- Theme tokens are stellarium.sh's, in `app/globals.css` under `:root[data-theme]`. The theme is set before paint by the script in `app/layout.tsx` and shares stellarium.sh's `theme` storage key.
+- Theme tokens are shared with stellarium.sh and the resource registry, in `app/globals.css` under `:root[data-theme]`, and the dashboard's own names (`--ink`, `--paper`, `--button`…) map onto them. The theme is set before paint by the script in `app/layout.tsx` and shares stellarium.sh's `theme` storage key.
 - Shared building blocks (headers, sections, cards, tables, buttons, badges, fields, skeletons) are in `components/ui.module.css`. Each component has its own module beside it.

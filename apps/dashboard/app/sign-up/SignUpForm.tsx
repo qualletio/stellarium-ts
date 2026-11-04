@@ -1,14 +1,19 @@
 'use client';
 
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import styles from '@/app/auth.module.css';
 import ui from '@/components/ui.module.css';
 import { authClient, errorMessage } from '@/lib/auth-client';
 import { withRedirect } from '@/lib/redirect';
 
-/** Creates the account. The verification link in the email signs the user in and continues to `redirect`. */
+/**
+ * Creates the account. The verification link in the email signs the user in and continues to `redirect`.
+ * When the operator skips verification (local development), sign-up returns a session and continues there directly.
+ */
 export function SignUpForm({ redirect }: { redirect: string }) {
+  const router = useRouter();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const [sentTo, setSentTo] = useState<string>();
@@ -17,12 +22,17 @@ export function SignUpForm({ redirect }: { redirect: string }) {
     setPending(true);
     setError(undefined);
     const email = String(formData.get('email'));
-    const { error } = await authClient.signUp.email({
+    const { data, error } = await authClient.signUp.email({
       name: String(formData.get('name')),
       email,
       password: String(formData.get('password')),
       callbackURL: redirect,
     });
+    if (data?.token) {
+      router.replace(redirect);
+      router.refresh();
+      return;
+    }
     if (error) setError(errorMessage(error));
     else setSentTo(email);
     setPending(false);

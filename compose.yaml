@@ -31,13 +31,17 @@ services:
       SEED_CLIENT_SECRET: cs_local-only-client-secret
       # Signs dashboard session cookies. Local only: production needs its own secret.
       BETTER_AUTH_SECRET: local-only-better-auth-secret-0123456789
+      # Signs new dashboard users in without verifying their email. Local only: never set it in production.
+      # Set SKIP_EMAIL_VERIFICATION=0 in the root .env to test the verification emails.
+      SKIP_EMAIL_VERIFICATION: ${SKIP_EMAIL_VERIFICATION:-1}
       # Signs API clients' run tokens (an Ed25519 PKCS#8 key, base64url). Local only: production needs its own key.
       RUN_TOKEN_PRIVATE_KEY: MC4CAQAwBQYDK2VwBCIEIF3fP6TT6BvfrSEi_gSWQ0bRJ9iHucuxcV-XRxMeQC7O
       # Shared with the dashboard's server, which sends it with the Composer turns it charges for. Local only.
       DASHBOARD_SERVICE_SECRET: local-only-dashboard-secret
       # Stripe keys, RESEND_API_KEY/EMAIL_FROM and GitHub OAuth credentials are optional and come from apps/operator/.env,
       # which the image includes like the nodes' .env files. Setting them here, even empty, would shadow that file.
-      # Without RESEND_API_KEY, verification and invitation links are in `docker compose logs operator`.
+      # Without RESEND_API_KEY, password reset and invitation links (and verification links, with
+      # SKIP_EMAIL_VERIFICATION=0) are in `docker compose logs operator`.
       DASHBOARD_URL: http://localhost:3010
     ports:
       - "127.0.0.1:3001:3001"
