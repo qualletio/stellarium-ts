@@ -188,8 +188,8 @@ importers:
         specifier: 19.3.1
         version: 19.3.1(react@19.3.1)
       requestscript:
-        specifier: 1.6.0
-        version: 1.6.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        specifier: 1.7.0
+        version: 1.7.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       server-only:
         specifier: ^0.0.1
         version: 0.0.1
@@ -269,8 +269,8 @@ importers:
         specifier: ^8.23.1
         version: 8.23.1
       requestscript:
-        specifier: 1.6.0
-        version: 1.6.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        specifier: 1.7.0
+        version: 1.7.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       stripe:
         specifier: ^23.0.1
         version: 23.0.1(@types/node@26.6.5)
@@ -318,8 +318,8 @@ importers:
         specifier: ^8.23.1
         version: 8.23.1
       requestscript:
-        specifier: 1.6.0
-        version: 1.6.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        specifier: 1.7.0
+        version: 1.7.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       sqlite:
         specifier: ^5.1.1
         version: 5.1.1
@@ -2204,8 +2204,8 @@ packages:
     engines: {node: '>=20'}
     hasBin: true
 
-  requestscript@1.6.0:
-    resolution: {integrity: sha512-aSqgEzFw1syR29CNf4OL/zkcX6IP8AuSZOB2nyY8UdhmkBIHHfoeKjmn+s+YBen/1ea6z1DdyDRkr+BEZaMgwA==}
+  requestscript@1.7.0:
+    resolution: {integrity: sha512-w/f0EajYicB+mqZzEPeAyeoHexfcTbRLtHFFDD0vWejfI1ZbO6V9QJkQl/Zv7nUwfn4eOn0q+DmKfv88VXI/yg==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -3980,7 +3980,7 @@ snapshots:
       - valibot
       - zod
 
-  requestscript@1.6.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7):
+  requestscript@1.7.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7):
     dependencies:
       drizzle-orm: 1.0.0-rc.4(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       express: 5.3.0

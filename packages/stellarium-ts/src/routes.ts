@@ -16,6 +16,7 @@ import type { Grant, GrantRenewalRequest, GrantRequest } from './grant/grant.js'
 import { InvalidPublicKeyError } from './grant/service.js';
 import type { EventAnnouncement, EventEnvelope, EventLineage } from './event/types.js';
 import { MAX_EVENT_DEPTH } from './event/types.js';
+import type { StructAnnouncement } from './struct/types.js';
 
 export interface RateLimitConfig {
     max: number;
@@ -248,6 +249,19 @@ const eventAnnouncementSchema = {
         membershipToken: { type: ['string', 'null'] },
         eventTypes: { type: 'array', maxItems: 1000, items: { type: 'object', required: ['path', 'name', 'version', 'fields', 'restricted', 'ownerOrganizationId'] } },
         subscriptions: { type: 'array', maxItems: 1000, items: { type: 'object', required: ['eventPath', 'eventName', 'eventVersion', 'consumer'] } },
+        expiry: nonEmptyString,
+        signature: nonEmptyString,
+    },
+} as const;
+
+// Signed: the structs inside are checked by the service, not coerced here.
+const structAnnouncementSchema = {
+    type: 'object',
+    required: ['publicKey', 'membershipToken', 'structs', 'expiry', 'signature'],
+    properties: {
+        publicKey: nonEmptyString,
+        membershipToken: { type: ['string', 'null'] },
+        structs: { type: 'array', maxItems: 1000, items: { type: 'object', required: ['path', 'name', 'version', 'fields', 'ownerOrganizationId'] } },
         expiry: nonEmptyString,
         signature: nonEmptyString,
     },
@@ -570,6 +584,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
                 meter,
                 builtins: { jwt },
                 events: emitter.resolver,
+                structs: options.service.structService.resolver,
             });
             settle('capture', meter.tokens);
             const unpublishable = emitter.check(result.events);
@@ -707,6 +722,12 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         }
         if (isContractVoucher(paymentVoucher)) {
             return reply.status(400).send({ error: 'Invalid payment voucher' });
+        }
+
+        // A struct-typed parameter is checked before anything is paid or run.
+        const parameterRefusal = await options.service.structService.parameterRefusal(resourceFunction.parameters, resourceRequest.parameters);
+        if (parameterRefusal) {
+            return reply.status(400).send({ error: 'Invalid parameters', details: parameterRefusal });
         }
 
         // Payment manifests are per function. A paid function is never run without a valid voucher.
@@ -888,6 +909,57 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     });
 
     // End Event Routes
+
+    // Start Struct Routes
+
+    /** Declares a version of a struct, owned by this node's organization. Declaring it again with the same fields changes nothing. */
+    fastify.post('/structs', { schema: { body: contractRequestSchema }, preValidation: requireRunAuthorization }, async (request, reply) => {
+        const { source, description } = request.body as { source: string, description?: string };
+        const result = await options.service.structService.deploy(source, description, contractCaller(request));
+        if (!result.ok) {
+            return reply.status(result.status).send({ error: result.error });
+        }
+        return reply.status(result.created ? 201 : 200).send(result.struct);
+    });
+
+    /** Every struct this node knows: the ones it declared, then the ones it learned from peers. */
+    fastify.get('/structs', { schema: { querystring: pageQuerySchema } }, async (request) => {
+        const { items, nextOffset } = await getPage(request.query as PageQuery, (offset, limit) => options.service.structService.repository.list(offset, limit));
+        return { structs: items, nextOffset };
+    });
+
+    /** This node's structs, signed, for a peer learning them. */
+    fastify.get('/structs/announcement', async () => options.service.structService.announcement());
+
+    /** One struct: `path.Name@version`, or the latest version of `path.Name`. */
+    fastify.get('/structs/:ref', async (request, reply) => {
+        const ref = contractRef((request.params as { ref: string }).ref);
+        if (!ref) {
+            return reply.status(400).send({ error: 'Name a struct as path.Name or path.Name@version' });
+        }
+        const repository = options.service.structService.repository;
+        const struct = ref.version === undefined ? await repository.latest(ref.path, ref.name) : await repository.get(ref.path, ref.name, ref.version);
+        if (!struct) {
+            return reply.status(404).send({ error: `No struct ${ref.path}.${ref.name}${ref.version === undefined ? '' : `@${ref.version}`}` });
+        }
+        return struct;
+    });
+
+    /** A peer's structs. Learned ones are kept: struct versions never change or go away. */
+    fastify.put('/all-structs', { schema: { body: structAnnouncementSchema } }, async (request, reply) => {
+        const announcement = request.body as StructAnnouncement;
+        const peer = await options.service.peerRepository.getPeerByPublicKey(announcement.publicKey);
+        if (!peer) {
+            return reply.status(400).send({ error: 'Peer not found' });
+        }
+        const result = await options.service.structService.applyAnnouncement(announcement, peer.baseUrl);
+        if (!result.ok) {
+            return reply.status(result.status).send({ error: result.error });
+        }
+        return { success: true, rejected: result.rejected };
+    });
+
+    // End Struct Routes
 
     // Start Grant Routes
 
