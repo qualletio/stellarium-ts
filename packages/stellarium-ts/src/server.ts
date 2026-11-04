@@ -11,9 +11,11 @@ import { validateInferenceFunction } from './resource/inference.js';
 import { StellariumResource } from './resource/repository.js';
 import routes, { RateLimitConfig } from './routes.js';
 import { createService, type NodeConfig, type Service } from './service.js';
-import { announceEvents, announceResources, StartupService } from './startup.js';
+import { announceEvents, announceResources, announceStructs, StartupService } from './startup.js';
 import { DEFAULT_MAX_EVENT_DATA_BYTES, DEFAULT_MAX_EVENTS_PER_RUN } from './event/types.js';
 import { OperatorClient } from './client/operatorClient.js';
+import { parseTypeString } from 'requestscript';
+import type { HostStruct } from './struct/define.js';
 
 export const DEFAULT_COST_LIMIT_MICRO_USD = 10_000;
 export const DEFAULT_GRANT_REFRESH_INTERVAL_MS = 1000 * 60 * 5;
@@ -93,6 +95,11 @@ export interface StellariumNodeOptions {
     /** How often the event queues are checked besides when an event is queued. Defaults to five seconds. */
     eventWorkerIntervalMs?: number;
     /**
+     * Structs defined with `defineStruct`, declared as the node's organization's when it starts, besides those
+     * passed to `registerStruct`. A node with structs waits for its session with the operator before it serves.
+     */
+    structs?: HostStruct[];
+    /**
      * Decides callers' requests for grants on this node's resources (`POST /v1/grants/request`).
      * Without it, callers can only get grants from `issueGrant`.
      */
@@ -110,7 +117,26 @@ function hostsPaidFunctions(resources: StellariumResource[]): boolean {
     return resources.some(resource => resource.functions.some(fn => fn.paymentManifest));
 }
 
-export function resolveConfig(options: StellariumNodeOptions, resources: StellariumResource[] = []): NodeConfig {
+/** Throws unless every parameter and return type of the resources' functions parses; a struct type must name its version. */
+function validateTypes(resources: StellariumResource[]): void {
+    for (const resource of resources) {
+        for (const fn of resource.functions) {
+            const types = [...fn.parameters.map(parameter => ({ what: `parameter '${parameter.name}'`, type: parameter.type })), { what: 'return type', type: fn.returnType }];
+            for (const { what, type } of types) {
+                if (what === 'return type' && type === 'void') {
+                    continue;
+                }
+                try {
+                    parseTypeString(type);
+                } catch {
+                    throw new Error(`Invalid type '${type}' for the ${what} of ${resource.path}.${resource.name}.${fn.name}: a struct type names its version, such as com.example.Name@1`);
+                }
+            }
+        }
+    }
+}
+
+export function resolveConfig(options: StellariumNodeOptions, resources: StellariumResource[] = [], structs: HostStruct[] = []): NodeConfig {
     const costLimit = options.costLimitMicroUsd ?? (process.env.COST_LIMIT_MICRO_USD ? Number(process.env.COST_LIMIT_MICRO_USD) : DEFAULT_COST_LIMIT_MICRO_USD);
     if (!Number.isSafeInteger(costLimit) || costLimit < 0) {
         throw new Error('costLimitMicroUsd must be a nonnegative integer');
@@ -122,6 +148,7 @@ export function resolveConfig(options: StellariumNodeOptions, resources: Stellar
     for (const resource of resources) {
         resource.functions.forEach(validateInferenceFunction);
     }
+    validateTypes(resources);
     const contractCostLimit = nonnegativeInteger('contractCostLimitMicroUsd', options.contractCostLimitMicroUsd, process.env.CONTRACT_COST_LIMIT_MICRO_USD) ?? costLimit;
     const contractDeployFee = nonnegativeInteger('contractDeployFeeMicroUsd', options.contractDeployFeeMicroUsd, process.env.CONTRACT_DEPLOY_FEE_MICRO_USD) ?? 0;
     const maxContractSourceBytes = nonnegativeInteger('maxContractSourceBytes', options.maxContractSourceBytes, process.env.MAX_CONTRACT_SOURCE_BYTES) ?? DEFAULT_MAX_CONTRACT_SOURCE_BYTES;
@@ -133,8 +160,8 @@ export function resolveConfig(options: StellariumNodeOptions, resources: Stellar
         publicKey: required('SIGNING_PUBLIC_KEY', options.publicKey ?? process.env.SIGNING_PUBLIC_KEY),
         privateKey: required('SIGNING_PRIVATE_KEY', options.privateKey ?? process.env.SIGNING_PRIVATE_KEY),
         apiKey: options.apiKey ?? process.env.API_KEY,
-        // Only a node hosting paid functions settles payments.
-        operatorUrl: hostsPaidFunctions(resources)
+        // Only a node hosting paid functions settles payments. A node with structs needs its organization to own them.
+        operatorUrl: hostsPaidFunctions(resources) || structs.length > 0
             ? required('OPERATOR_URL', options.operatorUrl ?? process.env.OPERATOR_URL)
             : options.operatorUrl ?? process.env.OPERATOR_URL,
         costLimitMicroUsd: costLimit,
@@ -183,6 +210,7 @@ function resolveDatabase(options: StellariumNodeOptions): Pick<NodeConfig, 'data
 
 export class StellariumNode {
     private resources: StellariumResource[] = [];
+    private structs: HostStruct[] = [];
     private service?: Service;
 
     async register(resource: StellariumResource): Promise<void> {
@@ -190,18 +218,27 @@ export class StellariumNode {
     }
 
     /**
+     * Adds a struct from `defineStruct`, for the node to declare as its organization's when it starts. Its
+     * resource functions name it by its `.type`.
+     */
+    async registerStruct(struct: HostStruct): Promise<void> {
+        this.structs.push(struct);
+    }
+
+    /**
      * Listens, then bootstraps from `startingPeer` if one is given.
      * Rejects if the server can't listen or bootstrapping fails.
      */
     async start(fastify: FastifyInstance, options: StellariumNodeOptions): Promise<void> {
-        const config = resolveConfig(options, this.resources);
+        const structs = [...this.structs, ...options.structs ?? []];
+        const config = resolveConfig(options, this.resources, structs);
         const enrollmentToken = options.enrollmentToken ?? process.env.ENROLLMENT_TOKEN;
         // Paid functions are paid to the node's organization, so a provider must be enrolled before it serves them.
         // A node that only calls paid functions enrolls the same way, so its vouchers draw on its organization's balance.
         // Any other node with an operator still reports its URL, for listing, and learns its organization, so its
         // own organization's run tokens run free.
         const session = () => new OperatorClient(config.operatorUrl, config.publicKey, config.privateKey).session(enrollmentToken, config.baseUrl);
-        if (hostsPaidFunctions(this.resources) || enrollmentToken) {
+        if (hostsPaidFunctions(this.resources) || enrollmentToken || structs.length > 0) {
             try {
                 ({ organizationId: config.organizationId, priceMicroUsdPerMillionTokens: config.priceMicroUsdPerMillionTokens, membershipToken: config.membershipToken } = await session());
             } catch (error) {
@@ -215,7 +252,8 @@ export class StellariumNode {
                 config.organizationId = organizationId;
                 config.priceMicroUsdPerMillionTokens = priceMicroUsdPerMillionTokens;
                 config.membershipToken = membershipToken;
-                // Peers learn this node's event types once it can prove its organization.
+                // Peers learn this node's structs and event types once it can prove its organization.
+                this.service?.structService.announce?.();
                 this.service?.eventService.announce?.();
             }, (error) => {
                 fastify.log.warn(`No session with the operator, so this node can't be listed: ${error instanceof Error ? error.message : String(error)}`);
@@ -231,6 +269,8 @@ export class StellariumNode {
                 fastify.log.warn(`Skipped expired grant ${chain[chain.length - 1]?.id} from the start options`);
             }
         }
+        // Before the node serves, so its functions' struct types resolve from the first call.
+        await service.structService.declareHost(structs);
         this.service = service;
 
         // Each run is scheduled after the previous one finishes, so slow renewals never overlap.
@@ -299,6 +339,9 @@ export class StellariumNode {
         // Peers learn of a contract as soon as it is deployed, and forget it when it is deleted.
         service.contractService.announce = () => {
             announceResources(fastify.log, service).catch(error => fastify.log.error(error, 'Failed to announce resources'));
+        };
+        service.structService.announce = () => {
+            announceStructs(fastify.log, service).catch(error => fastify.log.error(error, 'Failed to announce structs'));
         };
         service.eventService.announce = () => {
             announceEvents(fastify.log, service).catch(error => fastify.log.error(error, 'Failed to announce events'));

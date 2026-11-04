@@ -263,6 +263,23 @@ export async function createTables(db: NodeDatabase) {
             PRIMARY KEY (path, name, version)
         );
 
+        -- Structs this node declared (local = 1), and those it learned from nodes of their owner. fields is JSON:
+        -- [{ name, type }]. A struct's path belongs to one organization, and a version never changes or goes away.
+        CREATE TABLE IF NOT EXISTS struct_type (
+            path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            version TEXT NOT NULL,
+            fields TEXT NOT NULL,
+            owner_organization_id TEXT NOT NULL,
+            base_url TEXT NOT NULL,
+            local INTEGER NOT NULL,
+            source TEXT,
+            description TEXT,
+            created_at TEXT NOT NULL,
+
+            PRIMARY KEY (path, name, version)
+        );
+
         -- This node's event contracts: which contract consumes which event type, at the version it was deployed
         -- against. An event contract isn't one of the node's resources: it runs only with events. mandate_id is
         -- the operator's event mandate that bills another organization for its runs, null when they are free.

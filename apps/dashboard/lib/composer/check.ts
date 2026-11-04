@@ -132,6 +132,14 @@ export function checkScript(source: string, catalog: Catalog): ScriptCheck {
       paidCalls: [],
     };
   }
+  if (declaration.kind === 'struct') {
+    return {
+      ok: false,
+      problems: ['This is a struct, which the Composer can\'t run or deploy. Declare it with `POST /v1/structs` on one of your organization\'s nodes.'],
+      warnings: [],
+      paidCalls: [],
+    };
+  }
   const result: ScriptCheck = { ok: false, kind: declaration.kind, problems, warnings: [], maxTokens: maxTokens(script), paidCalls: [] };
   if (declaration.kind === 'contract') {
     result.contract = { path: declaration.path.join('.'), name: declaration.name, version: declaration.version, hasReturnType: declaration.returnType !== undefined };

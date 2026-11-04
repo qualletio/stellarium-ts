@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { interpretParsed, parseScript, RequestScriptError, type Resource, type ResourceFunctionCallParameter, type ResourceResolver, type Script, TokenMeter, typeToString } from "requestscript";
+import { interpretParsed, parseScript, RequestScriptError, type Resource, type ResourceFunctionCallParameter, type ResourceResolver, type Script, structReferences, TokenMeter, typeToString } from "requestscript";
 import type { OperatorClient } from "../client/operatorClient.js";
 import type { EventConsumer } from "../event/repository.js";
 import type { EventContractHost, EventService } from "../event/service.js";
@@ -9,6 +9,7 @@ import { CONTRACT_FUNCTION, type ResourceRepository } from "../resource/reposito
 import { type InvokeResult, settlePaidCall, settleRunLater } from "../resource/settlement.js";
 import type { NodeConfig } from "../service.js";
 import type { ContractRepository, StoredContract } from "./repository.js";
+import type { StructService } from "../struct/service.js";
 import { type ContractStateRepository, type ContractStateRow, DEFAULT_MAX_CONTRACT_STATE_BYTES } from "./state.js";
 
 export const DEFAULT_MAX_CONTRACT_SOURCE_BYTES = 64 * 1024;
@@ -55,6 +56,8 @@ export class ContractService implements ContractHost, EventContractHost {
     announce?: () => void;
     /** Publishes the events contracts emit, and knows the event types they consume. Without it, contracts can't emit or consume events. */
     events?: EventService;
+    /** Resolves the structs contracts' types name. Without it, a contract that names a struct can't be deployed. */
+    structs?: StructService;
     /** The latest call holding each stateful contract (`path.Name`) on this node. */
     private readonly locks = new Map<string, Promise<void>>();
     /** How long a call waits for earlier calls of the same stateful contract. */
@@ -98,6 +101,12 @@ export class ContractService implements ContractHost, EventContractHost {
         }
         const path = declaration.path.join('.');
         const { name, version } = declaration;
+        const structs = this.structs
+            ? await this.structs.checkScript(script, 'contract')
+            : structReferences(script).length > 0 ? refuse(400, 'Invalid contract: this node doesn\'t know any structs') : undefined;
+        if (structs) {
+            return structs;
+        }
 
         if (this.resources.isRegistered({ path, name }) || await this.resources.isLearned(path, name)) {
             return refuse(409, `${path}.${name} is already a resource on the network`);
@@ -389,6 +398,7 @@ export class ContractService implements ContractHost, EventContractHost {
                 builtins: { jwt, caller, ...(context.consuming ? { event: context.consuming.event } : {}) },
                 state: stateful ? { get: (variable, scope) => this.state.get(contract.path, contract.name, variable, scope) } : undefined,
                 events: emitter?.resolver,
+                structs: this.structs?.resolver,
             });
             const unpublishable = emitter?.check(result.events);
             if (unpublishable) {

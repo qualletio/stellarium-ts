@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { type EmittedEvent, emittedEvents, type EventRef, type EventResolver, type EventType, parseScript, RuntimeError, type Script, typeToString } from "requestscript";
+import { type EmittedEvent, emittedEvents, type EventRef, type EventResolver, type EventType, parseScript, parseTypeString, RuntimeError, type Script, structReferences, typeStructReferences, typeToString } from "requestscript";
 import type { RunTokenVerifier } from "../client/runTokens.js";
 import type { ContractCaller, ContractRefusal } from "../contract/service.js";
 import { isFreshExpiry, safeVerifyData, signData } from "../crypto/utils.js";
 import type { NodeConfig } from "../service.js";
+import type { StructService } from "../struct/service.js";
 import { type EventConsumer, EventRepository, type InboxItem, type OutboxItem, type QueuedEvent } from "./repository.js";
 import {
     type AnnouncedEventType,
@@ -101,6 +102,8 @@ export interface DeployedEventType {
 export class EventService {
     /** Set once the node's contract service exists, since it runs the event contracts. */
     contracts?: EventContractHost;
+    /** Knows the structs event types' fields name. Without it, an event type can't name a struct. */
+    structs?: StructService;
     /** Tells peers about this node's event types and event contracts again. Set once the node listens. */
     announce?: () => void;
     /** Whether this node has announced its events, so an empty announcement still clears what peers learned before. */
@@ -148,6 +151,12 @@ export class EventService {
         }
         if (declaration.path.length === 0) {
             return refuse(400, 'Invalid event type: give it a path, such as com.example.Name');
+        }
+        const structs = this.structs
+            ? await this.structs.checkScript(script, 'event type')
+            : structReferences(script).length > 0 ? refuse(400, 'Invalid event type: this node doesn\'t know any structs') : undefined;
+        if (structs) {
+            return structs;
         }
         const organizationId = this.config.organizationId;
         if (!organizationId) {
@@ -568,7 +577,32 @@ export class EventService {
                 typeOwner = membership.organizationId;
             }
         }
-        const rejected = await this.repository.replaceLearned(peerBaseUrl, announcement.eventTypes, typeOwner, announcement.subscriptions);
-        return { ok: true, rejected };
+        // An event type whose fields name a struct this node doesn't know waits until it learns the struct.
+        const unknownStructs: string[] = [];
+        const eventTypes: AnnouncedEventType[] = [];
+        for (const eventType of announcement.eventTypes) {
+            if (await this.namesUnknownStruct(eventType.fields)) {
+                unknownStructs.push(`${qualifiedName(eventType.path, eventType.name)}@${eventType.version}`);
+            } else {
+                eventTypes.push(eventType);
+            }
+        }
+        const rejected = await this.repository.replaceLearned(peerBaseUrl, eventTypes, typeOwner, announcement.subscriptions);
+        return { ok: true, rejected: [...unknownStructs, ...rejected] };
+    }
+
+    /** Whether any of the fields' types names a struct this node doesn't know. */
+    private async namesUnknownStruct(fields: { type: string }[]): Promise<boolean> {
+        const refs = fields.flatMap(field => {
+            try {
+                return typeStructReferences(parseTypeString(field.type));
+            } catch {
+                return [];
+            }
+        });
+        if (refs.length === 0) {
+            return false;
+        }
+        return !this.structs || (await this.structs.unknownReferences(refs)).length > 0;
     }
 }

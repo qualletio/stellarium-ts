@@ -14,6 +14,8 @@ import { ContractService } from "./contract/service.js";
 import { ContractStateRepository } from "./contract/state.js";
 import { EventRepository } from "./event/repository.js";
 import { EventService } from "./event/service.js";
+import { StructRepository } from "./struct/repository.js";
+import { StructService } from "./struct/service.js";
 
 /** Settings a node runs with. `StellariumNode.start` fills these from its options, then the environment. */
 export interface NodeConfig {
@@ -78,6 +80,7 @@ export interface Service {
     contractService: ContractService;
     contractStateRepository: ContractStateRepository;
     eventService: EventService;
+    structService: StructService;
     /** Verifies the run tokens `POST /v1/run` accepts. Set when the node has an operator URL. */
     runTokenVerifier?: RunTokenVerifier;
 }
@@ -117,6 +120,9 @@ export function createService(db: NodeDatabase, resources: StellariumResource[],
     const eventService = new EventService(new EventRepository(db), config, runTokenVerifier);
     contractService.events = eventService;
     eventService.contracts = contractService;
+    const structService = new StructService(new StructRepository(db), config, runTokenVerifier);
+    contractService.structs = structService;
+    eventService.structs = structService;
 
     return {
         config,
@@ -130,6 +136,7 @@ export function createService(db: NodeDatabase, resources: StellariumResource[],
         contractService,
         contractStateRepository,
         eventService,
+        structService,
         runTokenVerifier,
     };
 }

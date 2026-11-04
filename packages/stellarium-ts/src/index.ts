@@ -66,3 +66,14 @@ export {
     type EventSubscription,
     type EventTypeDefinition,
 } from './event/types.js';
+// Structs: defined in TypeScript for resource functions, and the announcement wire format.
+export { defineStruct, type HostStruct } from './struct/define.js';
+export {
+    MAX_STRUCT_FIELDS,
+    MAX_STRUCT_SOURCE_BYTES,
+    structAnnouncementPayload,
+    type AnnouncedStruct,
+    type StructAnnouncement,
+    type StructDefinition,
+    type StructField,
+} from './struct/types.js';

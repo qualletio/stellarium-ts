@@ -4,6 +4,7 @@ import { Peer, peerAnnouncementPayload } from "./peer/repository.js";
 import { resourceAnnouncementPayload, StellariumResource } from "./resource/repository.js";
 import { Service } from "./service.js";
 import type { EventAnnouncement } from "./event/types.js";
+import type { StructAnnouncement } from "./struct/types.js";
 
 /** Per request to a peer during startup. */
 export const STARTUP_REQUEST_TIMEOUT_MS = 10_000;
@@ -72,6 +73,39 @@ export async function announceEvents(log: FastifyBaseLogger, service: Service): 
     service.eventService.announcedBefore = true;
     await putToPeers(log, peers, '/all-events', announcement, 'events');
     log.info(`Broadcasted ${announcement.eventTypes.length} event types and ${announcement.subscriptions.length} event contracts to ${peers.length} peers`);
+}
+
+/** Sends this node's structs, signed, to every peer it knows. Run at startup, and when one is declared. */
+export async function announceStructs(log: FastifyBaseLogger, service: Service): Promise<void> {
+    const announcement = await service.structService.announcement();
+    if (announcement.structs.length === 0) {
+        return;
+    }
+    const peers = await otherPeers(service);
+    await putToPeers(log, peers, '/all-structs', announcement, 'structs');
+    log.info(`Broadcasted ${announcement.structs.length} structs to ${peers.length} peers`);
+}
+
+/**
+ * Learns every known peer's structs from the signed announcement each serves, before its event types, whose
+ * fields may name them. Failures are logged and skipped.
+ */
+export async function learnStructs(log: FastifyBaseLogger, service: Service): Promise<void> {
+    for (const peer of await otherPeers(service)) {
+        try {
+            const response = await fetch(`${peer.baseUrl}/v1/structs/announcement`, { signal: AbortSignal.timeout(STARTUP_REQUEST_TIMEOUT_MS) });
+            if (!response.ok) {
+                // Peers on an older version have no structs.
+                continue;
+            }
+            const result = await service.structService.applyAnnouncement(await response.json() as StructAnnouncement, peer.baseUrl);
+            if (!result.ok) {
+                log.warn(`Ignored the structs of node ${peer.baseUrl}: ${result.error}`);
+            }
+        } catch (error) {
+            log.warn(error, `Failed to learn the structs of node ${peer.baseUrl}`);
+        }
+    }
 }
 
 /**
@@ -205,6 +239,8 @@ export class StartupService {
 
         this.log.info(`Broadcasted self to ${peers.length} peers`);
 
+        await learnStructs(this.log, this.service);
+        await announceStructs(this.log, this.service);
         await announceResources(this.log, this.service);
         await learnEvents(this.log, this.service);
         await announceEvents(this.log, this.service);
