@@ -8,14 +8,13 @@ npm install stellarium-client
 
 ## Running a script
 
-An API client from the dashboard's **API clients** page belongs to one node. The client exchanges its id and secret for run tokens at the operator, caches them and renews them before they expire. Runs are billed to the client's organization.
+An API client from the [Stellarium Platform](https://platform.stellarium.sh)'s **API clients** page belongs to one node. The client exchanges its id and secret for run tokens at the operator (`https://operator.stellarium.sh/v1` unless you pass `operatorUrl`), caches them and renews them before they expire. Runs are billed to the client's organization.
 
 ```ts
 import { StellariumClient, StellariumError } from 'stellarium-client';
 
 const client = new StellariumClient({
     nodeUrl: 'https://node.example.com',
-    operatorUrl: 'https://operator.example.com/v1',
     clientId: process.env.STELLARIUM_CLIENT_ID!,
     clientSecret: process.env.STELLARIUM_CLIENT_SECRET!,
 });
@@ -43,7 +42,7 @@ Other ways to authenticate:
 | --- | --- |
 | `apiKey` | The node's own `API_KEY`. Runs are free, and the node's organization pays their calls. |
 | `token` | A run token you got elsewhere, or a function `(signal) => string \| Promise<string>` returning one. |
-| `clientId`, `clientSecret`, `operatorUrl` | An organization's API client, as above. |
+| `clientId`, `clientSecret`, optional `operatorUrl` | An organization's API client, as above. For a local network, pass your operator, such as `http://127.0.0.1:3001/v1`. |
 | `credentials` | Any `CredentialSource`. |
 
 Without any of them, the client can still use the routes anyone may call: `self`, `resources`, `peers`, `contracts.list`, `events.list` and `structs`.

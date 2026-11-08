@@ -22,8 +22,11 @@ export type ClientAuth =
     | { apiKey: string }
     /** A run token, or a function returning one, from wherever the caller gets them. */
     | { token: string | ((signal?: AbortSignal) => string | Promise<string>) }
-    /** An organization's API client: the client fetches and renews run tokens from the operator. */
-    | { clientId: string, clientSecret: string, operatorUrl: string }
+    /**
+     * An organization's API client: the client fetches and renews run tokens from the operator, by default the
+     * Stellarium network's (`https://operator.stellarium.sh/v1`).
+     */
+    | { clientId: string, clientSecret: string, operatorUrl?: string }
     /** Any other source of bearer credentials. */
     | { credentials: CredentialSource };
 
@@ -59,7 +62,6 @@ export interface DeployOptions extends RequestOptions {
  *     nodeUrl: 'https://node.example.com',
  *     clientId: process.env.STELLARIUM_CLIENT_ID!,
  *     clientSecret: process.env.STELLARIUM_CLIENT_SECRET!,
- *     operatorUrl: 'https://operator.example.com/v1',
  * });
  * const { returnValue } = await client.run(`request Hello { return "hi" }`);
  * ```
@@ -222,7 +224,7 @@ export class StellariumClient {
         let credential: string | undefined;
         if (call.auth) {
             if (!this.credentials) {
-                throw new TypeError(`${call.method} ${call.path} needs credentials: pass apiKey, token, or clientId, clientSecret and operatorUrl`);
+                throw new TypeError(`${call.method} ${call.path} needs credentials: pass apiKey, token, or clientId and clientSecret`);
             }
             credential = await this.credentials.credential(call.signal);
             headers.Authorization = `Bearer ${credential}`;
@@ -247,7 +249,6 @@ function credentialsFor(options: StellariumClientOptions, fetch: typeof globalTh
     if ('apiKey' in options && options.apiKey !== undefined) return new StaticCredential(options.apiKey);
     if ('token' in options && options.token !== undefined) return new StaticCredential(options.token);
     if ('clientId' in options && options.clientId !== undefined) {
-        if (!options.operatorUrl) throw new TypeError('operatorUrl is required with clientId and clientSecret');
         return new ClientCredentials({ operatorUrl: options.operatorUrl, clientId: options.clientId, clientSecret: options.clientSecret, fetch });
     }
     return undefined;

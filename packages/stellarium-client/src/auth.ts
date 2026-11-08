@@ -11,9 +11,15 @@ export interface CredentialSource {
     refused?(credential: string): boolean;
 }
 
+/** The Stellarium network's operator. */
+export const DEFAULT_OPERATOR_URL = 'https://operator.stellarium.sh/v1';
+
 export interface ClientCredentialsOptions {
-    /** The operator's API, as nodes' `OPERATOR_URL`: `https://<operator host>/v1`. `/v1` is added when missing. */
-    operatorUrl: string;
+    /**
+     * The operator's API, as nodes' `OPERATOR_URL`: `https://<operator host>/v1`, with `/v1` added when missing.
+     * Defaults to the Stellarium network's operator.
+     */
+    operatorUrl?: string;
     /** An API client's id (`cli_...`), from the dashboard's API clients page. */
     clientId: string;
     /** The client's secret (`cs_...`). It is shown once, when the client is created. */
@@ -44,7 +50,7 @@ export class ClientCredentials implements CredentialSource {
         if (!options.clientId || !options.clientSecret) {
             throw new TypeError('clientId and clientSecret are required');
         }
-        this.tokenUrl = `${operatorApiUrl(options.operatorUrl)}/oauth/token`;
+        this.tokenUrl = `${operatorApiUrl(options.operatorUrl ?? DEFAULT_OPERATOR_URL)}/oauth/token`;
         this.refreshMarginMs = options.refreshMarginMs ?? 60_000;
         this.fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     }

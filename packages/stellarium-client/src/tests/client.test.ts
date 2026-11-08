@@ -47,7 +47,6 @@ describe('StellariumClient', () => {
 
     test('refuses conflicting or missing credentials', () => {
         expect(() => new StellariumClient({ nodeUrl: 'https://node.example', apiKey: 'a', token: 'b' } as never)).toThrow(/not apiKey and token/);
-        expect(() => new StellariumClient({ nodeUrl: 'https://node.example', clientId: 'cli_1', clientSecret: 'cs_1' } as never)).toThrow(/operatorUrl/);
         expect(() => new StellariumClient({ nodeUrl: 'node.example' })).toThrow(/nodeUrl/);
     });
 
@@ -103,6 +102,14 @@ describe('StellariumClient', () => {
         } finally {
             vi.useRealTimers();
         }
+    });
+
+    test('gets run tokens from the Stellarium network\'s operator by default', async () => {
+        const { fetch, requests } = fakeFetch((request) => request.url.endsWith('/oauth/token') ? tokenResponse('jwt-1') : json({ returnValue: null, usage: { tokens: 1 } }));
+        const client = new StellariumClient({ nodeUrl: 'https://node.example', clientId: 'cli_1', clientSecret: 'cs_1', fetch });
+
+        await client.run('request A { }');
+        expect(requests[0]?.url).toBe('https://operator.stellarium.sh/v1/oauth/token');
     });
 
     test('retries once with a fresh run token when the node refuses one', async () => {
