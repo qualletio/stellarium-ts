@@ -1,0 +1,54 @@
+{
+  "name": "stellarium-client",
+  "version": "0.1.0",
+  "description": "A TypeScript client for running RequestScript on the Stellarium network.",
+  "homepage": "https://github.com/qualletio/stellarium-ts#readme",
+  "bugs": {
+    "url": "https://github.com/qualletio/stellarium-ts/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qualletio/stellarium-ts.git",
+    "directory": "packages/stellarium-client"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "prepack": "pnpm build",
+    "test": "vitest run --exclude 'dist/**'",
+    "lint": "biome lint src",
+    "check-types": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "decentralized",
+    "stellarium",
+    "requestscript",
+    "client"
+  ],
+  "author": "Christopher Poulsen <christopher.poulsen@quallet.io>",
+  "license": "ISC",
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "@types/node": "^26.6.4",
+    "fastify": "^5.12.5",
+    "stellarium-ts": "workspace:*",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}
