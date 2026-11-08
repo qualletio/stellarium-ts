@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // The client runs in browsers too, so its own code may not lean on Node's types.
+    "types": []
+  },
+  "exclude": ["node_modules", "dist", "src/tests"]
+}
