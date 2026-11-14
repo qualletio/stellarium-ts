@@ -58,7 +58,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
     let dir: string;
     let operatorUrl: string;
     let service: Service;
-    let verifier: NodeJS.Timeout;
+    let stopVerifier: () => Promise<void>;
 
     beforeEach(async () => {
         ({ db, close } = await createTestDatabase());
@@ -66,14 +66,29 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
         const operator = Fastify();
         servers.push(operator);
         service = createService(db, { platformFeeBps: 2000, runTokenPrivateKey: generateNodeKeys().privateKey });
-        // The operator's maintenance verifies trees, before their money moves: here, every 100 milliseconds.
-        verifier = setInterval(() => { void service.verification.verifyTrees().catch(() => undefined); }, 100);
+        // The operator's maintenance verifies trees, before their money moves: here, 100 milliseconds after each pass
+        // ends. Passes never overlap, which on a slow runner would pile up on PGlite's one connection, and stopping
+        // waits for the pass in flight, so a test can change receipts, or close the database, with none running.
+        let stopped = false;
+        let timer: NodeJS.Timeout | undefined;
+        let pass: Promise<void> = Promise.resolve();
+        const verify = () => {
+            pass = service.verification.verifyTrees().then(() => undefined, () => undefined).then(() => {
+                if (!stopped) timer = setTimeout(verify, 100);
+            });
+        };
+        timer = setTimeout(verify, 100);
+        stopVerifier = async () => {
+            stopped = true;
+            clearTimeout(timer);
+            await pass;
+        };
         await operator.register(routes, { prefix: '/v1', service });
         operatorUrl = `${await operator.listen({ port: 0, host: '127.0.0.1' })}/v1`;
     });
 
     afterEach(async () => {
-        clearInterval(verifier);
+        await stopVerifier();
         await Promise.all(servers.splice(0).map(server => server.close()));
         await close();
         await rm(dir, { recursive: true, force: true });
@@ -466,7 +481,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
             const setup = await market();
             expect((await run(setup.payerUrl, fund)).returnValue).toBe('funded 20000000 by org_payer for org_courier');
             await vi.waitFor(async () => expect(await service.money.publicContract(setup.job)).toMatchObject({ balanceMicroUsd: 20_000_000 }));
-            if (pause) clearInterval(verifier);
+            if (pause) await stopVerifier();
             const release = 'request Release {\n  const job: com.example.Job@1\n  return job.run(action: "release", jobId: "job-1").value\n}';
             expect((await run(setup.providerUrl, release)).returnValue).toBe('released 20000000');
             // The release tree's receipt is in, with Job's pay staged.
@@ -577,7 +592,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
         });
 
         test('a host that changes a provider\'s answer, or says a call failed that the provider answered, is caught', async () => {
-            clearInterval(verifier);
+            await stopVerifier();
             const { receipt, payerNode } = await forecast();
             const [call] = receipt.receipt.calls;
             const tampered = { ...receipt.receipt, calls: [{ ...call!, response: { value: 30, error: null } }] };
