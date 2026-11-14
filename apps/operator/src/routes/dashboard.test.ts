@@ -4,7 +4,7 @@ import Stripe from 'stripe';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { DashboardAuthenticator, DashboardSession } from '../auth/dashboardAuth.js';
 import type { Database } from '../db/database.js';
-import { authOrganizationsTable, nodesTable } from '../db/schema.js';
+import { authOrganizationsTable, nodesTable, organizationsTable, topUpsTable } from '../db/schema.js';
 import type { OrganizationService } from '../organizations.js';
 import { DEFAULT_PAYOUT_POLICY } from '../payouts/payoutService.js';
 import { createService, type Service } from '../service.js';
@@ -251,6 +251,20 @@ describe('dashboard and Stripe routes', () => {
 
         expect(response.statusCode).toBe(503);
         expect((await fastify.inject({ method: 'POST', url: '/v1/stripe/webhook', payload: {} })).statusCode).toBe(404);
+    });
+
+    describe('idle balance', () => {
+        beforeEach(() => start());
+
+        test('reports unspent top-ups older than 30 days of at least $500, and nothing otherwise', async () => {
+            const id = (await fastify.inject({ method: 'GET', url: '/v1/org', headers: member })).json().id;
+            expect((await fastify.inject({ method: 'GET', url: '/v1/org', headers: member })).json().idleBalance).toBeNull();
+
+            await db.insert(topUpsTable).values({ organizationId: id, amountMicroUsd: 700_000_000, status: 'succeeded', createdAt: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000) });
+            await db.update(organizationsTable).set({ balanceMicroUsd: 700_000_000 }).where(eq(organizationsTable.id, id));
+
+            expect((await fastify.inject({ method: 'GET', url: '/v1/org', headers: member })).json().idleBalance).toEqual({ amountMicroUsd: 700_000_000, days: 30 });
+        });
     });
 
     describe('Stripe webhooks', () => {

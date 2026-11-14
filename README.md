@@ -330,6 +330,21 @@ request Today {
 }
 ```
 
+A request script that names no version calls the latest. **A contract must name the version of every contract it calls**, so the code it depends on can't change after it's deployed:
+
+```
+contract com.example.Weekly(city: string): string {
+    const outlook: com.example.Outlook@2
+    const weather: com.example.Weather
+    return outlook.run(city: city).value
+}
+```
+
+- **Deploys are refused** when a contract binds another contract by name alone. The error names the current version. Resources that aren't contracts, such as `com.example.Weather`, have no versions and are bound by name.
+- **Old versions stay callable** by their full name, `com.example.Outlook@2`, until they're deleted, here and on other nodes. A caller sends the pinned version as `resourceVersion` on `POST /v1/run/resource`, and the voucher's `invocationHash` covers it.
+- **Peers announce each contract's latest version** in `GET /v1/resources`. To call an older one, a node asks its host for it at `GET /v1/contracts/{path.Name@version}`, which describes one callable version.
+- Pinning needs requestscript ≥ 1.8.0.
+
 Calls are charged for the [script tokens](https://github.com/qualletio/requestscript-js#token-metering) the contract executes, at the hosting node's listed price per million tokens, which its manifest advertises as `priceMicroUsdPerMillionTokens`. **A contract's own paid calls are paid by whoever called it**, never by the node hosting it:
 
 1. The caller signs a contract voucher (`kind: "contract"`) for the call, with the price and `maxAmount`, its `contractCostLimitMicroUsd`. A call from a billed run also carries the run's id.

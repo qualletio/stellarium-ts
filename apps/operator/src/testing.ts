@@ -8,7 +8,7 @@ import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
 import { NODE_AUTH_SCHEME, operatorRequestPayload } from './auth/nodeAuth.js';
 import type { Database } from './db/database.js';
-import { ledgerEntriesTable, organizationsTable } from './db/schema.js';
+import { contractFundingTable, contractVersionsTable, ledgerEntriesTable, organizationsTable } from './db/schema.js';
 import { OrganizationService } from './organizations.js';
 import type { FixedPaymentSubmission, InferencePaymentSubmission } from './payments/types.js';
 import type { StripeEvent, StripeGateway } from './stripe/gateway.js';
@@ -24,6 +24,12 @@ export async function createTestDatabase(): Promise<{ db: Database; close: () =>
 }
 
 export type NodeKeys = { publicKey: string; privateKey: string };
+
+/**
+ * A money policy that applies every tree before verifying it, for tests of settlement itself. The operator's
+ * default verifies a tree first whenever contracts moved its money.
+ */
+export const APPLY_BEFORE_VERIFYING = { optimisticVerifyLimitMicroUsd: Number.MAX_SAFE_INTEGER, maxUnverifiedMicroUsdPerNode: Number.MAX_SAFE_INTEGER };
 
 /** A node signing key, as base64url SPKI / PKCS#8 DER. */
 export function generateNodeKeys(): NodeKeys {
@@ -56,6 +62,23 @@ export async function seedOrganizations(db: Database, balance = 1_000_000) {
     await organizations.enroll(PAYER_ORGANIZATION, payer.publicKey);
     if (balance > 0) await organizations.grantPromotion(PAYER_ORGANIZATION, balance);
     return { organizations, provider, payer };
+}
+
+/** A contract voucher signed the way stellarium-ts's contractVoucherPayload does. */
+export function signedContractVoucher(keys: NodeKeys, overrides: { recipientOrganizationId?: string, runId?: string, maxAmount?: number, priceMicroUsdPerMillionTokens?: number } = {}) {
+    const unsigned = {
+        kind: 'contract' as const,
+        requestId: crypto.randomUUID(),
+        invocationId: crypto.randomUUID(),
+        maxAmount: overrides.maxAmount ?? 10_000,
+        priceMicroUsdPerMillionTokens: overrides.priceMicroUsdPerMillionTokens ?? 0,
+        recipientOrganizationId: overrides.recipientOrganizationId ?? PROVIDER_ORGANIZATION,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        invocationHash: 'hash',
+        publicKey: keys.publicKey,
+        ...(overrides.runId === undefined ? {} : { runId: overrides.runId }),
+    };
+    return { ...unsigned, signature: signJson(unsigned, keys.privateKey) };
 }
 
 /** A voucher signed the way stellarium-ts's paymentVoucherPayload does. */
@@ -160,6 +183,18 @@ export async function ledgerProblems(db: Database): Promise<string[]> {
         const payable = sums.get(`org:${organization.id}:payable`) ?? 0;
         if (balance !== organization.balanceMicroUsd) problems.push(`${organization.id} balance ${organization.balanceMicroUsd} != ledger ${balance}`);
         if (payable !== organization.payableMicroUsd) problems.push(`${organization.id} payable ${organization.payableMicroUsd} != ledger ${payable}`);
+        if (organization.heldMicroUsd < 0 || organization.heldMicroUsd > Math.max(0, organization.balanceMicroUsd)) problems.push(`${organization.id} holds ${organization.heldMicroUsd} of ${organization.balanceMicroUsd}`);
+    }
+    // A contract's balance is its ledger account and the sum of its active funding (docs/money.md, Rollout).
+    for (const contract of await db.select().from(contractVersionsTable)) {
+        const ledger = sums.get(`contract:${contract.id}`) ?? 0;
+        const [funding] = await db.select({ total: sql<string>`coalesce(sum(${contractFundingTable.amountMicroUsd}), 0)` })
+            .from(contractFundingTable).where(sql`${contractFundingTable.contractId} = ${contract.id} and ${contractFundingTable.status} = 'active'`);
+        if (ledger !== contract.balanceMicroUsd) problems.push(`contract ${contract.id} balance ${contract.balanceMicroUsd} != ledger ${ledger}`);
+        if (Number(funding!.total) !== contract.balanceMicroUsd) problems.push(`contract ${contract.id} balance ${contract.balanceMicroUsd} != funding ${funding!.total}`);
+    }
+    for (const lot of await db.select().from(contractFundingTable)) {
+        if (lot.lockedMicroUsd < 0 || lot.lockedMicroUsd > lot.amountMicroUsd) problems.push(`funding ${lot.id} locks ${lot.lockedMicroUsd} of ${lot.amountMicroUsd}`);
     }
     return problems;
 }

@@ -67,8 +67,8 @@ describe.each(DIALECTS)("events (%s)", (dialect) => {
             createEventMandate: vi.spyOn(client, "createEventMandate").mockResolvedValue({ ok: true, mandateId: "mnd_test" }),
             authorizeEventRun: vi.spyOn(client, "authorizeEventRun").mockResolvedValue({ ok: true, heldMicroUsd: 50_000, maxTokens: 100 }),
             authorizeRun: vi.spyOn(client, "authorizeRun").mockResolvedValue({ ok: true, heldMicroUsd: 50_000, maxTokens: 100 }),
-            captureRun: vi.spyOn(client, "captureRun").mockResolvedValue(undefined),
-            releaseRun: vi.spyOn(client, "releaseRun").mockResolvedValue(undefined),
+            captureRun: vi.spyOn(client, "captureRun").mockResolvedValue({ ok: true }),
+            releaseRun: vi.spyOn(client, "releaseRun").mockResolvedValue({ ok: true }),
         };
         fastify = Fastify();
         await fastify.register(routes, { prefix: "/v1", service });
@@ -339,7 +339,7 @@ describe.each(DIALECTS)("events (%s)", (dialect) => {
 
         test("stops a chain from calling a contract already in it", async () => {
             await deploy('contract com.example.Greet: int32 {\n  emit com.example.Greeted(who: "x", times: 1)\n  return 1\n}');
-            await deploy("contract com.example.CallBack consumes com.example.Greeted {\n  const greet: com.example.Greet\n  var result = greet.run()\n  var state error: string = \"\"\n  error = result.error.message\n}");
+            await deploy("contract com.example.CallBack consumes com.example.Greeted {\n  const greet: com.example.Greet@1\n  var result = greet.run()\n  var state error: string = \"\"\n  error = result.error.message\n}");
 
             await run('request R {\n  const greet: com.example.Greet\n  return greet.run()\n}');
             await service.eventService.processInbox();

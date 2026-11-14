@@ -21,7 +21,7 @@ describe("PostgresDatabase", () => {
 
         await createTables(db);
         expect(await db.all("SELECT public_key FROM peer")).toEqual([{ public_key: "key" }]);
-        expect(await db.all("SELECT version FROM stellarium_schema")).toEqual([{ version: 7 }]);
+        expect(await db.all("SELECT version FROM stellarium_schema")).toEqual([{ version: 8 }]);
         const tables = await db.all<{ table_name: string }[]>("SELECT table_name FROM information_schema.tables WHERE table_schema = 'node_a' ORDER BY table_name");
         expect(tables.map(table => table.table_name)).toContain("resource_function_payment_manifest");
         await db.close();

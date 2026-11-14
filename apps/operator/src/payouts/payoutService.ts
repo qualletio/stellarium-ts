@@ -1,6 +1,6 @@
-import { and, eq, gt, gte, isNotNull, lt, sql } from "drizzle-orm";
+import { and, eq, gt, gte, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Database } from "../db/database.js";
-import { organizationsTable, payoutsTable, receiptsTable } from "../db/schema.js";
+import { moneyChangesTable, organizationsTable, paymentFlagsTable, payoutsTable, receiptsTable, runsTable } from "../db/schema.js";
 import { accounts, adjustOrganization, lockOrganizations, postLedgerTransaction } from "../ledger.js";
 import { type StripeGateway, StripeRequestError } from "../stripe/gateway.js";
 
@@ -47,6 +47,9 @@ export class PayoutService {
         const candidates = await this.db.select({ id: organizationsTable.id }).from(organizationsTable).where(and(
             eq(organizationsTable.payoutsEnabled, true),
             isNotNull(organizationsTable.stripeAccountId),
+            // A banned organization isn't paid out: what it holds may be taken back for the payers it defrauded.
+            isNull(organizationsTable.bannedAt),
+            isNull(organizationsTable.sanctionsBlockedAt),
             gte(organizationsTable.payableMicroUsd, this.policy.minimumMicroUsd),
         ));
         const summary: PayoutSummary = { paid: 0, failed: 0, pending: 0 };
@@ -103,13 +106,18 @@ export class PayoutService {
 
     /**
      * Claims a pending payout of the organization's eligible payable balance, rounded down to whole cents,
-     * if it is due one. Eligible means captured at least `holdMs` ago: the payable balance less what was
-     * captured more recently.
+     * if it is due one. Eligible means the payable balance less what is still held: voucher receipts and runs
+     * captured less than `holdMs` ago, and contract payments made less than `holdMs` ago or by a tree the
+     * operator hasn't verified (docs/money.md, When the operator verifies).
      */
     private async claim(organizationId: string, now: Date): Promise<{ payout: Payout, destination: string } | undefined> {
         return this.db.transaction(async (tx) => {
             const organization = (await lockOrganizations(tx, [organizationId])).get(organizationId);
-            if (!organization?.payoutsEnabled || !organization.stripeAccountId) return undefined;
+            if (!organization?.payoutsEnabled || !organization.stripeAccountId || organization.bannedAt || organization.sanctionsBlockedAt) return undefined;
+            // Payments that look like the payer paying itself wait for staff.
+            const [flagged] = await tx.select({ id: paymentFlagsTable.id }).from(paymentFlagsTable)
+                .where(and(eq(paymentFlagsTable.payeeOrganizationId, organizationId), eq(paymentFlagsTable.status, 'open'))).limit(1);
+            if (flagged) return undefined;
 
             // A failed payout counts too, so a refused transfer isn't retried on every run; its amount waits for the next interval.
             const [recentPayout] = await tx.select({ id: payoutsTable.id }).from(payoutsTable).where(and(
@@ -124,7 +132,23 @@ export class PayoutService {
                     eq(receiptsTable.status, 'captured'),
                     gt(receiptsTable.capturedAt, new Date(now.getTime() - this.policy.holdMs)),
                 ));
-            const eligible = organization.payableMicroUsd - Number(recent!.total);
+            const cutoff = new Date(now.getTime() - this.policy.holdMs);
+            const [recentRuns] = await tx.select({ total: sql<string>`coalesce(sum(${runsTable.amountMicroUsd} - ${runsTable.feeMicroUsd}), 0)` })
+                .from(runsTable).where(and(
+                    eq(runsTable.recipientOrganizationId, organizationId),
+                    eq(runsTable.status, 'captured'),
+                    gt(runsTable.capturedAt, cutoff),
+                ));
+            const [heldPayments] = await tx.select({ total: sql<string>`coalesce(sum(${moneyChangesTable.amountMicroUsd} - coalesce(${moneyChangesTable.feeMicroUsd}, 0)), 0)` })
+                .from(moneyChangesTable)
+                .innerJoin(runsTable, eq(runsTable.id, moneyChangesTable.rootRunId))
+                .where(and(
+                    eq(moneyChangesTable.recipientOrganizationId, organizationId),
+                    eq(moneyChangesTable.function, 'pay'),
+                    eq(moneyChangesTable.status, 'applied'),
+                    or(gt(moneyChangesTable.settledAt, cutoff), ne(runsTable.verification, 'verified')),
+                ));
+            const eligible = organization.payableMicroUsd - Number(recent!.total) - Number(recentRuns!.total) - Number(heldPayments!.total);
             const amountCents = Math.floor(eligible / MICRO_USD_PER_CENT);
             const amount = amountCents * MICRO_USD_PER_CENT;
             if (amount <= 0 || amount < this.policy.minimumMicroUsd) return undefined;

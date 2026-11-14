@@ -1,16 +1,23 @@
 import { randomUUID } from "node:crypto";
-import { interpretParsed, parseScript, RequestScriptError, type Resource, type ResourceFunctionCallParameter, type ResourceResolver, type Script, structReferences, TokenMeter, typeToString } from "requestscript";
-import type { OperatorClient } from "../client/operatorClient.js";
+import { createRequire } from "node:module";
+import { interpretParsed, parseScript, RequestScriptError, type Resource, type ResourceFunctionCallParameter, type ResourceResolver, type Script, type StateScope, type Statement, structReferences, TokenMeter, typeToString } from "requestscript";
+import type { AttachmentRead, CallSender, MoneyContractRef, OperatorClient } from "../client/operatorClient.js";
+import { hashData, signData } from "../crypto/utils.js";
+import { encodeHostValue, type MoneyCallRef, ReceiptRecorder, receiptsPayload } from "./receipt.js";
 import type { EventConsumer } from "../event/repository.js";
 import type { EventContractHost, EventService } from "../event/service.js";
 import { type EventEnvelope, type EventLineage, qualifiedName } from "../event/types.js";
-import { type CallerIdentity, type CombinationResourceInvoker, type ContractHost, type ContractPaymentVoucher, MAX_CONTRACT_DEPTH, type ScriptContext } from "../resource/invoker.js";
+import type { AccountSession } from "../money/account.js";
+import { type CallerIdentity, type CombinationResourceInvoker, type ContractHost, type ContractPaymentVoucher, MAX_CONTRACT_DEPTH, pinnedVersion, type ScriptContext } from "../resource/invoker.js";
 import { CONTRACT_FUNCTION, type ResourceRepository } from "../resource/repository.js";
-import { type InvokeResult, settlePaidCall, settleRunLater } from "../resource/settlement.js";
+import { type InvokeResult, settlePaidCall } from "../resource/settlement.js";
+import type { SettlementOutbox } from "../resource/outbox.js";
 import type { NodeConfig } from "../service.js";
 import type { ContractRepository, StoredContract } from "./repository.js";
 import type { StructService } from "../struct/service.js";
+import { isMoneyPath, MoneyRun } from "../money/account.js";
 import { type ContractStateRepository, type ContractStateRow, DEFAULT_MAX_CONTRACT_STATE_BYTES } from "./state.js";
+import { Frame, StateBusy, StateCoordinator, StateTransaction } from "./pending.js";
 
 export const DEFAULT_MAX_CONTRACT_SOURCE_BYTES = 64 * 1024;
 /** The longest a call waits for earlier calls of the same stateful contract on this node. */
@@ -25,6 +32,16 @@ interface RunContext {
     runId?: string;
     /** The chain of events the contract runs in, when an event started it. */
     event?: EventLineage;
+    /** The free run, shared down a chain of unbilled contract calls, that `Account` changes are staged on. */
+    moneyRun?: MoneyRun;
+    /** The chain of contract calls on this node the contract runs in, and its caller's place in it. */
+    state?: { tx: StateTransaction, frame: Frame };
+    /** Money attached to the call, staged by the caller: the contract reads it as `payment`. */
+    attachmentId?: string;
+    /** The run's time in milliseconds, which a payable contract reads as `now`. */
+    now?: number;
+    /** Who made the call, which a payable contract reads as `sender`. */
+    sender?: CallSender;
     /** For an event contract: the event, which it reads as the built-in `event`, and its type at the version it consumes. */
     consuming?: { event: Record<string, unknown>, data: Record<string, unknown>, type: { path: string, name: string, version: string } };
 }
@@ -45,6 +62,40 @@ export interface DeployedContract {
 
 const refuse = (status: number, error: string): ContractRefusal => ({ ok: false, status, error });
 
+/** The RequestScript version this node runs contracts with, which the operator records to replay them. */
+export const REQUESTSCRIPT_VERSION: string = createRequire(import.meta.url)('requestscript/package.json').version;
+
+/** The `path.Name` and version of every contract the statements bind by version, `const r: path.Name@version`, in order. */
+function pinnedResources(statements: Statement[]): { key: string, version: string }[] {
+    return statements.flatMap((statement): { key: string, version: string }[] => {
+        switch (statement.kind) {
+            case 'resourceDecl': {
+                const version = (statement as { version?: string }).version;
+                return version === undefined ? [] : [{ key: [...statement.resourcePath, statement.resourceName].join('.'), version }];
+            }
+            case 'if':
+                return [...statement.branches.flatMap(branch => pinnedResources(branch.body)), ...pinnedResources(statement.elseBody ?? [])];
+            default:
+                return [];
+        }
+    });
+}
+
+/** The `path.Name` of every resource the statements bind without a version, `const r: path.Name`, in order. */
+function unpinnedResources(statements: Statement[]): string[] {
+    return statements.flatMap((statement): string[] => {
+        switch (statement.kind) {
+            case 'resourceDecl':
+                // `version` is set by requestscript 1.8.0's parser, for `const r: path.Name@version`.
+                return (statement as { version?: string }).version === undefined ? [[...statement.resourcePath, statement.resourceName].join('.')] : [];
+            case 'if':
+                return [...statement.branches.flatMap(branch => unpinnedResources(branch.body)), ...unpinnedResources(statement.elseBody ?? [])];
+            default:
+                return [];
+        }
+    });
+}
+
 /**
  * Deploys, deletes and runs the contracts on this node. A contract's latest version is one of the node's
  * resources, with one function, `run`. Calls to it are billed by the tokens it executes, through a run the
@@ -58,6 +109,11 @@ export class ContractService implements ContractHost, EventContractHost {
     events?: EventService;
     /** Resolves the structs contracts' types name. Without it, a contract that names a struct can't be deployed. */
     structs?: StructService;
+    /**
+     * The public key of the peer serving from a base URL, which names the node hosting a contract a new
+     * contract depends on. Without it, only this node's contracts can be named as dependencies.
+     */
+    peerKey?: (baseUrl: string) => Promise<string | undefined>;
     /** The latest call holding each stateful contract (`path.Name`) on this node. */
     private readonly locks = new Map<string, Promise<void>>();
     /** How long a call waits for earlier calls of the same stateful contract. */
@@ -71,8 +127,14 @@ export class ContractService implements ContractHost, EventContractHost {
         private readonly invoker: CombinationResourceInvoker,
         private readonly operatorClient: OperatorClient,
         private readonly config: NodeConfig,
+        private readonly outbox: SettlementOutbox,
         private readonly log: (error: unknown, message: string) => void = (error, message) => console.error(message, error),
-    ) {}
+    ) {
+        this.pending = new StateCoordinator(state, operatorClient, () => config.maxContractStateBytes ?? DEFAULT_MAX_CONTRACT_STATE_BYTES, log);
+    }
+
+    /** Holds the state of contract chains that move money until the operator settles it (docs/money.md, Settlement). */
+    readonly pending: StateCoordinator;
 
     /**
      * Saves a new version of a contract. A deploy by another organization's API client pays this node's
@@ -96,6 +158,9 @@ export class ContractService implements ContractHost, EventContractHost {
         if (declaration.path.length === 0) {
             return refuse(400, 'Invalid contract: give it a path, such as com.example.Name');
         }
+        if (isMoneyPath(declaration.path.join('.'))) {
+            return refuse(400, 'Invalid contract: sh.stellarium.money and sh.stellarium.random are reserved for stellarium-ts\'s built-in resources');
+        }
         if (!declaration.returnType && !declaration.consumes) {
             return refuse(400, 'Invalid contract: declare its return type, such as contract com.example.Name(...): string');
         }
@@ -106,6 +171,14 @@ export class ContractService implements ContractHost, EventContractHost {
             : structReferences(script).length > 0 ? refuse(400, 'Invalid contract: this node doesn\'t know any structs') : undefined;
         if (structs) {
             return structs;
+        }
+        // A contract runs the versions it was deployed against, so the code it calls can't change under it.
+        // The interpreter refuses the binding when it runs, too; this catches it before anyone depends on it.
+        for (const key of unpinnedResources(script.body)) {
+            const current = key === `${path}.${name}` ? version : (await this.resolver.resolve(key) as { version?: string } | undefined)?.version;
+            if (current !== undefined) {
+                return refuse(400, `Invalid contract: ${key} is a contract, so bind it by its version, e.g. 'const ref: ${key}@${current}'`);
+            }
         }
 
         if (this.resources.isRegistered({ path, name }) || await this.resources.isLearned(path, name)) {
@@ -154,6 +227,34 @@ export class ContractService implements ContractHost, EventContractHost {
         })) {
             return refuse(400, 'Invalid contract: this node doesn\'t publish events');
         }
+        // The operator keeps the contract's owner, source and dependencies, which buyers read before funding a
+        // payable contract (docs/money.md, Registration). A payable contract can't hold money until it's
+        // registered, so its deploy waits for it; any other contract is registered after it's saved.
+        const payable = (declaration as { payable?: boolean }).payable === true;
+        const registration = async (): Promise<{ ok: true } | ContractRefusal> => {
+            const dependencies = await this.dependencies(script, path, name, version);
+            if (!dependencies.ok) return dependencies;
+            const registered = await this.operatorClient.registerContract({
+                name: `${path}.${name}`,
+                version,
+                payable,
+                source,
+                requestscriptVersion: REQUESTSCRIPT_VERSION,
+                dependencies: dependencies.dependencies,
+                ...(caller.kind === 'client' ? { token: caller.token } : {}),
+            });
+            return registered.ok ? registered : refuse(registered.status, `The operator refused to register the contract: ${registered.error}`);
+        };
+        if (payable) {
+            if (!this.config.operatorUrl) {
+                return refuse(400, 'Invalid contract: a payable contract needs a node with an operator, which keeps its balance');
+            }
+            const registered = await registration();
+            if (!registered.ok) {
+                return registered;
+            }
+        }
+
         // Another organization's event contract is billed to it under a mandate its API client grants now.
         if (consumer && caller.kind === 'client' && caller.organizationId !== this.config.organizationId) {
             const mandate = await this.operatorClient.createEventMandate({ token: caller.token, consumer: `${path}.${name}` });
@@ -181,6 +282,15 @@ export class ContractService implements ContractHost, EventContractHost {
             return result;
         };
         const saved = (feeMicroUsd: number) => {
+            if (!payable && this.config.operatorUrl) {
+                // Nothing waits on it: a contract that isn't payable never holds money.
+                setTimeout(() => {
+                    registration().then(
+                        result => { if (!result.ok) this.log(result.error, `Failed to register ${path}.${name}@${version} with the operator`); },
+                        error => this.log(error, `Failed to register ${path}.${name}@${version} with the operator`),
+                    );
+                }, 0);
+            }
             this.announce?.();
             if (consumer) {
                 this.events?.announce?.();
@@ -207,20 +317,46 @@ export class ContractService implements ContractHost, EventContractHost {
         }
         const voucher = this.invoker.createPaymentVoucher(organizationId, fee, path, name, 'deploy', [{ name: 'version', value: version }], runId);
         let refusal: ContractRefusal | undefined;
-        const result = await settlePaidCall(this.operatorClient, voucher, async () => {
+        const result = await settlePaidCall(this.operatorClient, this.outbox, voucher, async () => {
             const result = await save();
             if (result.ok) {
                 return { value: true, error: null };
             }
             refusal = result.refused === 'version_exists' ? versionExists() : refuse(409, `${path}.${name} belongs to another organization`);
             return { value: null, error: { message: refusal.error } };
-        }, this.log);
+        });
         // The deploy ran no script, so the run is charged nothing beyond the fee's receipt.
-        settleRunLater(this.operatorClient, runId, 'capture', 0, this.log);
+        await this.settleRun(runId, 'capture', 0);
         if ('refused' in result) {
             return refuse(result.refused.status, result.refused.error);
         }
         return refusal ?? saved(fee);
+    }
+
+    /**
+     * Every contract version the script binds, with the node hosting it. Refuses (400) one whose host this node
+     * doesn't know, since a buyer must be able to read every contract a payable contract calls.
+     */
+    private async dependencies(script: Script, path: string, name: string, version: string): Promise<{ ok: true, dependencies: MoneyContractRef[] } | ContractRefusal> {
+        const dependencies: MoneyContractRef[] = [];
+        for (const pinned of pinnedResources(script.body)) {
+            const key = `${pinned.key}@${pinned.version}`;
+            if (dependencies.some(dependency => `${dependency.name}@${dependency.version}` === key)) continue;
+            if (pinned.key === `${path}.${name}` && pinned.version === version) {
+                dependencies.push({ nodePublicKey: this.config.publicKey, name: pinned.key, version: pinned.version });
+                continue;
+            }
+            // requestscript 1.8.0's resolver takes the pinned version; this node's always has.
+            const resolve = this.resolver.resolve.bind(this.resolver) as (key: string, version?: string) => Promise<Resource | undefined>;
+            const resource = await resolve(pinned.key, pinned.version);
+            const baseUrl = resource?.metadata.baseUrl as string | undefined;
+            const nodePublicKey = resource === undefined ? undefined : baseUrl === undefined ? this.config.publicKey : await this.peerKey?.(baseUrl);
+            if (!nodePublicKey) {
+                return refuse(400, `Invalid contract: the node hosting ${key} isn't known, so it can't be named as a dependency`);
+            }
+            dependencies.push({ nodePublicKey, name: pinned.key, version: pinned.version });
+        }
+        return { ok: true, dependencies };
     }
 
     /** Deletes a version, or every version, of a contract. Its owner or the node's admin may. */
@@ -265,34 +401,51 @@ export class ContractService implements ContractHost, EventContractHost {
      * node's organization. `depth` is how many contracts deep the call is. The contract sees the payer the
      * operator authorized, and the voucher's key, as `caller`.
      */
-    async serve(voucher: ContractPaymentVoucher, contract: StoredContract, parameters: ResourceFunctionCallParameter[], depth: number, event?: EventLineage): Promise<InvokeResult | { refused: { status: number, error: string } }> {
+    async serve(voucher: ContractPaymentVoucher, contract: StoredContract, parameters: ResourceFunctionCallParameter[], depth: number, event?: EventLineage, attachmentId?: string, senderContract?: { name: string, version: string }): Promise<InvokeResult | { refused: { status: number, error: string } }> {
         if (event?.contracts.includes(`${contract.path}.${contract.name}`)) {
             return { refused: { status: 400, error: `${contract.path}.${contract.name} is earlier in this chain of events, so it can't be called` } };
         }
-        const authorization = await this.operatorClient.authorizeContractRun({ voucher, source: contract.source });
+        const authorization = await this.operatorClient.authorizeContractRun({ voucher, source: contract.source, ...(senderContract ? { senderContract } : {}) });
         if (!authorization.ok) {
             return { refused: { status: authorization.status, error: authorization.error } };
         }
-        const context = { jwt: null, depth, caller: { org: authorization.payerOrganizationId ?? null, node: voucher.publicKey }, event };
-        if (authorization.free) {
+        // Without the operator's word, a call from a contract has no owner it can vouch for.
+        const sender: CallSender = {
+            org: authorization.sender ? authorization.sender.org : senderContract ? null : authorization.payerOrganizationId ?? null,
+            node: voucher.publicKey,
+            contract: authorization.sender ? authorization.sender.contract : senderContract ? `${senderContract.name}@${senderContract.version}` : null,
+        };
+        // The tree's time is the operator's stamp when the call is part of a tree; otherwise it starts here.
+        const context = { jwt: null, depth, caller: { org: authorization.payerOrganizationId ?? null, node: voucher.publicKey }, event, attachmentId, now: authorization.now ?? Date.now(), sender };
+        // A free call from a run is still part of the run's tree: the operator gives it a run, at no price, for
+        // its Account changes, which this node settles like a billed one.
+        if (authorization.free && voucher.runId === undefined) {
             return this.run(contract, parameters, context);
         }
         return this.runBilled(voucher.invocationId, contract, parameters, context);
     }
 
-    async invokeLocal(resource: Resource, parameters: ResourceFunctionCallParameter[], context: ScriptContext): Promise<InvokeResult> {
+    async invokeLocal(resource: Resource, parameters: ResourceFunctionCallParameter[], context: ScriptContext, attachmentId?: string): Promise<InvokeResult> {
         const failed = (reason: string) => ({ value: null, error: { message: `Failed to invoke ${resource.name}.${CONTRACT_FUNCTION}: ${reason}` } });
         const depth = (context.depth ?? 0) + 1;
         if (depth > MAX_CONTRACT_DEPTH) {
             return failed(`contracts may call each other at most ${MAX_CONTRACT_DEPTH} deep`);
         }
-        const contract = await this.contracts.latest(resource.path, resource.name);
+        // A contract binds the version it calls; a request script that named none gets the latest.
+        const version = pinnedVersion(resource);
+        const contract = version === undefined
+            ? await this.contracts.latest(resource.path, resource.name)
+            : await this.contracts.callable(resource.path, resource.name, version);
         if (!contract) {
-            return failed('the contract was deleted');
+            return failed(version === undefined ? 'the contract was deleted' : `version ${version} was deleted`);
         }
         // A script that doesn't say who it runs for is this node's own.
         const caller = context.caller ?? { org: this.config.organizationId ?? null, node: this.config.publicKey };
-        const runContext = { jwt: context.jwt ?? null, depth, caller, contracts: context.contracts, event: context.event };
+        // A contract here called it as its registered owner, or else a request script for its run's organization.
+        const sender: CallSender = context.self
+            ? { org: context.self.owner, node: this.config.publicKey, contract: context.self.contract }
+            : { org: caller.org, node: this.config.publicKey, contract: null };
+        const runContext = { jwt: context.jwt ?? null, depth, caller, contracts: context.contracts, event: context.event, moneyRun: context.moneyRun, state: context.state, attachmentId, now: context.now ?? Date.now(), sender };
         if (context.runId === undefined) {
             return this.run(contract, parameters, runContext);
         }
@@ -302,7 +455,7 @@ export class ContractService implements ContractHost, EventContractHost {
             return failed('this node is not enrolled in an organization that can be paid');
         }
         const costLimit = this.config.contractCostLimitMicroUsd ?? this.config.costLimitMicroUsd;
-        const voucher = this.invoker.createContractVoucher(organizationId, this.config.priceMicroUsdPerMillionTokens ?? 0, costLimit, resource.path, resource.name, CONTRACT_FUNCTION, parameters, context.runId);
+        const voucher = this.invoker.createContractVoucher(organizationId, this.config.priceMicroUsdPerMillionTokens ?? 0, costLimit, resource.path, resource.name, CONTRACT_FUNCTION, parameters, context.runId, version);
         const authorization = await this.operatorClient.authorizeContractRun({ voucher, source: contract.source });
         if (!authorization.ok) {
             return failed(authorization.error);
@@ -324,6 +477,9 @@ export class ContractService implements ContractHost, EventContractHost {
         const context: RunContext = {
             jwt: null,
             depth: 1,
+            now: Date.now(),
+            // Nobody calls an event contract: its sender is the event's owner and publisher, as its caller is.
+            sender: { org: envelope.ownerOrganizationId, node: envelope.publisherPublicKey, contract: null },
             caller: { org: envelope.ownerOrganizationId, node: envelope.publisherPublicKey },
             event: {
                 depth: envelope.depth,
@@ -349,7 +505,7 @@ export class ContractService implements ContractHost, EventContractHost {
                 // A balance may be topped up, or the operator come back, but a revoked mandate stays revoked.
                 return { ok: false, error: authorization.error, retry: authorization.status === 402 || authorization.status >= 500 };
             }
-            result = await this.runBilled(runId, contract, [], context);
+            result = await this.runBilled(runId, contract, [], { ...context, now: authorization.now ?? context.now });
         }
         return result.error ? { ok: false, error: result.error.message, retry: true } : { ok: true };
     }
@@ -358,11 +514,13 @@ export class ContractService implements ContractHost, EventContractHost {
     private async runBilled(runId: string, contract: StoredContract, parameters: ResourceFunctionCallParameter[], context: RunContext): Promise<InvokeResult> {
         const meter = new TokenMeter();
         try {
-            const result = await this.run(contract, parameters, { ...context, runId }, meter);
-            settleRunLater(this.operatorClient, runId, 'capture', meter.tokens, this.log);
+            // A billed contract stages its Account changes on its own run, not a free chain's.
+            const result = await this.run(contract, parameters, { ...context, runId, moneyRun: undefined }, meter);
+            // A failed contract's tokens are charged, and its money changes dropped.
+            await this.settleRun(runId, 'capture', meter.tokens, result.error !== null);
             return result;
         } catch (error) {
-            settleRunLater(this.operatorClient, runId, 'release', meter.tokens, this.log);
+            await this.settleRun(runId, 'release', meter.tokens);
             throw error;
         }
     }
@@ -388,25 +546,155 @@ export class ContractService implements ContractHost, EventContractHost {
             }
         }
         const emitter = this.events?.emitter({ scriptOwner: contract.ownerOrganizationId, lineage: context.event, consumes: context.consuming?.type, contract: label });
+        // Account calls stage on the contract's own run when it's billed. Otherwise the outermost unbilled contract
+        // of a chain opens a free run the first time one of them calls Account, and settles it when it ends.
+        const ownsMoneyRun = context.runId === undefined && context.moneyRun === undefined;
+        const moneyRun = context.runId !== undefined
+            ? new MoneyRun(context.runId)
+            : context.moneyRun ?? new MoneyRun(undefined, (runId) => this.operatorClient.openRun({ runId, ...(context.now === undefined ? {} : { now: context.now }) }));
+        // The outermost contract on this node starts the chain whose state waits for its money.
+        const ownsState = context.state === undefined;
+        const tx = context.state?.tx ?? new StateTransaction();
+        const frame = new Frame(context.state?.frame);
+        // A payable contract's chain always moves money, so its state always waits (requestscript 1.8.0's `payable`).
+        if ((script.declaration as { payable?: boolean }).payable === true) {
+            tx.money = true;
+        }
+        const account: AccountSession = { run: moneyRun, contract: { name: label, version: contract.version }, onStaged: () => { tx.money = true; }, ledger: [] };
+        const payable = (script.declaration as { payable?: boolean }).payable === true;
+        // A read of a scope another chain holds waits for it, giving up the contract meanwhile, so calls that use
+        // other scopes carry on.
+        const waitForScope = async (scope: StateScope) => {
+            if (!this.pending.heldByOther(tx, contract.path, contract.name, scope)) return;
+            const hadLock = release !== undefined;
+            release?.();
+            release = undefined;
+            const free = await this.pending.waitFor(tx, contract.path, contract.name, scope, this.lockTimeoutMs);
+            if (hadLock) {
+                release = await this.lock(label);
+                if (!release) throw new StateBusy(`it is busy: other calls held it for ${this.lockTimeoutMs / 1000} seconds`);
+            }
+            if (!free) throw new StateBusy(`its state is held by a call whose money hasn't settled after ${this.lockTimeoutMs / 1000} seconds; try again`);
+        };
+        let outcome: InvokeResult | undefined;
+        try {
+            // Money attached to the call is real only once the operator says so, so the contract reads it from there.
+            // A contract the operator has no owner for can't call a payable one, so a stored `null` never matches it.
+            if (payable && context.sender && context.sender.org === null) {
+                outcome = failed(`${context.sender.contract ?? 'its caller'} has no registered owner, so it can't call a payable contract`);
+                return outcome;
+            }
+            let payment: (AttachmentRead & { money: MoneyCallRef }) | undefined;
+            if (context.attachmentId !== undefined) {
+                if (!payable) {
+                    outcome = failed('it isn\'t payable, so money can\'t be attached to a call to it');
+                    return outcome;
+                }
+                const read = this.invoker.money
+                    ? await this.invoker.money.payment(moneyRun, account.contract, context.attachmentId)
+                    : { error: 'this node has no operator to move money' };
+                if ('error' in read) {
+                    outcome = failed(`the money attached to the call can't be read: ${read.error}`);
+                    return outcome;
+                }
+                payment = read;
+                account.attachmentId = context.attachmentId;
+                tx.money = true;
+            }
+            outcome = await this.runScript(script, contract, parameters, context, label, emitter, account, { tx, frame }, waitForScope, meter, payable ? { payment, now: context.now } : undefined);
+            return outcome;
+        } finally {
+            release?.();
+            if (outcome?.error !== null) {
+                // Failed or thrown: its writes, and those of the runs it called, go with its money.
+                this.pending.drop(tx, frame);
+            }
+            if (outcome?.error && !ownsMoneyRun && context.runId === undefined && moneyRun.staged) {
+                // Its changes share the chain's run, so they can only be dropped with everyone else's.
+                moneyRun.poisoned ??= outcome.error.message;
+            }
+            if (ownsState) {
+                // A chain that moved no money but ran a payable contract still sends its receipts, so the operator's state
+                // hash chains stay whole: it opens a run to send them in.
+                // Whoever owns the run settles it once it's open: this contract, or the request script that called it.
+                if (tx.money && context.runId === undefined && !moneyRun.opened && tx.receipts.length > 0) {
+                    await moneyRun.id();
+                }
+                // The operator decides the chain's whole tree, so any run in it answers for the outcome.
+                const runId = tx.money ? context.runId ?? moneyRun.opened : undefined;
+                await this.pending.end(tx, runId).catch(error => this.log(error, `Failed to keep the state of ${label}@${contract.version} until its money settles`));
+                // After the state, before the capture, so a run the operator settles has its receipts on the way.
+                if (runId !== undefined && tx.receipts.length > 0) {
+                    const receipts = tx.receipts.map(entry => entry.receipt);
+                    await this.outbox.submitReceipts(runId, receipts, signData(receiptsPayload(runId, receipts), this.config.privateKey))
+                        .catch(error => this.log(error, `Failed to keep the receipts of run ${runId}`));
+                }
+            }
+            if (ownsMoneyRun && moneyRun.opened) {
+                // Thrown (outcome undefined): nothing ran to completion, so the run is released.
+                await this.settleRun(moneyRun.opened, outcome ? 'capture' : 'release', 0, outcome?.error != null);
+            }
+        }
+    }
+
+    private async runScript(
+        script: Script, contract: StoredContract, parameters: ResourceFunctionCallParameter[], context: RunContext, label: string,
+        emitter: ReturnType<EventService['emitter']> | undefined, account: AccountSession, state: { tx: StateTransaction, frame: Frame },
+        waitForScope: (scope: StateScope) => Promise<void>, meter?: TokenMeter,
+        // Only a payable contract reads `payment` and `now`, so an older contract's own variables of those names still work.
+        money?: { payment: (AttachmentRead & { money: MoneyCallRef }) | undefined, now: number | undefined },
+    ): Promise<InvokeResult> {
+        const failed = (reason: string) => ({ value: null, error: { message: `Contract ${label}@${contract.version} failed: ${reason}` } });
+        const stateful = script.body.some(statement => statement.kind === 'varDecl' && statement.state !== undefined);
+        // Everything the run reads and calls, for the operator to replay once its chain moves money.
+        const recorder = new ReceiptRecorder(account.ledger ?? []);
         try {
             const { jwt, caller, depth, runId, event } = context;
+            const moneyRun = runId === undefined ? account.run : undefined;
+            const scriptParameters = context.consuming ? context.consuming.data : Object.fromEntries(parameters.map(parameter => [parameter.name, parameter.value]));
             const result = await interpretParsed(script, {
                 resourceResolver: this.resolver,
-                resourceInvoker: this.invoker.forScript({ jwt, caller, depth, runId, event, contracts: [...context.contracts ?? [], label] }),
-                parameters: context.consuming ? context.consuming.data : Object.fromEntries(parameters.map(parameter => [parameter.name, parameter.value])),
+                resourceInvoker: recorder.invoker(this.invoker.forScript({
+                    jwt, caller, depth, runId, event, contracts: [...context.contracts ?? [], label], account, moneyRun, state, attest: recorder.attest,
+                    ...(context.now === undefined ? {} : { now: context.now }),
+                    // The node's own organization owns what its API key deployed, as the operator registered it.
+                    self: { contract: `${label}@${contract.version}`, owner: contract.ownerOrganizationId ?? this.config.organizationId ?? null },
+                })),
+                ...(money?.payment ? { payment: money.payment } : {}),
+                ...(money?.now === undefined ? {} : { now: money.now }),
+                parameters: scriptParameters,
                 meter,
-                builtins: { jwt, caller, ...(context.consuming ? { event: context.consuming.event } : {}) },
-                state: stateful ? { get: (variable, scope) => this.state.get(contract.path, contract.name, variable, scope) } : undefined,
+                builtins: { jwt, caller, ...(context.consuming ? { event: context.consuming.event } : {}), ...(money && context.sender ? { sender: context.sender } : {}) },
+                state: stateful ? recorder.stateStore({
+                    get: async (variable, scope) => {
+                        // The chain sees its own writes before they're saved.
+                        const own = this.pending.buffered(state.tx, contract.path, contract.name, variable, scope);
+                        if (own) return own;
+                        await waitForScope(scope);
+                        return this.state.get(contract.path, contract.name, variable, scope);
+                    },
+                }) : undefined,
                 events: emitter?.resolver,
-                structs: this.structs?.resolver,
+                structs: this.structs ? recorder.structResolver(this.structs.resolver) : undefined,
             });
+            // A failed Account call fails the run, even when the script carried on past its error, so nothing moves
+            // because a payment was refused. Checked before anything is saved.
+            if (account.failure) {
+                return failed(`${account.failure}, so nothing was saved`);
+            }
+            if (account.run.poisoned) {
+                return failed(`a contract it called failed after moving money (${account.run.poisoned}), so nothing was saved`);
+            }
             const unpublishable = emitter?.check(result.events);
             if (unpublishable) {
                 return failed(`${unpublishable}, so nothing was saved`);
             }
             if (result.state.length > 0) {
                 const maxBytes = this.config.maxContractStateBytes ?? DEFAULT_MAX_CONTRACT_STATE_BYTES;
-                const committed = await this.state.commit(contract.path, contract.name, result.state, maxBytes);
+                // A chain that moves money keeps its writes until the money settles; any other saves them now.
+                const committed = state.tx.money
+                    ? await this.pending.buffer(state.tx, state.frame, contract.path, contract.name, result.state)
+                    : await this.pending.commitNow(contract.path, contract.name, result.state);
                 if (!committed.ok) {
                     return failed(committed.reason === 'conflict'
                         ? 'its state changed during the call, so nothing was saved; try again'
@@ -417,15 +705,40 @@ export class ContractService implements ContractHost, EventContractHost {
                 // The run has succeeded and saved its state, so a failure here loses its events but not the call.
                 await emitter.publish(result.events).catch(error => this.log(error, `Failed to publish the events of ${label}@${contract.version}`));
             }
+            state.tx.receipts.push({
+                frame: state.frame,
+                receipt: recorder.receipt(
+                    { name: label, version: contract.version, sourceHash: hashData(contract.source) },
+                    {
+                        parameters: encodeHostValue(scriptParameters) as Record<string, unknown>,
+                        payment: money?.payment && context.attachmentId ? { ...money.payment, attachmentId: context.attachmentId } : null,
+                        now: money?.now ?? null,
+                        sender: money && context.sender ? context.sender : null,
+                        caller,
+                        jwt,
+                        event: context.consuming ? context.consuming.event : null,
+                    },
+                    result,
+                    result.usage.tokens,
+                ),
+            });
             return { value: result.returnValue, error: null };
         } catch (error) {
-            if (error instanceof RequestScriptError) {
+            if (error instanceof RequestScriptError || error instanceof StateBusy) {
                 return failed(error.message);
             }
             throw error;
-        } finally {
-            release?.();
         }
+    }
+
+    /**
+     * Keeps a run's capture or release in the outbox, which sends it. Called after the run's state is saved or kept
+     * pending, so a crash between the two leaves a run the operator expires and drops, never money applied
+     * without its state.
+     */
+    private async settleRun(runId: string, outcome: 'capture' | 'release', tokens: number, failed = false): Promise<void> {
+        await (outcome === 'capture' ? this.outbox.captureRun(runId, tokens, failed) : this.outbox.releaseRun(runId))
+            .catch(error => this.log(error, `Failed to keep the ${outcome} of run ${runId}`));
     }
 
     /**

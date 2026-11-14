@@ -99,7 +99,7 @@ describe('RunService', () => {
         test('holds the client\'s maximum run cost and records the script\'s token budget', async () => {
             const { runId, result } = await authorize();
 
-            expect(result).toEqual({ status: 'held', heldMicroUsd: 50_000, maxTokens: 4, tokenBudgetMicroUsd: 1_000 });
+            expect(result).toEqual({ status: 'held', heldMicroUsd: 50_000, maxTokens: 4, tokenBudgetMicroUsd: 1_000, now: expect.any(Number) });
             expect(await balances(PAYER_ORGANIZATION)).toEqual({ balance: 100_000, held: 50_000, payable: 0 });
             expect(await run(runId)).toMatchObject({ status: 'held', clientId, payerOrganizationId: PAYER_ORGANIZATION, recipientOrganizationId: PROVIDER_ORGANIZATION, priceMicroUsdPerMillionTokens: PRICE });
         });
@@ -173,7 +173,7 @@ describe('RunService', () => {
     test('a contract source authorizes a deploy, with no tokens to run', async () => {
         const { result } = await authorize({ source: CONTRACT });
 
-        expect(result).toEqual({ status: 'held', heldMicroUsd: 50_000, maxTokens: 0, tokenBudgetMicroUsd: 0 });
+        expect(result).toEqual({ status: 'held', heldMicroUsd: 50_000, maxTokens: 0, tokenBudgetMicroUsd: 0, now: expect.any(Number) });
     });
 
     describe('capture and release', () => {
@@ -321,7 +321,11 @@ describe('RunService', () => {
         test('holds up to maxAmount on the signer\'s organization, and charges the tokens at the node\'s price', async () => {
             const voucher = contractVoucher();
 
-            expect(await authorizeContract(voucher)).toEqual({ status: 'held', heldMicroUsd: 20_000, maxTokens: 4, tokenBudgetMicroUsd: 1_000, payerOrganizationId: PAYER_ORGANIZATION });
+            expect(await authorizeContract(voucher)).toEqual({
+                status: 'held', heldMicroUsd: 20_000, maxTokens: 4, tokenBudgetMicroUsd: 1_000, payerOrganizationId: PAYER_ORGANIZATION,
+                // A request script's call: its run's organization sent it.
+                sender: { org: PAYER_ORGANIZATION, contract: null }, now: expect.any(Number),
+            });
             expect(await run(voucher.invocationId)).toMatchObject({ kind: 'contract', clientId: null, parentRunId: null, payerOrganizationId: PAYER_ORGANIZATION });
             expect(await balances(PAYER_ORGANIZATION)).toMatchObject({ held: 20_000 });
             // A retried call with the same voucher finds the same run.
@@ -349,7 +353,7 @@ describe('RunService', () => {
         test('is free for the node\'s own organization, without a run', async () => {
             const voucher = contractVoucher({ keys: provider });
 
-            expect(await authorizeContract(voucher)).toEqual({ status: 'free', payerOrganizationId: PROVIDER_ORGANIZATION });
+            expect(await authorizeContract(voucher)).toEqual({ status: 'free', payerOrganizationId: PROVIDER_ORGANIZATION, sender: { org: PROVIDER_ORGANIZATION, contract: null } });
             expect(await db.select().from(runsTable)).toEqual([]);
         });
 
@@ -434,7 +438,7 @@ describe('RunService', () => {
         test('holds and charges an event run like a run by the mandate\'s client', async () => {
             const { runId, result } = await authorizeEvent(await mandate());
 
-            expect(result).toEqual({ status: 'held', heldMicroUsd: 50_000, maxTokens: contractMaxTokens(CONSUMER), tokenBudgetMicroUsd: tokenCharge(contractMaxTokens(CONSUMER), PRICE) });
+            expect(result).toEqual({ status: 'held', heldMicroUsd: 50_000, maxTokens: contractMaxTokens(CONSUMER), tokenBudgetMicroUsd: tokenCharge(contractMaxTokens(CONSUMER), PRICE), now: expect.any(Number) });
             expect(await run(runId)).toMatchObject({ kind: 'event', clientId, payerOrganizationId: PAYER_ORGANIZATION, recipientOrganizationId: PROVIDER_ORGANIZATION });
             expect(await service.capture(provider.publicKey, { runId, tokens: 4 })).toEqual({ status: 'captured', amountMicroUsd: 1_000 });
             expect(await balances(PAYER_ORGANIZATION)).toEqual({ balance: 99_000, held: 0, payable: 0 });

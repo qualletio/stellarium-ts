@@ -72,6 +72,8 @@ export interface ResourceFunction {
 export interface Resource {
     path: string;
     name: string;
+    /** A contract's latest version. A contract calling another must bind it as `path.Name@version`. */
+    version?: string;
     website?: string;
     description?: string;
     functions: ResourceFunction[];

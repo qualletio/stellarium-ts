@@ -76,6 +76,16 @@ Configure it with environment variables:
 | `PLATFORM_FEE_BPS` | Optional. The platform's share of each captured payment, in basis points. Defaults to 100 (1%). |
 | `MIN_TOP_UP_CENTS`, `MAX_TOP_UP_CENTS` | Optional. Default 1000 ($10) and 100000 ($1,000). |
 | `PAYOUT_HOLD_DAYS`, `PAYOUT_INTERVAL_DAYS`, `PAYOUT_MIN_MICRO_USD` | Optional. Default 7, 7 and 10000000 ($10). Never use the test-mode overrides from the local guide. |
+| `IDLE_BALANCE_DAYS`, `IDLE_BALANCE_WARNING_MICRO_USD` | Optional. The dashboard warns an organization when at least this much of its balance came from card top-ups older than this many days and hasn't been spent, since Stripe's risk checks flag prepaid money that sits unused. Default 30 and 500000000 ($500). |
+| `MAX_FUNDING_SOURCE_AGE_DAYS`, `MAX_CONTRACT_HOLD_DAYS`, `CHILD_RECEIPT_DEADLINE_MS` | Optional. Money in contracts (`docs/money.md`): only top-ups this recent can fund a contract, contract funding older than the hold (at most 30 days) is refunded, and a run tree waits this long for other nodes' runs. Default 7, 14 and 300000. Lower the first two if Stripe asks. |
+| `STAFF_API_KEYS` | Optional. `name:key` pairs for the staff API, which decides verification reviews, bans and appeals. Give each staff member their own key: bans and raised limits need two different ones. |
+| `RECEIPT_DEADLINE_MS`, `CHECKPOINT_INTERVAL_MS` | Optional. Default 600000 and 3600000. |
+| `MAX_PENDING_MONEY_RUNS_PER_CONTRACT`, `MAX_PENDING_MONEY_RUNS_PER_PAYER` | Optional. Root runs with staged money changes a contract, and a payer, may have at once. Default 100 and 20. |
+| `ATTACH_LIMIT_BASE_MICRO_USD`, `ATTACH_WINDOW_DAYS`, `PAYER_KYC_THRESHOLD_MICRO_USD` | Optional. Card-fraud limits on attaching money to contracts (`docs/money.md`, As built). Default 100000000 ($100), 30 and 1000000000 ($1,000). Staff record verified identities in the staff console. |
+| `SELF_PAYMENT_ALERT_MICRO_USD`, `OUTFLOW_JUMP_ALERT_MICRO_USD` | Optional. Thresholds for staff alerts on a node's contract outflows. Default 1000000000 ($1,000) each. |
+
+No sanctions screening provider ships with the operator. Until the deployment provides a `SanctionsScreener` (`apps/operator/src/governance/governanceService.ts`), nobody is screened automatically; staff can still block an organization from the console. Have counsel review screening before launch (`docs/money.md`, Stripe's conditions).
+| `OPTIMISTIC_VERIFY_LIMIT_MICRO_USD`, `MAX_UNVERIFIED_MICRO_USD_PER_NODE` | Optional. Default 0 and 0, so every run tree whose contracts move money is verified before the money moves. Raise them only after reviewing the replay worker's throughput. |
 | `RATE_LIMIT_MAX`, `RATE_LIMIT_TIME_WINDOW` | Optional. Per-IP limit on every route but the webhooks. Default 100 per minute. |
 | `DASHBOARD_SERVICE_SECRET` | From step 1. Without it, the dashboard's Composer is off. |
 | `COMPOSER_INPUT_MICRO_USD_PER_MILLION_TOKENS`, `COMPOSER_CACHE_READ_MICRO_USD_PER_MILLION_TOKENS`, `COMPOSER_OUTPUT_MICRO_USD_PER_MILLION_TOKENS` | Optional. What organizations pay per million Claude tokens in the Composer; cache writes are charged as input. Default 4000000, 400000 and 20000000, Claude Opus 5.5's list prices. Raise them to earn a margin. |

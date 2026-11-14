@@ -65,6 +65,7 @@ export class PaymentService {
      * from the run's hold to the receipt, so the run's hold caps what its calls cost.
      */
     async authorize(providerPublicKey: string, voucher: Voucher): Promise<AuthorizeResult> {
+        await this.organizations.requireActiveNode(providerPublicKey);
         this.verifyVoucher(voucher);
         const expiresAt = new Date(Date.parse(voucher.expiresAt));
         if (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) {
@@ -103,7 +104,7 @@ export class PaymentService {
                 if (!recipient?.payoutsEnabled) {
                     throw new OperationError(422, `Organization ${voucher.recipientOrganizationId} can't receive payouts yet`);
                 }
-                if (payerOrganization.frozenAt) {
+                if (payerOrganization.frozenAt || payerOrganization.bannedAt) {
                     throw new OperationError(403, 'Payer organization is frozen');
                 }
 

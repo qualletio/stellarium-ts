@@ -11,6 +11,7 @@ import { type Peer, peerAnnouncementPayload } from "../peer/repository.js";
 import { CombinationResourceInvoker, type InferencePaymentVoucher, inferenceVoucherPayload, type PaymentVoucher, paymentVoucherPayload } from "../resource/invoker.js";
 import { resourceAnnouncementPayload, type StellariumResource } from "../resource/repository.js";
 import routes from "../routes.js";
+import { resourceResponsePayload } from "../resource/served.js";
 import { createService, type NodeConfig, type Service } from "../service.js";
 import { DIALECTS, COST, generateBase64KeyPair, INFERENCE_RATES, modelResource, ORGANIZATION, temperatureSource, testConfig, weatherResource, openTestDatabase } from "./helpers.js";
 
@@ -36,8 +37,8 @@ describe.each(DIALECTS)("routes (%s)", (dialect) => {
         config = testConfig();
         service = createService(db, [weather], config);
         authorize = vi.spyOn(service.operatorClient, "authorize").mockResolvedValue({ ok: true });
-        capture = vi.spyOn(service.operatorClient, "capture").mockResolvedValue(undefined);
-        release = vi.spyOn(service.operatorClient, "release").mockResolvedValue(undefined);
+        capture = vi.spyOn(service.operatorClient, "capture").mockResolvedValue({ ok: true });
+        release = vi.spyOn(service.operatorClient, "release").mockResolvedValue({ ok: true });
 
         fastify = Fastify();
         await fastify.register(routes, { prefix: "/v1", service });
@@ -71,6 +72,25 @@ describe.each(DIALECTS)("routes (%s)", (dialect) => {
                 payload: { resourcePath: weather.path, resourceName: weather.name, functionName: "temperature", parameters, ...body },
             });
         }
+
+        test("answers a call that names its place in a run signed, the same each time, and remembers serving it", async () => {
+            const attestation = { runTag: "tag-1", callIndex: 0 };
+            const first = await runResource({ paymentVoucher: voucherFor(), attestation });
+            expect(first.statusCode).toBe(200);
+            const answer = first.json();
+            expect(answer).toMatchObject({ value: 12, error: null, attestation: { runTag: "tag-1", callIndex: 0, publicKey: config.publicKey } });
+            const signed = resourceResponsePayload({ ...answer.attestation, response: { value: 12, error: null } });
+            expect(safeVerifyData(signed, config.publicKey, answer.attestation.signature)).toBe(true);
+
+            // Asked again, it gives the same answer, without running or charging the call again.
+            expect((await runResource({ paymentVoucher: voucherFor(), attestation })).json()).toEqual(answer);
+            expect(authorize).toHaveBeenCalledTimes(1);
+            // Another call can't take the same place in the run.
+            expect((await runResource({ paymentVoucher: voucherFor(), attestation, parameters: [{ name: "city", value: "Bergen" }] })).statusCode).toBe(409);
+
+            expect((await fastify.inject({ method: "GET", url: "/v1/served-calls/tag-1/0" })).json()).toMatchObject({ responseHash: expect.any(String) });
+            expect((await fastify.inject({ method: "GET", url: "/v1/served-calls/tag-1/1" })).statusCode).toBe(404);
+        });
 
         test("authorizes a paid function's voucher, runs it, then captures it", async () => {
             const paymentVoucher = voucherFor();
@@ -296,10 +316,10 @@ describe.each(DIALECTS)("routes (%s)", (dialect) => {
                 const jwk = await exportJWK(operatorKeys.publicKey);
                 tokenService = createService(db, [weather], config, { runTokenKeys: createLocalJWKSet({ keys: [{ ...jwk, alg: "EdDSA" }] }) });
                 authorizeRun = vi.spyOn(tokenService.operatorClient, "authorizeRun").mockResolvedValue({ ok: true, heldMicroUsd: 50_000, maxTokens: 9 });
-                captureRun = vi.spyOn(tokenService.operatorClient, "captureRun").mockResolvedValue(undefined);
-                releaseRun = vi.spyOn(tokenService.operatorClient, "releaseRun").mockResolvedValue(undefined);
+                captureRun = vi.spyOn(tokenService.operatorClient, "captureRun").mockResolvedValue({ ok: true });
+                releaseRun = vi.spyOn(tokenService.operatorClient, "releaseRun").mockResolvedValue({ ok: true });
                 vi.spyOn(tokenService.operatorClient, "authorize").mockResolvedValue({ ok: true });
-                vi.spyOn(tokenService.operatorClient, "capture").mockResolvedValue(undefined);
+                vi.spyOn(tokenService.operatorClient, "capture").mockResolvedValue({ ok: true });
                 tokenApp = Fastify();
                 await tokenApp.register(routes, { prefix: "/v1", service: tokenService });
                 await tokenApp.ready();
@@ -357,10 +377,11 @@ describe.each(DIALECTS)("routes (%s)", (dialect) => {
                 expect(tokenService.operatorClient.authorize).not.toHaveBeenCalled();
             });
 
-            test("charges a script that fails for what it executed, and releases a run the node failed", async () => {
+            test("charges a script that fails for what it executed, as failed, and releases a run the node failed", async () => {
                 const failing = await runWith(await runToken("org_caller"), "request R {\n  return 1 / 0\n}");
                 expect(failing.statusCode).toBe(422);
-                await vi.waitFor(() => expect(captureRun).toHaveBeenCalledWith({ runId: expect.any(String), tokens: 4 }));
+                // Failed, so the money changes in the run's tree are dropped.
+                await vi.waitFor(() => expect(captureRun).toHaveBeenCalledWith({ runId: expect.any(String), tokens: 4, failed: true }));
 
                 vi.spyOn(tokenService.resourceResolver, "resolve").mockRejectedValue(new Error("database is gone"));
                 const broken = await runWith(await runToken("org_caller"));
@@ -640,8 +661,8 @@ describe.each(DIALECTS)("restricted functions (%s)", (dialect) => {
         db = await openTestDatabase(dialect);
         service = createService(db, [restricted], testConfig());
         vi.spyOn(service.operatorClient, "authorize").mockResolvedValue({ ok: true });
-        vi.spyOn(service.operatorClient, "capture").mockResolvedValue(undefined);
-        vi.spyOn(service.operatorClient, "release").mockResolvedValue(undefined);
+        vi.spyOn(service.operatorClient, "capture").mockResolvedValue({ ok: true });
+        vi.spyOn(service.operatorClient, "release").mockResolvedValue({ ok: true });
         callerDb = await openTestDatabase(dialect);
         callerGrants = new GrantService(new GrantRepository(callerDb), { baseUrl: "http://caller", ...caller });
         grant = await service.grantService.issue(caller.publicKey, [{ resourcePath: "com.example", resourceName: "Vault" }], { lifetimeMs: 3_600_000 });
@@ -897,8 +918,8 @@ describe.each(DIALECTS)("inference functions (%s)", (dialect) => {
         db = await openTestDatabase(dialect);
         service = createService(db, [weather, model], testConfig());
         authorize = vi.spyOn(service.operatorClient, "authorize").mockResolvedValue({ ok: true });
-        capture = vi.spyOn(service.operatorClient, "capture").mockResolvedValue(undefined);
-        release = vi.spyOn(service.operatorClient, "release").mockResolvedValue(undefined);
+        capture = vi.spyOn(service.operatorClient, "capture").mockResolvedValue({ ok: true });
+        release = vi.spyOn(service.operatorClient, "release").mockResolvedValue({ ok: true });
         fastify = Fastify();
         await fastify.register(routes, { prefix: "/v1", service });
         await fastify.ready();

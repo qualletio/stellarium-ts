@@ -2,7 +2,7 @@ import { and, desc, eq, isNull, lt } from "drizzle-orm";
 import { maxTokens, parseScript } from "requestscript";
 import { newId, verifySignature } from "../crypto.js";
 import type { Database, Transaction } from "../db/database.js";
-import { eventMandatesTable, runsTable } from "../db/schema.js";
+import { contractVersionsTable, eventMandatesTable, runsTable } from "../db/schema.js";
 import { OperationError } from "../errors.js";
 import { accounts, adjustOrganization, lockOrganizations, postLedgerTransaction } from "../ledger.js";
 import type { OrganizationService } from "../organizations.js";
@@ -29,9 +29,17 @@ export interface RunAuthorizationRequest {
 
 export type RunAuthorization = { status: 'held', heldMicroUsd: number, maxTokens: number, tokenBudgetMicroUsd: number };
 
+/** The time a run's tree started, in milliseconds, which payable contracts in it read as `now`. */
+export type Stamped<T> = T & { now?: number };
+
+/** A free run's start may be at most this far from the operator's clock: a node opens it within a run's lifetime. */
+export const MAX_STAMP_SKEW_MS = RUN_LIFETIME_MS;
+
 export interface ContractRunAuthorizationRequest {
     /** Signed by the calling node. Its `invocationId` is the run's id, so a retried call finds the same run. */
     voucher: ContractVoucher;
+    /** The contract on the calling node that made the call, when one did, whose registered owner is the call's `sender`. */
+    senderContract?: { name: string, version: string };
     /** The contract's source, from which the operator computes the most tokens it can execute. */
     source: string;
 }
@@ -40,7 +48,14 @@ export interface ContractRunAuthorizationRequest {
  * A contract call by the node's own organization isn't billed, and gets no run. Either way the node learns
  * the paying organization, which the contract sees as `caller.org`.
  */
-export type ContractRunAuthorization = (RunAuthorization | { status: 'free' }) & { payerOrganizationId: string };
+export type ContractRunAuthorization = (RunAuthorization | { status: 'free' }) & {
+    payerOrganizationId: string;
+    /**
+     * Who made the call (docs/money.md, Who is calling): a request script's run's organization, or the calling
+     * contract's registered owner, which is null for a contract the operator has no registration of.
+     */
+    sender: { org: string | null, contract: string | null };
+}
 export interface EventMandateRequest {
     /** The run token of the API client deploying the event contract. Its organization pays for the contract's runs. */
     token: string;
@@ -57,6 +72,21 @@ export interface EventRunAuthorizationRequest {
 }
 
 export type RunCaptureResult = { status: 'captured', amountMicroUsd: number } | { status: 'released' };
+
+export interface RunCaptureRequest {
+    runId: string;
+    tokens: number;
+    /**
+     * The contract or script failed. Its tokens are still charged, but the money changes it and the runs below it
+     * staged are dropped (docs/money.md, Settlement).
+     */
+    failed?: boolean;
+}
+
+/** Told when a run settles, so the money changes staged in its tree are applied or dropped. */
+export interface RunSettlementListener {
+    onRunSettled(runId: number): Promise<void>;
+}
 
 /** Micro-USD for `tokens` script tokens at `price` per million, rounded up. */
 export function tokenCharge(tokens: number, priceMicroUsdPerMillionTokens: number): number {
@@ -111,9 +141,79 @@ export class RunService {
         private readonly tokens?: RunTokenSigner,
     ) {}
 
-    async authorize(nodePublicKey: string, request: RunAuthorizationRequest): Promise<RunAuthorization> {
+    /** Set once the money service exists, which depends on runs. */
+    settlement?: RunSettlementListener;
+
+    private async settled(runId: number): Promise<void> {
+        await this.settlement?.onRunSettled(runId);
+    }
+
+    /**
+     * Opens a run for a script the node runs for itself, holding nothing, so its money changes have a tree to
+     * be staged in (docs/money.md, Settlement). Its organization is the node's. Idempotent per run.
+     */
+    async open(nodePublicKey: string, request: { runId: string, now?: number }): Promise<Stamped<{ status: 'held' }>> {
+        await this.organizations.requireActiveNode(nodePublicKey);
+        const node = await this.organizations.getNode(nodePublicKey);
+        if (!node || node.revokedAt) {
+            throw new OperationError(403, 'Node has been revoked');
+        }
+        // The node started the script before it needed a run, so the tree's time is when the node says it started,
+        // as long as that's within a run's lifetime of now.
+        const stampedAt = request.now === undefined ? new Date() : new Date(request.now);
+        if (Math.abs(stampedAt.getTime() - Date.now()) > MAX_STAMP_SKEW_MS) {
+            throw new OperationError(422, 'The run\'s start is too far from the operator\'s clock');
+        }
+        try {
+            await this.db.transaction(async (tx) => {
+                const organizations = await lockOrganizations(tx, [node.organizationId]);
+                if (organizations.get(node.organizationId)!.frozenAt || organizations.get(node.organizationId)!.bannedAt) {
+                    throw new OperationError(403, 'Organization is frozen');
+                }
+                const [existing] = await tx.select().from(runsTable).where(eq(runsTable.runId, request.runId)).limit(1);
+                if (existing) {
+                    if (existing.kind === 'free' && existing.nodePublicKey === nodePublicKey && existing.status === 'held') return;
+                    throw new OperationError(409, 'Run has already been authorized');
+                }
+                await tx.insert(runsTable).values({ ...this.freeRun(request.runId, node.organizationId, nodePublicKey), stampedAt });
+            });
+        } catch (error) {
+            if (isUniqueViolation(error)) throw new OperationError(409, 'Run has already been authorized');
+            throw error;
+        }
+        return this.stamped(request.runId, { status: 'held' as const });
+    }
+
+    private freeRun(runId: string, organizationId: string, nodePublicKey: string, parent?: Run): typeof runsTable.$inferInsert {
+        return {
+            runId,
+            kind: 'free',
+            parentRunId: parent?.id,
+            rootRunId: parent ? parent.rootRunId ?? parent.id : undefined,
+            payerOrganizationId: organizationId,
+            recipientOrganizationId: organizationId,
+            nodePublicKey,
+            priceMicroUsdPerMillionTokens: 0,
+            maxTokens: 0,
+            holdMicroUsd: 0,
+            heldMicroUsd: 0,
+            tokenBudgetMicroUsd: 0,
+            expiresAt: new Date(Date.now() + RUN_LIFETIME_MS),
+        };
+    }
+
+    async authorize(nodePublicKey: string, request: RunAuthorizationRequest): Promise<Stamped<RunAuthorization>> {
+        await this.organizations.requireActiveNode(nodePublicKey);
         const { client, node } = await this.billedClient(nodePublicKey, request.token);
-        return this.holdClientRun(client, node, request.runId, scriptMaxTokens(request.source), 'script');
+        return this.stamped(request.runId, await this.holdClientRun(client, node, request.runId, scriptMaxTokens(request.source), 'script'));
+    }
+
+    /** Adds the time the run's tree started, from its root's stamp. */
+    private async stamped<T extends object>(runId: string, result: T): Promise<Stamped<T>> {
+        const [run] = await this.db.select().from(runsTable).where(eq(runsTable.runId, runId)).limit(1);
+        if (!run) return result;
+        const [root] = run.rootRunId === null ? [run] : await this.db.select().from(runsTable).where(eq(runsTable.id, run.rootRunId)).limit(1);
+        return { ...result, now: (root!.stampedAt ?? root!.createdAt).getTime() };
     }
 
     /**
@@ -163,7 +263,7 @@ export class RunService {
                 const organizations = await lockOrganizations(tx, [client.organizationId, node.organizationId]);
                 const payer = organizations.get(client.organizationId)!;
                 const recipient = organizations.get(node.organizationId)!;
-                if (payer.frozenAt) {
+                if (payer.frozenAt || payer.bannedAt) {
                     throw new OperationError(403, 'Payer organization is frozen');
                 }
                 if (price > 0 && !recipient.payoutsEnabled) {
@@ -203,6 +303,7 @@ export class RunService {
                     heldMicroUsd: hold,
                     tokenBudgetMicroUsd: tokenBudget,
                     expiresAt: new Date(Date.now() + RUN_LIFETIME_MS),
+                    stampedAt: new Date(),
                 });
                 await adjustOrganization(tx, payer.id, { held: hold });
                 return { status: 'held' as const, heldMicroUsd: hold, maxTokens: scriptTokens, tokenBudgetMicroUsd: tokenBudget };
@@ -233,7 +334,8 @@ export class RunService {
      * Holds a run for one event an event contract consumes, under its mandate, as `authorize` holds a script
      * run by the mandate's API client. Refused once the mandate or the client is revoked.
      */
-    async authorizeEvent(nodePublicKey: string, request: EventRunAuthorizationRequest): Promise<RunAuthorization> {
+    async authorizeEvent(nodePublicKey: string, request: EventRunAuthorizationRequest): Promise<Stamped<RunAuthorization>> {
+        await this.organizations.requireActiveNode(nodePublicKey);
         const [mandate] = await this.db.select().from(eventMandatesTable).where(eq(eventMandatesTable.id, request.mandateId)).limit(1);
         if (!mandate || mandate.nodePublicKey !== nodePublicKey) {
             throw new OperationError(404, 'No such event mandate');
@@ -246,7 +348,7 @@ export class RunService {
             throw new OperationError(403, 'The event mandate\'s API client has been revoked');
         }
         const node = await this.billingNode(nodePublicKey, client);
-        return this.holdClientRun(client, node, request.runId, contractMaxTokens(request.source), 'event');
+        return this.stamped(request.runId, await this.holdClientRun(client, node, request.runId, contractMaxTokens(request.source), 'event'));
     }
 
     /** The organization's event mandates, newest first. */
@@ -270,7 +372,29 @@ export class RunService {
      * price, or the voucher's if lower, and for the paid calls the contract makes, which name the new run. A run's hold comes out of the
      * parent run's hold, and goes back to it when settled. Idempotent per voucher.
      */
-    async authorizeContract(nodePublicKey: string, request: ContractRunAuthorizationRequest): Promise<ContractRunAuthorization> {
+    async authorizeContract(nodePublicKey: string, request: ContractRunAuthorizationRequest): Promise<Stamped<ContractRunAuthorization>> {
+        await this.organizations.requireActiveNode(nodePublicKey);
+        const authorization = await this.authorizeContractRun(nodePublicKey, request);
+        const withSender = { ...authorization, sender: await this.sender(request, authorization.payerOrganizationId) } as ContractRunAuthorization;
+        return this.stamped(request.voucher.invocationId, withSender);
+    }
+
+    /**
+     * The call's sender. A calling contract's owner is the operator's own record of it, registered by the node
+     * that signed the voucher, so a node can only name contracts it hosts, and never decides their owners.
+     */
+    private async sender(request: ContractRunAuthorizationRequest, payerOrganizationId: string): Promise<ContractRunAuthorization['sender']> {
+        if (!request.senderContract) return { org: payerOrganizationId, contract: null };
+        const { name, version } = request.senderContract;
+        const [registered] = await this.db.select({ owner: contractVersionsTable.ownerOrganizationId }).from(contractVersionsTable).where(and(
+            eq(contractVersionsTable.nodePublicKey, request.voucher.publicKey),
+            eq(contractVersionsTable.name, name),
+            eq(contractVersionsTable.version, version),
+        )).limit(1);
+        return { org: registered?.owner ?? null, contract: `${name}@${version}` };
+    }
+
+    private async authorizeContractRun(nodePublicKey: string, request: ContractRunAuthorizationRequest): Promise<Omit<ContractRunAuthorization, 'sender'>> {
         const { voucher } = request;
         if (!verifySignature(contractVoucherPayload(voucher), voucher.publicKey, voucher.signature, 'voucher')) {
             throw new OperationError(401, 'Invalid voucher signature');
@@ -302,6 +426,10 @@ export class RunService {
         }
         const payerOrganizationId = parent ? parent.payerOrganizationId : signer.organizationId;
         if (payerOrganizationId === node.organizationId) {
+            if (parent) {
+                // Free, but part of the parent's tree, so the contract's money changes have a run to be staged on.
+                await this.db.insert(runsTable).values(this.freeRun(voucher.invocationId, payerOrganizationId, nodePublicKey, parent)).onConflictDoNothing();
+            }
             return { status: 'free', payerOrganizationId };
         }
         if (!node.listed) {
@@ -317,7 +445,7 @@ export class RunService {
                 const organizations = await lockOrganizations(tx, [payerOrganizationId, node.organizationId]);
                 const payer = organizations.get(payerOrganizationId)!;
                 const recipient = organizations.get(node.organizationId)!;
-                if (payer.frozenAt) {
+                if (payer.frozenAt || payer.bannedAt) {
                     throw new OperationError(403, 'Payer organization is frozen');
                 }
                 if (price > 0 && !recipient.payoutsEnabled) {
@@ -334,7 +462,9 @@ export class RunService {
                 }
 
                 let hold: number;
-                if (parent) {
+                // A free run holds nothing, so a call from one is held on the payer's balance, though it's still
+                // part of the free run's tree.
+                if (parent && parent.kind !== 'free') {
                     const [locked] = await tx.select().from(runsTable).where(eq(runsTable.id, parent.id)).for('update');
                     if (locked!.status !== 'held') {
                         throw new OperationError(409, 'Voucher\'s run has already been settled');
@@ -357,6 +487,8 @@ export class RunService {
                     runId: voucher.invocationId,
                     kind: 'contract',
                     parentRunId: parent?.id,
+                    rootRunId: parent ? parent.rootRunId ?? parent.id : undefined,
+                    ...(parent ? {} : { stampedAt: new Date() }),
                     payerOrganizationId: payer.id,
                     recipientOrganizationId: recipient.id,
                     nodePublicKey,
@@ -381,21 +513,26 @@ export class RunService {
      * releases the rest of its own hold. A charge of nothing releases the hold instead. Its calls' receipts
      * settle on their own.
      */
-    async capture(nodePublicKey: string, request: { runId: string, tokens: number }): Promise<RunCaptureResult> {
-        return this.db.transaction(async (tx) => {
+    async capture(nodePublicKey: string, request: RunCaptureRequest): Promise<RunCaptureResult> {
+        const result = await this.db.transaction(async (tx) => {
             const run = await this.lockRun(tx, nodePublicKey, request.runId);
             if (run.status === 'captured') {
-                return { status: 'captured' as const, amountMicroUsd: run.amountMicroUsd! };
+                return { status: 'captured' as const, amountMicroUsd: run.amountMicroUsd!, id: run.id };
+            }
+            if (run.status === 'released' && run.outcome !== null) {
+                // A capture that charged nothing, retried.
+                return { status: 'released' as const };
             }
             if (run.status === 'released') {
                 throw new OperationError(409, 'Run\'s hold was already released');
             }
 
             const tokens = Math.min(request.tokens, run.maxTokens);
+            const outcome = request.failed ? 'failed' as const : 'succeeded' as const;
             // At most the token budget, which the run's own hold always covers.
             const charge = tokenCharge(tokens, run.priceMicroUsdPerMillionTokens);
             if (charge <= 0) {
-                await this.releaseHeld(tx, run, tokens);
+                await this.releaseHeld(tx, run, tokens, outcome);
                 return { status: 'released' as const };
             }
             const fee = this.payments.fee(charge);
@@ -414,25 +551,33 @@ export class RunService {
                 tokens,
                 amountMicroUsd: charge,
                 feeMicroUsd: fee,
+                outcome,
                 capturedAt: new Date(),
                 updatedAt: new Date(),
             }).where(eq(runsTable.id, run.id));
-            return { status: 'captured' as const, amountMicroUsd: charge };
+            return { status: 'captured' as const, amountMicroUsd: charge, id: run.id };
         });
+        // A retried capture settles the tree again, in case the first one stopped before it did.
+        const [settled] = await this.db.select({ id: runsTable.id }).from(runsTable).where(eq(runsTable.runId, request.runId)).limit(1);
+        await this.settled(settled!.id);
+        if (result.status === 'captured') return { status: 'captured', amountMicroUsd: result.amountMicroUsd };
+        return result;
     }
 
     /** Releases a held run's own hold without charging it, for a script the node failed to run. */
     async release(nodePublicKey: string, request: { runId: string }): Promise<{ status: 'released' }> {
-        return this.db.transaction(async (tx) => {
+        const id = await this.db.transaction(async (tx) => {
             const run = await this.lockRun(tx, nodePublicKey, request.runId);
-            if (run.status === 'captured') {
+            if (run.status === 'captured' || run.outcome !== null) {
                 throw new OperationError(409, 'Run was already captured');
             }
             if (run.status === 'held') {
                 await this.releaseHeld(tx, run);
             }
-            return { status: 'released' as const };
+            return run.id;
         });
+        await this.settled(id);
+        return { status: 'released' as const };
     }
 
     /** Releases runs that expired more than `HOLD_GRACE_MS` before `now`. Returns how many. */
@@ -452,6 +597,7 @@ export class RunService {
                 await this.releaseHeld(tx, run);
                 released++;
             });
+            await this.settled(candidate.id);
         }
         return released;
     }
@@ -474,10 +620,11 @@ export class RunService {
     }
 
     /** Call with the run's organizations and row locked. */
-    private async releaseHeld(tx: Transaction, run: Run, tokens?: number): Promise<void> {
+    /** `outcome` is set for a capture that charged nothing, and omitted for a release. */
+    private async releaseHeld(tx: Transaction, run: Run, tokens?: number, outcome?: 'succeeded' | 'failed'): Promise<void> {
         await this.returnHold(tx, run, run.heldMicroUsd);
         await tx.update(runsTable)
-            .set({ status: 'released', heldMicroUsd: 0, tokens, releasedAt: new Date(), updatedAt: new Date() })
+            .set({ status: 'released', heldMicroUsd: 0, tokens, outcome, releasedAt: new Date(), updatedAt: new Date() })
             .where(eq(runsTable.id, run.id));
     }
 
@@ -488,7 +635,8 @@ export class RunService {
     private async returnHold(tx: Transaction, run: Run, amount: number): Promise<void> {
         if (run.parentRunId !== null) {
             const [parent] = await tx.select().from(runsTable).where(eq(runsTable.id, run.parentRunId)).for('update');
-            if (parent?.status === 'held') {
+            // A free run never funded its children, so their holds go back to the payer.
+            if (parent?.status === 'held' && parent.kind !== 'free') {
                 await tx.update(runsTable).set({ heldMicroUsd: parent.heldMicroUsd + amount, updatedAt: new Date() }).where(eq(runsTable.id, parent.id));
                 return;
             }

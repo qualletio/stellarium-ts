@@ -15,8 +15,9 @@ export const DEFAULT_DATABASE_PATH = './requestscript.db';
  * became `recipient_organization_id`.
  * Version 7 added contract functions: `resource_function.kind` 'contract', priced per million tokens in
  * `resource_function_payment_manifest.price_micro_usd_per_million_tokens`.
+ * Version 8 added `resource.version`: the version a peer announced for a contract, null for other resources.
  */
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 export interface OpenDatabaseOptions {
     /** Postgres only: the schema the node's tables live in, created if missing. Lets nodes share a database. */
@@ -102,6 +103,7 @@ export async function createTables(db: NodeDatabase) {
             path TEXT NOT NULL,
             name TEXT NOT NULL,
             base_url TEXT NOT NULL,
+            version TEXT,
             website TEXT,
             description TEXT,
             created_at TEXT NOT NULL,
@@ -237,6 +239,51 @@ export async function createTables(db: NodeDatabase) {
 
             PRIMARY KEY (path, name, var_name, scope_key)
         );
+
+        -- What this node answered to calls that named their place in a run, signed, for SERVED_CALL_RETENTION_MS
+        -- (docs/money.md, Signed responses). A repeated call gets the same answer.
+        CREATE TABLE IF NOT EXISTS served_call (
+            run_tag TEXT NOT NULL,
+            call_index INTEGER NOT NULL,
+            invocation_hash TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            response_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+
+            PRIMARY KEY (run_tag, call_index)
+        );
+
+        -- Captures and releases this node owes the operator, kept until the operator accepts or refuses them for
+        -- good (docs/money.md, Settlement). key names what is settled ('run:<id>', or 'payment:<requestId>:<invocationId>'),
+        -- so it's settled once; body is the request. next_attempt_at is when it's next sent.
+        CREATE TABLE IF NOT EXISTS settlement_outbox (
+            id ${t.id},
+            key TEXT NOT NULL UNIQUE,
+            path TEXT NOT NULL,
+            body TEXT NOT NULL,
+            attempts INTEGER NOT NULL,
+            next_attempt_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS settlement_outbox_next_attempt_at ON settlement_outbox (next_attempt_at);
+
+        -- State writes of a contract chain that moved money, waiting for the operator to apply or drop the money
+        -- (docs/money.md, Settlement). run_id is the operator run to ask about, seq the order to save them in,
+        -- and version the version the write expects, null where nothing was stored.
+        CREATE TABLE IF NOT EXISTS contract_pending_state (
+            id ${t.id},
+            run_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            var_name TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            type TEXT NOT NULL,
+            version ${t.bigint},
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS contract_pending_state_run_id ON contract_pending_state (run_id);
 
         -- Keys an admin blocked from calling this node or getting grants from it.
         CREATE TABLE IF NOT EXISTS blocked_caller (
