@@ -63,7 +63,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
     beforeEach(async () => {
         ({ db, close } = await createTestDatabase());
         dir = await mkdtemp(path.join(tmpdir(), 'stellarium-operator-e2e-'));
-        const operator = Fastify();
+        const operator = Fastify({ forceCloseConnections: true });
         servers.push(operator);
         service = createService(db, { platformFeeBps: 2000, runTokenPrivateKey: generateNodeKeys().privateKey });
         // The operator's maintenance verifies trees, before their money moves: here, 100 milliseconds after each pass
@@ -87,16 +87,26 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
         operatorUrl = `${await operator.listen({ port: 0, host: '127.0.0.1' })}/v1`;
     });
 
+    // Each step has its own limit, so a slow runner that stalls one names it instead of timing out the whole hook.
+    const within = <T>(step: string, promise: Promise<T>, ms = 15_000) => {
+        let timer: NodeJS.Timeout | undefined;
+        return Promise.race([
+            promise.finally(() => clearTimeout(timer)),
+            new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`afterEach: ${step} took more than ${ms} ms`)), ms); }),
+        ]);
+    };
+
     afterEach(async () => {
-        await stopVerifier();
-        await Promise.all(servers.splice(0).map(server => server.close()));
-        await close();
+        await within('stopping the verifier', stopVerifier());
+        // Servers close with their connections, so a request still in flight can't hold the hook open.
+        await within('closing the servers', Promise.all(servers.splice(0).map(server => server.close())));
+        await within('closing the database', close());
         await rm(dir, { recursive: true, force: true });
-    });
+    }, 60_000);
 
     /** Starts a node on a free port. A provider registers the weather resource before starting. */
     async function startNode(keys: { publicKey: string, privateKey: string }, options: { provider?: boolean, resources?: (baseUrl: string) => StellariumResource[], startingPeer?: string, enrollmentToken?: string, contractDeployFeeMicroUsd?: number, contractCostLimitMicroUsd?: number } = {}) {
-        const fastify = Fastify();
+        const fastify = Fastify({ forceCloseConnections: true });
         servers.push(fastify);
         // Listening first gives the node its port, which its resources' base URL needs.
         await fastify.listen({ port: 0, host: '127.0.0.1' });
@@ -106,7 +116,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
         const node = new StellariumNode();
         if (options.provider) await node.register(weatherResource(baseUrl));
         for (const resource of options.resources?.(baseUrl) ?? []) await node.register(resource);
-        const app = Fastify();
+        const app = Fastify({ forceCloseConnections: true });
         servers.push(app);
         await node.start(app, {
             host: '127.0.0.1', port, baseUrl, ...keys, apiKey: 'key', operatorUrl,
@@ -578,9 +588,13 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
             expect((await run(payerUrl, 'request R {\n  const forecast: com.example.Forecast@1\n  return forecast.run().value\n}')).returnValue).toBe(12);
             let receipt: { id: number, rootRunId: number, receipt: { calls: { attestation?: Record<string, unknown>, response: unknown }[] } } | undefined;
             await vi.waitFor(async () => {
-                [receipt] = await db.select().from(runReceiptsTable) as never[];
-                expect(receipt).toBeDefined();
-            });
+                const [row] = await db.select().from(runReceiptsTable);
+                expect(row).toBeDefined();
+                receipt = row as never;
+                // The operator verifies a tree only once it has an outcome, which the node's capture settles after its receipt.
+                const [root] = await db.select().from(runsTable).where(eq(runsTable.id, row!.rootRunId));
+                expect(['applied', 'verifying']).toContain(root!.treeOutcome);
+            }, { timeout: 15_000 });
             return { providerUrl, payerUrl, receipt: receipt!, payerNode: seeded.payer.publicKey };
         }
 
