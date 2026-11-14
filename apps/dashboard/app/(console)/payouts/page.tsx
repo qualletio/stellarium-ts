@@ -53,6 +53,12 @@ export default async function PayoutsPage({ searchParams }: PageProps<'/payouts'
             <p className={ui.stat}>{formatUsd(organization.payableMicroUsd)}</p>
             <p className={ui.note}>Earned and not yet paid out</p>
           </div>
+          {organization.heldForVerificationMicroUsd > 0 && (
+            <div>
+              <p className={ui.stat}>{formatUsd(organization.heldForVerificationMicroUsd)}</p>
+              <p className={ui.note}>Of it, paid by contracts whose runs the operator is still verifying</p>
+            </div>
+          )}
         </div>
       </section>
 

@@ -18,6 +18,30 @@ export interface Organization {
   payoutsEnabled: boolean;
   payoutOnboardingStarted: boolean;
   frozen: boolean;
+  /** Card top-ups older than `days` that are still unspent, when there is enough of it to warn about. */
+  idleBalance: { amountMicroUsd: number; days: number } | null;
+  /** Banned for fraud: the organization can read and appeal, but change nothing. */
+  banned: boolean;
+  /** Contract payments to the organization that payouts hold until the operator verifies the runs that made them. */
+  heldForVerificationMicroUsd: number;
+  /** Closed by the platform: it can read, but its nodes and clients are refused. */
+  closed: boolean;
+  /** Blocked by sanctions screening: it can't receive contract money or payouts until staff clear it. */
+  sanctionsBlocked: boolean;
+  /** Staff verified who is behind it, which lifts the attach limits on its funding. */
+  identityVerified: boolean;
+  /** Where the operator posts the organization's notifications, signed with its key. */
+  webhookUrl: string | null;
+}
+
+/** Something the operator told the organization: emailed to its owners, and posted to its webhook. */
+export interface Notification {
+  id: number;
+  kind: string;
+  details: Record<string, unknown>;
+  webhookAttempts: number;
+  webhookDeliveredAt: string | null;
+  createdAt: string;
 }
 
 export interface Receipt {
@@ -90,6 +114,8 @@ export interface ApiClient {
   label: string | null;
   maxRunCostMicroUsd: number;
   monthlyCapMicroUsd: number | null;
+  /** Most one run may attach to contract calls. 0 attaches nothing. */
+  maxRunValueMicroUsd: number;
   createdBy: string | null;
   createdAt: string;
   revokedAt: string | null;
@@ -238,6 +264,10 @@ export const connectDashboard = () => request<{ url: string }>('POST', '/org/con
 export const createEnrollmentToken = (label?: string) =>
   request<{ token: string; expiresAt: string }>('POST', '/org/enrollment-tokens', label ? { label } : {});
 
+export const listNotifications = () => request<{ notifications: Notification[] }>('GET', '/org/notifications').then((r) => r.notifications);
+
+export const setWebhook = (url: string | null) => request<{ webhookUrl: string | null }>('PATCH', '/org/webhook', { url });
+
 export const revokeNode = (publicKey: string) => request<{ revoked: boolean }>('DELETE', `/org/nodes/${encodeURIComponent(publicKey)}`);
 
 export interface ListingUpdate {
@@ -267,6 +297,7 @@ export const createClient = (client: NewApiClient) => request<{ client: Omit<Api
 export interface ApiClientLimits {
   maxRunCostMicroUsd?: number;
   monthlyCapMicroUsd?: number | null;
+  maxRunValueMicroUsd?: number;
 }
 
 export const updateClientLimits = (id: string, limits: ApiClientLimits) =>
@@ -292,6 +323,110 @@ export interface EventMandate {
 export const listEventMandates = () => request<{ mandates: EventMandate[] }>('GET', '/org/event-mandates').then((r) => r.mandates);
 
 export const revokeEventMandate = (id: string) => request<{ revoked: boolean }>('DELETE', `/org/event-mandates/${encodeURIComponent(id)}`);
+
+/** A contract version the organization owns, registered with the operator (docs/money.md, Contract accounts). */
+export interface OwnedContract {
+  id: number;
+  nodePublicKey: string;
+  /** path.Name */
+  name: string;
+  version: string;
+  payable: boolean;
+  sourceHash: string;
+  ownerOrganizationId: string;
+  requestscriptVersion: string;
+  dependencies: { nodePublicKey: string; name: string; version: string }[];
+  balanceMicroUsd: number;
+  /** Set by refund-all: the version refuses money from then on. */
+  refundAllAt: string | null;
+  createdAt: string;
+}
+
+export type MoneyLogKind = 'inflow' | 'pay' | 'refund' | 'outflow' | 'expiry_refund' | 'refund_all' | 'fraud_reversal' | 'closed';
+
+export interface MoneyLogEntry {
+  id: number;
+  contractId: number;
+  kind: MoneyLogKind;
+  amountMicroUsd: number;
+  funderOrganizationId: string;
+  counterpartyOrganizationId: string | null;
+  counterpartyContractId: number | null;
+  runId: number | null;
+  createdAt: string;
+}
+
+/** A contract version as the operator publishes it to anyone, before they fund it. Funders aren't named. */
+export interface PublicContract {
+  nodePublicKey: string;
+  name: string;
+  version: string;
+  payable: boolean;
+  source: string;
+  sourceHash: string;
+  ownerOrganizationId: string;
+  hostOrganizationId: string;
+  requestscriptVersion: string;
+  dependencies: { nodePublicKey: string; name: string; version: string }[];
+  balanceMicroUsd: number;
+  refundAllAt: string | null;
+  /** What buyers should know from its verified runs. */
+  flags: ('hostResources' | 'unsignedProviders' | 'unverifiedHistory')[];
+  log: { kind: MoneyLogKind; amountMicroUsd: number; createdAt: string }[];
+}
+
+export const listContracts = () => request<{ contracts: OwnedContract[] }>('GET', '/org/contracts').then((r) => r.contracts);
+
+export const getContractLog = (id: number) => request<{ entries: MoneyLogEntry[] }>('GET', `/org/contracts/${id}/log`).then((r) => r.entries);
+
+export const refundAll = (id: number) => request<{ refundedMicroUsd: number }>('POST', `/org/contracts/${id}/refund-all`);
+
+/** Any contract version, as the operator publishes it. Undefined when it isn't registered. */
+export async function getPublicContract(nodePublicKey: string, ref: string): Promise<PublicContract | undefined> {
+  try {
+    return await request<PublicContract>('GET', `/contracts/${encodeURIComponent(nodePublicKey)}/${encodeURIComponent(ref)}`);
+  } catch (error) {
+    if (error instanceof OperatorError && (error.status === 404 || error.status === 400)) return undefined;
+    throw error;
+  }
+}
+
+export interface AuditEntry {
+  id: number;
+  /** A staff member's name, or `operator` for what the operator did on its own. */
+  actor: string;
+  action: string;
+  organizationId: string | null;
+  details: Record<string, unknown>;
+  createdAt: string;
+}
+
+export const listAudit = () => request<{ entries: AuditEntry[] }>('GET', '/org/audit').then((r) => r.entries);
+
+export interface FraudCase {
+  id: number;
+  nodePublicKey: string;
+  kind: 'proof' | 'review';
+  reason: string;
+  reversedMicroUsd: number;
+  createdAt: string;
+}
+
+export interface BanAppeal {
+  id: number;
+  statement: string;
+  status: 'open' | 'upheld' | 'overturned';
+  createdAt: string;
+  decidedAt: string | null;
+}
+
+export type BanStatus =
+  | { banned: false }
+  | { banned: true; bannedAt: string; reason: string | null; appeal: BanAppeal | null; fraudCases: FraudCase[] };
+
+export const getBanStatus = () => request<BanStatus>('GET', '/org/ban');
+
+export const appealBan = (statement: string) => request<{ appeal: BanAppeal }>('POST', '/org/appeal', { statement });
 
 export const listRuns = (as: 'payer' | 'provider', before?: number) =>
   request<{ runs: Run[] }>('GET', `/org/runs?as=${as}&${page(before)}`).then((r) => r.runs);

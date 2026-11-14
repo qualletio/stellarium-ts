@@ -101,6 +101,12 @@ export class PeerRepository {
         }));
     }
 
+    /** The peer serving from `baseUrl`, the earliest known if several claim it. */
+    async getPeerByBaseUrl(baseUrl: string): Promise<StoredPeer | undefined> {
+        const result = await this.db.get<PeerRow>('SELECT * FROM peer WHERE base_url = ? ORDER BY id LIMIT 1', [baseUrl]);
+        return result ? toPeer(result) : undefined;
+    }
+
     async getPeerByPublicKey(publicKey: string): Promise<StoredPeer | undefined> {
         const result = await this.db.get<PeerRow>('SELECT * FROM peer WHERE public_key = ?', [publicKey]);
         return result ? toPeer(result) : undefined;

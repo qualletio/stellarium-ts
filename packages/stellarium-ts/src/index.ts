@@ -26,6 +26,8 @@ export {
 } from './resource/invoker.js';
 export { inferenceCharge, MAX_TOKENS_PARAMETER, type InferenceResult, type InferenceUsage } from './resource/inference.js';
 export type { FixedPaymentVoucher, InferencePaymentSubmission, InferenceVoucher, PaymentSubmission, RunAuthorizationRequest } from './client/operatorClient.js';
+export type { ContractRegistrationRequest, MoneyContractRef, MoneyReadRequest, MoneyStageRequest, SignedMoneyRead, TreeOutcome } from './client/operatorClient.js';
+export { moneyReadPayload, OperatorClient } from './client/operatorClient.js';
 // Run token verification, so the operator can test its tokens against the real verifier.
 export { MEMBERSHIP_TOKEN_AUDIENCE, RUN_TOKEN_ISSUER, RunTokenVerifier, type Membership, type RunTokenClaims } from './client/runTokens.js';
 // The operator request signature, so the operator can test against the real signer.

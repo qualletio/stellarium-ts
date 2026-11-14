@@ -23,8 +23,42 @@ All amounts are integer micro-USD (1 USD = 1,000,000).
   two endpoints below. Without a secret key, those features are off.
 - `MIN_TOP_UP_CENTS` / `MAX_TOP_UP_CENTS`: default 1000 ($10) and 100000 ($1,000).
 - `PAYOUT_HOLD_DAYS`, `PAYOUT_INTERVAL_DAYS`, `PAYOUT_MIN_MICRO_USD`: captured
-  payments become payable after the hold, an organization is paid at most once per
+  payments, run charges and contract payments become payable after the hold (contract
+  payments also only once their tree is verified), an organization is paid at most once per
   interval, and smaller balances wait. Default 7 days, 7 days and 10000000 ($10).
+- `IDLE_BALANCE_DAYS`, `IDLE_BALANCE_WARNING_MICRO_USD`: the dashboard warns an
+  organization when at least this much of its available balance came from card
+  top-ups older than this many days and is unspent, assuming spending uses the
+  oldest credit first. Stripe's risk checks flag prepaid money that sits unused.
+  Default 30 days and 500000000 ($500).
+- `MAX_FUNDING_SOURCE_AGE_DAYS`, `MAX_CONTRACT_HOLD_DAYS`, `CHILD_RECEIPT_DEADLINE_MS`:
+  money in contracts (`docs/money.md`). Money a script attaches spends only top-ups
+  this recent, funding older than the hold (at most 30) is refunded to its funder, and
+  a run tree waits this long for runs on other nodes before dropping their changes.
+  Default 7 days, 14 days and 300000 (5 minutes).
+- `STAFF_API_KEYS`: `name:key` pairs, separated by commas, for the staff API
+  (`/v1/staff/*`): verification reviews, fraud cases, appeals and staff actions. Bans,
+  upheld appeals, raised node limits and host-fault findings need two staff members.
+  Without it, the staff API is off.
+- `OPTIMISTIC_VERIFY_LIMIT_MICRO_USD`, `MAX_UNVERIFIED_MICRO_USD_PER_NODE`: a run tree
+  whose contracts moved money waits for its receipts to replay before the money moves,
+  unless it moves less than the first, and its hosts' applied unverified money stays
+  within the second. Default 0 and 0: every such tree is verified first.
+- `MAX_PENDING_MONEY_RUNS_PER_CONTRACT`, `MAX_PENDING_MONEY_RUNS_PER_PAYER`: how many
+  root runs with staged money changes a contract, and a payer, may have at once. Default
+  100 and 20.
+- `ATTACH_LIMIT_BASE_MICRO_USD`, `ATTACH_WINDOW_DAYS`, `PAYER_KYC_THRESHOLD_MICRO_USD`:
+  an organization may attach the base, plus its net top-ups older than the window, to
+  contracts in the window, and more than the threshold a month only once staff record
+  its identity as verified. Default 100000000 ($100), 30 and 1000000000 ($1,000).
+- `SELF_PAYMENT_ALERT_MICRO_USD`, `OUTFLOW_JUMP_ALERT_MICRO_USD`: staff alerts when a
+  node's contracts pay its own organization more than the first in a day, or pay out
+  more than the second in a day and five times the week's daily average. Default
+  1000000000 ($1,000) each.
+- `RECEIPT_DEADLINE_MS`, `CHECKPOINT_INTERVAL_MS`: how long after a run tree is applied
+  its contract receipts may still arrive before the gap goes to review, and how often
+  the operator publishes a signed checkpoint (`GET /v1/checkpoints/latest`). Default
+  600000 (10 minutes) and 3600000 (an hour).
 - `BETTER_AUTH_SECRET`: at least 32 characters. Enables dashboard sign-in (Better Auth,
   at `/v1/auth/*`) and the dashboard API. It signs session cookies.
 - `RESEND_API_KEY`, `EMAIL_FROM`: send verification, password reset and invitation

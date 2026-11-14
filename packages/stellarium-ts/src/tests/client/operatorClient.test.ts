@@ -153,13 +153,11 @@ describe("capture and release retries", () => {
         expect(console.error).not.toHaveBeenCalled();
     });
 
-    test.each([400, 401, 404, 409, 422])("does not retry %i responses", async (code) => {
+    test.each([400, 401, 404, 409, 422])("does not retry %i responses, and answers them as final", async (code) => {
         fetchMock.mockResolvedValue(status(code));
 
-        await client().capture(payment);
-
+        expect(await client().capture(payment)).toMatchObject({ ok: false, status: code, retryable: false });
         expect(fetchMock).toHaveBeenCalledTimes(1);
-        expect(console.error).toHaveBeenCalledOnce();
     });
 
     test.each(["ECONNREFUSED", "ECONNRESET"])("retries %s network errors", async (code) => {
@@ -188,10 +186,10 @@ describe("capture and release retries", () => {
 
         const pending = client().capture(payment);
         await vi.runAllTimersAsync();
-        await pending;
 
+        // The settlement outbox resends it later.
+        expect(await pending).toMatchObject({ ok: false, status: 429, retryable: true });
         expect(fetchMock).toHaveBeenCalledTimes(1 + OPERATOR_MAX_RETRIES);
-        expect(console.error).toHaveBeenCalledOnce();
     });
 
     test("throws when no operator URL is configured", async () => {

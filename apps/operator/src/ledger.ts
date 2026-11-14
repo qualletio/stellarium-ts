@@ -16,9 +16,12 @@ export const accounts = {
     stripe: 'platform:stripe',
     /** Money transferred to organizations' Connect accounts. */
     payouts: 'platform:payouts',
+    /** A contract version's balance (docs/money.md), mirrored by `contract_versions.balanceMicroUsd`. */
+    contract: (contractId: number) => `contract:${contractId}`,
 } as const;
 
-export type LedgerKind = 'capture' | 'run_capture' | 'promotion' | 'top_up' | 'refund' | 'dispute' | 'dispute_won' | 'payout' | 'payout_returned' | 'composer_capture';
+export type LedgerKind = 'capture' | 'run_capture' | 'promotion' | 'top_up' | 'refund' | 'dispute' | 'dispute_won' | 'payout' | 'payout_returned' | 'composer_capture'
+    | 'contract_inflow' | 'contract_transfer' | 'contract_pay' | 'contract_refund' | 'contract_expiry' | 'fraud_reversal';
 
 /** What a ledger transaction records. */
 export interface LedgerReference {
@@ -27,6 +30,7 @@ export interface LedgerReference {
     topUpId?: number;
     payoutId?: number;
     composerChargeId?: string;
+    contractId?: number;
     stripeObjectId?: string;
 }
 

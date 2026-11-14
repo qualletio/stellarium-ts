@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { and, desc, eq, gt, isNull, lt, type SQL } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, lt, ne, type SQL, sql } from "drizzle-orm";
 import type { Database } from "./db/database.js";
 import { enrollmentTokensTable, nodesTable, organizationsTable, payoutsTable, receiptsTable, runsTable, topUpsTable } from "./db/schema.js";
 import { newId, sha256Hex } from "./crypto.js";
@@ -40,9 +40,32 @@ export interface Page {
     before?: number;
 }
 
+/**
+ * When an organization's prepaid balance is large and idle enough to warn it. Stripe's risk checks flag card
+ * top-ups that sit unspent: a dispute on one long after it was paid may come after its money has moved on.
+ */
+export interface IdleBalancePolicy {
+    /** Top-ups older than this that are still unspent are idle. */
+    ageMs: number;
+    /** Organizations with at least this much idle are warned. */
+    warningMicroUsd: number;
+}
+
+export const DEFAULT_IDLE_BALANCE_POLICY: IdleBalancePolicy = { ageMs: 30 * 24 * 60 * 60 * 1000, warningMicroUsd: 500 * 1_000_000 };
+
+/** How much of an organization's balance is idle, and what "idle" means, in days. */
+export interface IdleBalance {
+    amountMicroUsd: number;
+    days: number;
+}
+
 /** Organizations, the node keys enrolled in them, and enrollment. */
 export class OrganizationService {
-    constructor(private readonly db: Database, private readonly verifyNode: NodeVerifier = fetchNodePublicKey) {}
+    constructor(
+        private readonly db: Database,
+        private readonly verifyNode: NodeVerifier = fetchNodePublicKey,
+        private readonly idleBalancePolicy: IdleBalancePolicy = DEFAULT_IDLE_BALANCE_POLICY,
+    ) {}
 
     /** `id` defaults to a new random one. Returns undefined, creating nothing, if an organization with `id` exists. */
     async create(name: string, options: { id?: string, authOrganizationId?: string } = {}): Promise<Organization | undefined> {
@@ -77,6 +100,21 @@ export class OrganizationService {
     async getNode(publicKey: string): Promise<Node | undefined> {
         const [node] = await this.db.select().from(nodesTable).where(eq(nodesTable.publicKey, publicKey)).limit(1);
         return node;
+    }
+
+    /**
+     * Throws (403) unless the node may authorize or move anything: enrolled, not revoked or suspended, and its
+     * organization not banned. A suspended node may still settle what it started.
+     */
+    async requireActiveNode(publicKey: string): Promise<Node> {
+        const [row] = await this.db.select({ node: nodesTable, organization: organizationsTable }).from(nodesTable)
+            .innerJoin(organizationsTable, eq(organizationsTable.id, nodesTable.organizationId))
+            .where(eq(nodesTable.publicKey, publicKey)).limit(1);
+        if (!row || row.node.revokedAt) throw new OperationError(403, 'Node has been revoked');
+        if (row.organization.bannedAt) throw new OperationError(403, 'The node\'s organization is banned');
+        if (row.organization.closedAt) throw new OperationError(403, 'The node\'s organization is closed');
+        if (row.node.suspendedAt) throw new OperationError(403, 'The node is suspended while its verification is reviewed');
+        return row.node;
     }
 
     async setPayoutsEnabled(id: string, payoutsEnabled: boolean): Promise<void> {
@@ -200,9 +238,24 @@ export class OrganizationService {
             .orderBy(nodesTable.name);
     }
 
-    /** Runs the organization paid for (`payer`) or was paid for (`provider`). */
+    /**
+     * A node's money limits (docs/money.md), all 0 until the operator's staff raise them after reviewing the node.
+     * Not exposed to organizations.
+     */
+    async setNodeMoneyLimits(publicKey: string, limits: { maxApiKeyRunValueMicroUsd?: number, monthlyApiKeyValueCapMicroUsd?: number, maxContractBalanceMicroUsd?: number }): Promise<void> {
+        for (const value of Object.values(limits)) {
+            if (!Number.isSafeInteger(value) || value < 0) throw new OperationError(400, 'Limits are whole micro-USD, at least 0');
+        }
+        const updated = await this.db.update(nodesTable).set(limits).where(eq(nodesTable.publicKey, publicKey)).returning({ publicKey: nodesTable.publicKey });
+        if (updated.length === 0) throw new OperationError(404, 'Node not found');
+    }
+
+    /** Runs the organization paid for (`payer`) or was paid for (`provider`). Runs a node opened for itself, which cost nothing, aren't listed. */
     async listRuns(organizationId: string, as: 'payer' | 'provider', page: Page) {
-        const owner = as === 'payer' ? eq(runsTable.payerOrganizationId, organizationId) : eq(runsTable.recipientOrganizationId, organizationId);
+        const owner = and(
+            as === 'payer' ? eq(runsTable.payerOrganizationId, organizationId) : eq(runsTable.recipientOrganizationId, organizationId),
+            ne(runsTable.kind, 'free'),
+        )!;
         return this.db.select().from(runsTable).where(page.before === undefined ? owner : and(owner, lt(runsTable.id, page.before)))
             .orderBy(desc(runsTable.id)).limit(page.limit);
     }
@@ -225,6 +278,25 @@ export class OrganizationService {
 
     private paged(owner: SQL, idColumn: typeof receiptsTable.id | typeof topUpsTable.id | typeof payoutsTable.id, page: Page): SQL | undefined {
         return page.before === undefined ? owner : and(owner, lt(idColumn, page.before));
+    }
+
+    /**
+     * The part of the organization's available balance that came from card top-ups older than the policy's age,
+     * when it is at least the policy's warning amount, or null. Spending is assumed to use the oldest credit first,
+     * and promotional credit before top-ups, so this never overstates what is idle.
+     */
+    async idleBalance(organization: Organization, now: Date = new Date()): Promise<IdleBalance | null> {
+        const cutoff = new Date(now.getTime() - this.idleBalancePolicy.ageMs);
+        const net = sql`${topUpsTable.amountMicroUsd} - ${topUpsTable.refundedMicroUsd} - ${topUpsTable.disputedMicroUsd}`;
+        // A succeeded top-up was paid within a day of its Checkout Session, so its creation time stands in for when it was paid.
+        const [totals] = await this.db.select({
+            old: sql`coalesce(sum(case when ${topUpsTable.createdAt} < ${cutoff} then ${net} else 0 end), 0)`.mapWith(Number),
+            recent: sql`coalesce(sum(case when ${topUpsTable.createdAt} >= ${cutoff} then ${net} else 0 end), 0)`.mapWith(Number),
+        }).from(topUpsTable).where(and(eq(topUpsTable.organizationId, organization.id), eq(topUpsTable.status, 'succeeded')));
+        const available = organization.balanceMicroUsd - organization.heldMicroUsd;
+        const idle = Math.max(0, Math.min(totals!.old, available - totals!.recent));
+        if (idle === 0 || idle < this.idleBalancePolicy.warningMicroUsd) return null;
+        return { amountMicroUsd: idle, days: Math.round(this.idleBalancePolicy.ageMs / (24 * 60 * 60 * 1000)) };
     }
 
     /** Credits an organization's balance without a payment. */

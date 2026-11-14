@@ -115,6 +115,12 @@ export class ContractRepository {
         return latestOf(rows)[0];
     }
 
+    /** One version of a contract, unless it is an event contract: what a call pinned to `path.Name@version` runs. */
+    async callable(path: string, name: string, version: string): Promise<StoredContract | undefined> {
+        const row = await this.db.get<ContractRow>(`SELECT * FROM contract WHERE path = ? AND name = ? AND version = ? AND ${CALLABLE}`, [path, name, version]);
+        return row && toContract(row);
+    }
+
     /** The latest version of every contract but the event contracts, ordered by path and name. */
     async allLatestCallable(): Promise<StoredContract[]> {
         return latestOf(await this.db.all<ContractRow[]>(`SELECT * FROM contract WHERE ${CALLABLE} ORDER BY path, name`));

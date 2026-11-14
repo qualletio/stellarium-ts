@@ -10,7 +10,9 @@ const PUBLIC_PATHS = ['/sign-in', '/sign-up', '/forgot-password', '/reset-passwo
  */
 export function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
-  if (PUBLIC_PATHS.includes(pathname) || getSessionCookie(request)) return NextResponse.next();
+  // The staff console signs staff in with their own key, not a dashboard account.
+  const staff = pathname === '/staff' || pathname.startsWith('/staff/');
+  if (PUBLIC_PATHS.includes(pathname) || staff || getSessionCookie(request)) return NextResponse.next();
   const signIn = new URL('/sign-in', request.url);
   if (pathname !== '/') signIn.searchParams.set('redirect', `${pathname}${search}`);
   return NextResponse.redirect(signIn);

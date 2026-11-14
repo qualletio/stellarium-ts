@@ -74,7 +74,7 @@ describe.each(DIALECTS)("structs (%s)", (dialect) => {
         const jwk = await exportJWK(operatorKeys.publicKey);
         service = createService(db, [geoResource(calls)], config, { runTokenKeys: createLocalJWKSet({ keys: [{ ...jwk, alg: "EdDSA" }] }) });
         vi.spyOn(service.operatorClient, "authorizeRun").mockResolvedValue({ ok: true, heldMicroUsd: 50_000, maxTokens: 100 });
-        vi.spyOn(service.operatorClient, "captureRun").mockResolvedValue(undefined);
+        vi.spyOn(service.operatorClient, "captureRun").mockResolvedValue({ ok: true });
         fastify = Fastify();
         await fastify.register(routes, { prefix: "/v1", service });
         await fastify.ready();

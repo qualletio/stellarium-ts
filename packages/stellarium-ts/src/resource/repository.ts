@@ -4,6 +4,13 @@ import type { NodeDatabase } from "../db/database.js";
 import type { ContractRepository, StoredContract } from "../contract/repository.js";
 import type { StoredPeer } from "../peer/repository.js";
 import { isInferenceManifest } from "./inference.js";
+import { ACCOUNT_RESOURCE, isMoneyPath, RANDOM_RESOURCE } from "../money/account.js";
+
+/** How long a node waits for a peer to describe a contract version a script pinned. */
+const CONTRACT_VERSION_FETCH_TIMEOUT_MS = 10_000;
+
+/** At most this many peers' contract versions are cached. Versions never change, so a cached one stays right. */
+const MAX_CACHED_CONTRACT_VERSIONS = 1_000;
 
 /**
  * A flat price per call. `recipientOrganizationId` is filled in by the hosting node when it advertises
@@ -41,7 +48,7 @@ export type StellariumResourceFunctionPaymentManifest = StellariumFixedPaymentMa
  */
 export type StellariumResourceFunctionKind = 'fixed' | 'inference' | 'contract';
 
-/** The one function a contract's resource has. It runs the contract's latest version. */
+/** The one function a contract's resource has. It runs the version the resource names. */
 export const CONTRACT_FUNCTION = 'run';
 
 export function isContractManifest(manifest: StellariumResourceFunctionPaymentManifest | undefined): manifest is StellariumContractPaymentManifest {
@@ -60,6 +67,7 @@ export function contractResource(contract: StoredContract, baseUrl: string, pric
         metadata: {},
         path: contract.path,
         name: contract.name,
+        version: contract.version,
         description: contract.description ?? undefined,
         functions: [{
             name: CONTRACT_FUNCTION,
@@ -106,6 +114,11 @@ export interface StellariumResourceFunction extends ResourceFunction {
 export interface StellariumResource extends Resource {
     id: number;
     baseUrl: string;
+    /**
+     * Set on a contract: the version this resource describes, its latest when announced. A contract must bind
+     * another contract by its version, `path.Name@version`. Other resources have no versions.
+     */
+    version?: string;
     /** A URL where callers can learn more about the resource. */
     website?: string;
     description?: string;
@@ -128,6 +141,7 @@ interface ResourceRow {
     path: string;
     name: string;
     base_url: string;
+    version: string | null;
     website: string | null;
     description: string | null;
 }
@@ -146,7 +160,33 @@ function optionalWebsite(value: unknown): string | null {
     return protocol === 'http:' || protocol === 'https:' ? value : null;
 }
 
+/** A peer's announced contract version is kept only when it looks like one. */
+function optionalVersion(value: unknown): string | null {
+    return typeof value === 'string' && /^\d+(\.\d+)*$/.test(value) && value.length <= 64 ? value : null;
+}
+
 const resourceKey = (resource: { path: string, name: string }) => `${resource.path}.${resource.name}`;
+
+/** `resource` bound by the version a script named, which calls to it then run. See `pinnedVersion`. */
+function pin<T extends Resource>(resource: T, version: string): T {
+    return { ...resource, version, metadata: { ...resource.metadata, pinnedVersion: version } };
+}
+
+/** What a peer's `GET /v1/contracts/:ref` answers about a contract version, after checking its shape. */
+interface ContractVersionDeclaration {
+    parameters: StellariumResourceFunctionParameter[];
+    returnType: string;
+}
+
+function contractVersionDeclaration(body: unknown, version: string): ContractVersionDeclaration | undefined {
+    const { version: answered, parameters, returnType } = (body ?? {}) as Record<string, unknown>;
+    const validParameters = Array.isArray(parameters)
+        && parameters.every(parameter => typeof parameter?.name === 'string' && typeof parameter?.type === 'string');
+    if (answered !== version || !validParameters || typeof returnType !== 'string') {
+        return undefined;
+    }
+    return { parameters: parameters.map(({ name, type }) => ({ name, type })), returnType };
+}
 
 export class ResourceRepository {
     /**
@@ -160,6 +200,9 @@ export class ResourceRepository {
         private readonly organizationId?: string,
         private readonly contracts?: ContractSource,
     ) {}
+
+    /** Contract versions learned from peers, by base URL and `path.Name@version`. */
+    private readonly remoteVersions = new Map<string, ContractVersionDeclaration>();
 
     /** A resource registered on this node. */
     isRegistered(resource: { path: string, name: string }): boolean {
@@ -184,9 +227,40 @@ export class ResourceRepository {
         return (await repository.allLatestCallable()).map(contract => contractResource(contract, this.baseUrl, price(), organizationId()));
     }
 
-    private async contractResource(path: string, name: string): Promise<StellariumResource | undefined> {
-        const contract = await this.contracts?.repository.latestCallable(path, name);
+    /** A contract on this node as a resource: `version`, or its latest. Event contracts are none. */
+    private async contractResource(path: string, name: string, version?: string): Promise<StellariumResource | undefined> {
+        const contract = version === undefined
+            ? await this.contracts?.repository.latestCallable(path, name)
+            : await this.contracts?.repository.callable(path, name, version);
         return contract && contractResource(contract, this.baseUrl, this.contracts!.price(), this.contracts!.organizationId());
+    }
+
+    /**
+     * Asks the peer at `baseUrl` for a version of one of its contracts that it no longer announces, since it
+     * announces only the latest. Undefined when the peer doesn't have it or can't be reached.
+     */
+    private async remoteContractVersion(baseUrl: string, path: string, name: string, version: string): Promise<ContractVersionDeclaration | undefined> {
+        const key = `${baseUrl} ${path}.${name}@${version}`;
+        const cached = this.remoteVersions.get(key);
+        if (cached) {
+            return cached;
+        }
+        let declaration: ContractVersionDeclaration | undefined;
+        try {
+            const response = await fetch(`${baseUrl}/v1/contracts/${encodeURIComponent(`${path}.${name}@${version}`)}`, {
+                signal: AbortSignal.timeout(CONTRACT_VERSION_FETCH_TIMEOUT_MS),
+            });
+            declaration = response.ok ? contractVersionDeclaration(await response.json(), version) : undefined;
+        } catch {
+            return undefined;
+        }
+        if (declaration) {
+            if (this.remoteVersions.size >= MAX_CACHED_CONTRACT_VERSIONS) {
+                this.remoteVersions.delete(this.remoteVersions.keys().next().value!);
+            }
+            this.remoteVersions.set(key, declaration);
+        }
+        return declaration;
     }
 
     /**
@@ -194,7 +268,7 @@ export class ResourceRepository {
      * by this node and resources already known are left alone, so startup can run on every boot.
      */
     async learn(resource: StellariumResource): Promise<void> {
-        if (await this.isInternal(resource) || resource.baseUrl === this.baseUrl) {
+        if (isMoneyPath(resource.path) || await this.isInternal(resource) || resource.baseUrl === this.baseUrl) {
             return;
         }
         await this.db.transaction(async (tx) => {
@@ -222,7 +296,8 @@ export class ResourceRepository {
         const internal = await Promise.all(resources.map(resource => this.isInternal(resource)));
         await this.db.transaction(async (tx) => {
             for (const [index, resource] of resources.entries()) {
-                if (resource.baseUrl !== peer.baseUrl || internal[index]) {
+                // sh.stellarium.money is built into every node, so no peer may publish under it.
+                if (resource.baseUrl !== peer.baseUrl || internal[index] || isMoneyPath(String(resource.path))) {
                     rejected.push(resourceKey(resource));
                     continue;
                 }
@@ -242,8 +317,8 @@ export class ResourceRepository {
 
                 await this.deleteFunctions(tx, existing.id);
                 await tx.run(
-                    'UPDATE resource SET base_url = ?, website = ?, description = ?, peer_id = ?, updated_at = ? WHERE id = ?',
-                    [resource.baseUrl, optionalWebsite(resource.website), optionalText(resource.description), peer.id, new Date().toISOString(), existing.id]
+                    'UPDATE resource SET base_url = ?, version = ?, website = ?, description = ?, peer_id = ?, updated_at = ? WHERE id = ?',
+                    [resource.baseUrl, optionalVersion(resource.version), optionalWebsite(resource.website), optionalText(resource.description), peer.id, new Date().toISOString(), existing.id]
                 );
                 await this.insertFunctions(tx, existing.id, resource.functions);
             }
@@ -255,8 +330,8 @@ export class ResourceRepository {
     private async insert(tx: NodeDatabase, resource: StellariumResource, peerId: number | null): Promise<void> {
         const createdAt = new Date().toISOString();
         const row = await tx.get<{ id: number }>(
-            'INSERT INTO resource (path, name, base_url, website, description, peer_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id',
-            [resource.path, resource.name, resource.baseUrl, optionalWebsite(resource.website), optionalText(resource.description), peerId, createdAt, createdAt]
+            'INSERT INTO resource (path, name, base_url, version, website, description, peer_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id',
+            [resource.path, resource.name, resource.baseUrl, optionalVersion(resource.version), optionalWebsite(resource.website), optionalText(resource.description), peerId, createdAt, createdAt]
         );
 
         if (!row) {
@@ -311,11 +386,30 @@ export class ResourceRepository {
         await tx.run('DELETE FROM resource_function WHERE resource_id = ?', [resourceId]);
     }
 
-    async getInternalResource(path: string, name: string): Promise<StellariumResource | undefined> {
-        return this.resources.find(r => r.path === path && r.name === name) ?? await this.contractResource(path, name);
+    /**
+     * A resource this node hosts: a registered one, or a contract at `version` or its latest. A registered
+     * resource has no versions, so it is never found by one.
+     */
+    async getInternalResource(path: string, name: string, version?: string): Promise<StellariumResource | undefined> {
+        const registered = this.resources.find(r => r.path === path && r.name === name);
+        if (registered) {
+            return version === undefined ? registered : undefined;
+        }
+        return this.contractResource(path, name, version);
     }
 
-    async getResource(key: string): Promise<Resource | undefined> {
+    /**
+     * The resource a script binds as `key`, `path.Name`. With `version`, the script pinned that version of a
+     * contract, which calls to the resource then run (see `pinnedVersion`). A resource without versions is
+     * returned without one, and the interpreter refuses the binding.
+     */
+    async getResource(key: string, version?: string): Promise<Resource | undefined> {
+        if (key === resourceKey(ACCOUNT_RESOURCE)) {
+            return version === undefined ? ACCOUNT_RESOURCE : undefined;
+        }
+        if (key === resourceKey(RANDOM_RESOURCE)) {
+            return version === undefined ? RANDOM_RESOURCE : undefined;
+        }
         const resource = this.resources.find(r => resourceKey(r) === key);
         if (resource) {
             return resource;
@@ -326,9 +420,18 @@ export class ResourceRepository {
         const name = pathName.pop()!;
         const path = pathName.join('.');
 
-        const contract = await this.contractResource(path, name);
+        // Built into stellarium-ts: anything else under the path, even if learned before the rule, is an impostor.
+        if (isMoneyPath(path)) {
+            return undefined;
+        }
+
+        const contract = await this.contractResource(path, name, version);
         if (contract) {
-            return contract;
+            return version === undefined ? contract : pin(contract, version);
+        }
+        // A contract this node hosts is never also a learned resource, so a version it doesn't have is unknown.
+        if (version !== undefined && await this.contracts?.repository.owner(path, name) !== undefined) {
+            return undefined;
         }
 
         const result = await this.db.get<ResourceRow>(
@@ -340,15 +443,33 @@ export class ResourceRepository {
             return undefined;
         }
 
-        return {
+        const learned: Resource = {
             path: result.path,
             name: result.name,
+            ...(result.version === null ? {} : { version: result.version }),
             // The CombinationResourceInvoker forwards calls on these functions to `metadata.baseUrl`.
             functions: await this.getResourceFunctions(result.id),
             metadata: {
                 baseUrl: result.base_url,
             }
+        };
+        if (version === undefined || result.version === null) {
+            return learned;
         }
+        if (version === result.version) {
+            return pin(learned, version);
+        }
+        // An older version: its node runs it, and says what it takes. Its price is the node's, as for the latest.
+        const declaration = await this.remoteContractVersion(result.base_url, path, name, version);
+        if (!declaration) {
+            return undefined;
+        }
+        return pin({
+            ...learned,
+            functions: learned.functions.map(fn => fn.name === CONTRACT_FUNCTION && isContractFunction(fn as StellariumResourceFunction)
+                ? { ...fn, parameters: declaration.parameters, returnType: declaration.returnType }
+                : fn),
+        }, version);
     }
 
     /**
@@ -379,6 +500,7 @@ export class ResourceRepository {
             path: r.path,
             name: r.name,
             baseUrl: r.base_url,
+            version: r.version ?? undefined,
             website: r.website ?? undefined,
             description: r.description ?? undefined,
             metadata: { baseUrl: r.base_url },

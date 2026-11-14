@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import type { BillingService } from "../billing/billingService.js";
 import type { Database } from "../db/database.js";
-import { stripeEventsTable } from "../db/schema.js";
+import { organizationsTable, stripeEventsTable, topUpsTable } from "../db/schema.js";
 import type { PayoutService } from "../payouts/payoutService.js";
 import type { StripeEvent } from "./gateway.js";
 
@@ -23,7 +23,24 @@ function cents(value: unknown): number {
  * idempotent too, so two deliveries racing past the check change nothing twice.
  */
 export class StripeWebhookService {
-    constructor(private readonly db: Database, private readonly billing: BillingService, private readonly payouts: PayoutService) {}
+    constructor(
+        private readonly db: Database,
+        private readonly billing: BillingService,
+        private readonly payouts: PayoutService,
+        /** Recovers what a refund or dispute leaves an organization owing from its contract funding. */
+        private readonly recoverFromFunding?: (organizationId: string, amount: number) => Promise<number>,
+    ) {}
+
+    /** A refund or dispute that left the organization owing is recovered from its unspent contract funding first. */
+    private async recover(paymentIntentId: string): Promise<void> {
+        if (!this.recoverFromFunding) return;
+        const [topUp] = await this.db.select().from(topUpsTable).where(eq(topUpsTable.paymentIntentId, paymentIntentId)).limit(1);
+        if (!topUp) return;
+        const [organization] = await this.db.select().from(organizationsTable).where(eq(organizationsTable.id, topUp.organizationId)).limit(1);
+        if (organization && organization.balanceMicroUsd < 0) {
+            await this.recoverFromFunding(organization.id, -organization.balanceMicroUsd);
+        }
+    }
 
     async handle(event: StripeEvent): Promise<void> {
         const [seen] = await this.db.select({ id: stripeEventsTable.id }).from(stripeEventsTable).where(eq(stripeEventsTable.id, event.id)).limit(1);
@@ -46,12 +63,18 @@ export class StripeWebhookService {
             }
             case 'charge.refunded': {
                 const paymentIntent = id(object.payment_intent);
-                if (paymentIntent) await this.billing.recordRefund(paymentIntent, id(object.id)!, cents(object.amount_refunded));
+                if (paymentIntent) {
+                    await this.billing.recordRefund(paymentIntent, id(object.id)!, cents(object.amount_refunded));
+                    await this.recover(paymentIntent);
+                }
                 return;
             }
             case 'charge.dispute.created': {
                 const paymentIntent = id(object.payment_intent);
-                if (paymentIntent) await this.billing.recordDisputeOpened(paymentIntent, id(object.id)!, cents(object.amount));
+                if (paymentIntent) {
+                    await this.billing.recordDisputeOpened(paymentIntent, id(object.id)!, cents(object.amount));
+                    await this.recover(paymentIntent);
+                }
                 return;
             }
             case 'charge.dispute.closed': {
