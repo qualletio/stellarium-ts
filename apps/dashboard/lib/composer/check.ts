@@ -1,13 +1,13 @@
 import 'server-only';
-import { type Expression, maxTokens, parseScript, RequestScriptError, type Script, type Statement } from 'requestscript';
+import { entrypoints, type Expression, maxTokens, parseScript, RequestScriptError, type Script, type Statement } from 'requestscript';
 import { type Catalog, type CatalogFunction, findResource } from './catalog';
 
 /** What the Composer learns about a script before proposing it. */
 export interface ScriptCheck {
   ok: boolean;
   kind?: 'request' | 'contract';
-  /** A contract's dotted path and name, as it would be called. */
-  contract?: { path: string; name: string; version: string; hasReturnType: boolean };
+  /** A contract's dotted path and name, as it would be called, and the entrypoints callers call. */
+  contract?: { path: string; name: string; version: string; functions: string[] };
   /** Problems that would fail the run or the deploy. Empty when `ok`. */
   problems: string[];
   /** What may fail, depending on the node. */
@@ -54,6 +54,9 @@ function* calls(statements: Statement[]): Generator<Extract<Expression, { kind: 
       case 'emit':
         for (const argument of statement.args) yield* expressionCalls(argument.value);
         break;
+      case 'fail':
+        yield* expressionCalls(statement.message);
+        break;
       case 'resourceDecl':
         break;
     }
@@ -64,6 +67,9 @@ function* expressionCalls(expression: Expression): Generator<Extract<Expression,
   switch (expression.kind) {
     case 'call':
       yield expression;
+      for (const argument of expression.args) yield* expressionCalls(argument.value);
+      break;
+    case 'fnCall':
       for (const argument of expression.args) yield* expressionCalls(argument.value);
       break;
     case 'templateString':
@@ -140,25 +146,26 @@ export function checkScript(source: string, catalog: Catalog): ScriptCheck {
       paidCalls: [],
     };
   }
+  // A contract's bound is its costliest entrypoint's.
   const result: ScriptCheck = { ok: false, kind: declaration.kind, problems, warnings: [], maxTokens: maxTokens(script), paidCalls: [] };
   if (declaration.kind === 'contract') {
-    result.contract = { path: declaration.path.join('.'), name: declaration.name, version: declaration.version, hasReturnType: declaration.returnType !== undefined };
+    result.contract = { path: declaration.path.join('.'), name: declaration.name, version: declaration.version, functions: entrypoints(script).map((fn) => fn.name) };
     if (declaration.path.length === 0) problems.push('A contract deployed to a node needs a dotted path before its name, such as `com.example.Name`.');
-    // An event contract consumes events and returns nothing.
-    if (!declaration.returnType && !declaration.consumes) problems.push('A contract deployed to a node needs a return type, such as `: int32` after its parameters.');
     if (findResource(catalog, declaration.path.join('.'), declaration.name)) {
       problems.push(`${declaration.path.join('.')}.${declaration.name} already exists on this node. Deploy a new version with \`@<version>\` only if your organization owns it; otherwise choose another path.`);
     }
   }
 
   const bound = new Map<string, ReturnType<typeof findResource>>();
-  for (const decl of resourceDecls(script.body)) {
+  // A contract's functions bind and call resources too.
+  const bodies = [script.body, ...script.functions.map((fn) => fn.body)];
+  for (const decl of bodies.flatMap((body) => [...resourceDecls(body)])) {
     const resource = findResource(catalog, decl.resourcePath.join('.'), decl.resourceName);
     if (!resource) problems.push(`Line ${decl.line}: ${[...decl.resourcePath, decl.resourceName].join('.')} is not a resource this node knows.`);
     bound.set(decl.name, resource);
   }
 
-  for (const call of calls(script.body)) {
+  for (const call of bodies.flatMap((body) => [...calls(body)])) {
     const target = call.callee.object;
     if (target.kind !== 'identifier' || !bound.has(target.name)) {
       problems.push(`Line ${call.line}: only a resource bound with \`const name: path.Resource\` can be called.`);

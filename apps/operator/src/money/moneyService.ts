@@ -268,6 +268,10 @@ export class MoneyService {
         if (!node || node.revokedAt) throw new OperationError(403, 'Node has been revoked');
         if (!NAME_PATTERN.test(registration.name)) throw new OperationError(400, 'A contract\'s name is path.Name');
         if (!VERSION_PATTERN.test(registration.version)) throw new OperationError(400, 'Invalid contract version');
+        // RequestScript 2 gave contracts functions (SIP-1); the operator replays nothing older.
+        if (!(Number(registration.requestscriptVersion.split('.')[0]) >= 2)) {
+            throw new OperationError(422, `Contracts run on RequestScript 2 or later, not ${registration.requestscriptVersion}`);
+        }
         if (registration.payable && ESCROW_NAME.test(registration.name.slice(registration.name.lastIndexOf('.') + 1))) {
             throw new OperationError(422, 'Payable contracts route payments: they can\'t be named as escrow or deposit accounts');
         }

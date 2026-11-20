@@ -16,8 +16,8 @@ import { type ContractRef, moneyReadPayload, payFee, type RandomRead, randomValu
 const COURIER = 'org_courier';
 const ARBITER = 'org_arbiter';
 const DAY_MS = 24 * 60 * 60 * 1000;
-const JOB_SOURCE = 'payable contract com.example.Job(action: string): string { return action }';
-const MARKET_SOURCE = 'payable contract com.example.Market(action: string): string { return action }';
+const JOB_SOURCE = 'contract com.example.Job {\n  pub payable fn run(action: string): string { return action }\n}';
+const MARKET_SOURCE = 'contract com.example.Market {\n  pub payable fn run(action: string): string { return action }\n}';
 const FEE_BPS = 100;
 
 describe('MoneyService', () => {
@@ -63,7 +63,7 @@ describe('MoneyService', () => {
     }
 
     async function register(name: string, source: string, version = '1'): Promise<ContractRef> {
-        await service.money.register(provider.publicKey, { name, version, payable: true, source, requestscriptVersion: '1.8.0', dependencies: [] });
+        await service.money.register(provider.publicKey, { name, version, payable: true, source, requestscriptVersion: '2.0.0', dependencies: [] });
         return { nodePublicKey: provider.publicKey, name, version };
     }
 
@@ -93,7 +93,7 @@ describe('MoneyService', () => {
     /** A call from the root's script to a contract on the provider node: a contract run below the root. */
     async function contractRun(parentRunId: string, caller = payer) {
         const voucher = signedContractVoucher(caller, { runId: parentRunId });
-        const authorization = await service.runs.authorizeContract(provider.publicKey, { voucher, source: 'contract com.example.Job(action: string): string { return action }' });
+        const authorization = await service.runs.authorizeContract(provider.publicKey, { voucher, source: 'contract com.example.Job {\n  pub fn run(action: string): string { return action }\n}' });
         expect(authorization.status).toBe('held');
         return voucher.invocationId;
     }
@@ -131,10 +131,15 @@ describe('MoneyService', () => {
 
     describe('registration', () => {
         test('is idempotent, and a version never changes', async () => {
-            const again = await service.money.register(provider.publicKey, { name: 'com.example.Job', version: '1', payable: true, source: JOB_SOURCE, requestscriptVersion: '1.8.0', dependencies: [] });
+            const again = await service.money.register(provider.publicKey, { name: 'com.example.Job', version: '1', payable: true, source: JOB_SOURCE, requestscriptVersion: '2.0.0', dependencies: [] });
             expect(again.ownerOrganizationId).toBe(PROVIDER_ORGANIZATION);
-            expect(await rejection(service.money.register(provider.publicKey, { name: 'com.example.Job', version: '1', payable: true, source: `${JOB_SOURCE} `, requestscriptVersion: '1.8.0', dependencies: [] })))
+            expect(await rejection(service.money.register(provider.publicKey, { name: 'com.example.Job', version: '1', payable: true, source: `${JOB_SOURCE} `, requestscriptVersion: '2.0.0', dependencies: [] })))
                 .toMatchObject({ status: 409 });
+        });
+
+        test('refuses a contract for RequestScript before 2.0, which the operator can\'t replay', async () => {
+            expect(await rejection(service.money.register(provider.publicKey, { name: 'com.example.Old', version: '1', payable: true, source: JOB_SOURCE, requestscriptVersion: '1.8.1', dependencies: [] })))
+                .toMatchObject({ status: 422 });
         });
 
         test('takes its owner from the deploying client\'s run token', async () => {
@@ -144,11 +149,11 @@ describe('MoneyService', () => {
             const { client } = await clients.create(PAYER_ORGANIZATION, { nodePublicKey: provider.publicKey });
             const { token } = await signer.sign({ clientId: client.id, organizationId: PAYER_ORGANIZATION, nodePublicKey: provider.publicKey });
             // The operator verifies tokens with its own key.
-            expect(await rejection(service.money.register(provider.publicKey, { name: 'com.example.Tenant', version: '1', payable: true, source: 's', requestscriptVersion: '1.8.0', dependencies: [], token })))
+            expect(await rejection(service.money.register(provider.publicKey, { name: 'com.example.Tenant', version: '1', payable: true, source: 's', requestscriptVersion: '2.0.0', dependencies: [], token })))
                 .toMatchObject({ status: 503 });
             const { MoneyService, DEFAULT_MONEY_POLICY } = await import('./moneyService.js');
             const money = new MoneyService(db, { ...DEFAULT_MONEY_POLICY, platformFeeBps: FEE_BPS }, signer);
-            const contract = await money.register(provider.publicKey, { name: 'com.example.Tenant', version: '1', payable: true, source: 's', requestscriptVersion: '1.8.0', dependencies: [], token });
+            const contract = await money.register(provider.publicKey, { name: 'com.example.Tenant', version: '1', payable: true, source: 's', requestscriptVersion: '2.0.0', dependencies: [], token });
             expect(contract.ownerOrganizationId).toBe(PAYER_ORGANIZATION);
         });
 
@@ -213,7 +218,7 @@ describe('MoneyService', () => {
             expect(await rejection(attachFromScript(root, 0))).toMatchObject({ status: 422 });
             expect(await rejection(attachFromScript(root, 1.5))).toMatchObject({ status: 422 });
             expect(await rejection(attachFromScript(root, -5))).toMatchObject({ status: 422 });
-            await service.money.register(provider.publicKey, { name: 'com.example.Free', version: '1', payable: false, source: 'contract', requestscriptVersion: '1.8.0', dependencies: [] });
+            await service.money.register(provider.publicKey, { name: 'com.example.Free', version: '1', payable: false, source: 'contract', requestscriptVersion: '2.0.0', dependencies: [] });
             expect(await rejection(attachFromScript(root, 1_000, { to: { ...job, name: 'com.example.Free' } }))).toMatchObject({ status: 422 });
             await succeed(payer, root);
         });

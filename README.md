@@ -294,16 +294,23 @@ An inference function without a `paymentManifest` is free. It still needs `maxTo
 
 ### Contracts
 
-A contract is a [RequestScript](https://github.com/qualletio/requestscript-js) script deployed to a node, so a resource can be written without TypeScript. Its latest version is one of the node's resources, with one function, `run`, which takes the contract's parameters. A contract must have a path and declare its return type (requestscript 1.4.0 or later):
+A contract is a [RequestScript](https://github.com/qualletio/requestscript-js) script deployed to a node, so a resource can be written without TypeScript. Its latest version is one of the node's resources, with a function for each of its entrypoints, its `pub fn`s (RequestScript 2.0, from the SIP for contract functions). Each takes its own parameters, and returns its declared type, or nothing. Private `fn`s organize the code, and every function shares the contract's state. A contract must have a path and at least one `pub fn`:
 
 ```
-contract com.example.Outlook(city: string): string {
+contract com.example.Outlook {
     const weather: com.example.Weather
-    const today = weather.temperature(city: city)
-    if (today.error != null) {
-        return "unknown"
+
+    fn describe(degrees: int32): string {
+        return "${degrees} degrees"
     }
-    return "${today.value} degrees"
+
+    pub fn today(city: string): string {
+        const today = weather.temperature(city: city)
+        if (today.error != null) {
+            return "unknown"
+        }
+        return describe(degrees: today.value)
+    }
 }
 ```
 
@@ -313,42 +320,45 @@ Deploy it with the node's API key, or with a [run token](#api-clients-and-run-to
 curl -X POST http://127.0.0.1:3000/v1/contracts \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $API_KEY" \
-  -d '{"source": "contract com.example.Outlook(city: string): string { ... }", "description": "Today in words"}'
+  -d '{"source": "contract com.example.Outlook { ... }", "description": "Today in words"}'
 ```
 
 - **Versions are immutable.** Deploying a version that exists responds `409`. Deploy `com.example.Outlook@2` to change it. Calls always run the latest version, and `GET /v1/contracts` lists every version with its source, so callers can read what a call does.
 - **The first organization to deploy a contract owns it.** Only its API clients can add versions or delete it. The node's API key can do both for any contract. A contract can't take the name of a registered resource, or of a resource learned from a peer.
 - **Another organization pays a deploy fee**, `contractDeployFeeMicroUsd`, from its API client's run. The node's own organization and its API key deploy for free. A deploy that's refused isn't charged.
 - **Peers learn of a contract as soon as it's deployed**, and forget it when it's deleted, since the node announces its resources again.
+- **RequestScript 2.0 dropped the old syntax**, `contract X(params): T { ... }` with its one function `run`. A node upgraded to it drops the contracts it hosted, and their state (`SCHEMA_VERSION` 9), so deploy them again as functions.
 
-A script calls a contract like any other resource:
+A script calls a contract's functions like any other resource's:
 
 ```
 request Today {
     const outlook: com.example.Outlook
-    return outlook.run(city: "Oslo")
+    return outlook.today(city: "Oslo")
 }
 ```
 
 A request script that names no version calls the latest. **A contract must name the version of every contract it calls**, so the code it depends on can't change after it's deployed:
 
 ```
-contract com.example.Weekly(city: string): string {
+contract com.example.Weekly {
     const outlook: com.example.Outlook@2
     const weather: com.example.Weather
-    return outlook.run(city: city).value
+
+    pub fn week(city: string): string {
+        return outlook.today(city: city).value
+    }
 }
 ```
 
 - **Deploys are refused** when a contract binds another contract by name alone. The error names the current version. Resources that aren't contracts, such as `com.example.Weather`, have no versions and are bound by name.
-- **Old versions stay callable** by their full name, `com.example.Outlook@2`, until they're deleted, here and on other nodes. A caller sends the pinned version as `resourceVersion` on `POST /v1/run/resource`, and the voucher's `invocationHash` covers it.
-- **Peers announce each contract's latest version** in `GET /v1/resources`. To call an older one, a node asks its host for it at `GET /v1/contracts/{path.Name@version}`, which describes one callable version.
-- Pinning needs requestscript ≥ 1.8.0.
+- **Old versions stay callable** by their full name, `com.example.Outlook@2`, until they're deleted, here and on other nodes, with the functions they had. A caller sends the pinned version as `resourceVersion` on `POST /v1/run/resource`, and the voucher's `invocationHash` covers it.
+- **Peers announce each contract's latest version** in `GET /v1/resources`. To call an older one, a node asks its host for it at `GET /v1/contracts/{path.Name@version}`, which describes one callable version and its `functions`.
 
 Calls are charged for the [script tokens](https://github.com/qualletio/requestscript-js#token-metering) the contract executes, at the hosting node's listed price per million tokens, which its manifest advertises as `priceMicroUsdPerMillionTokens`. **A contract's own paid calls are paid by whoever called it**, never by the node hosting it:
 
-1. The caller signs a contract voucher (`kind: "contract"`) for the call, with the price and `maxAmount`, its `contractCostLimitMicroUsd`. A call from a billed run also carries the run's id.
-2. The hosting node checks the voucher as it would a fixed one, then asks the operator to authorize a run for the call. The operator holds up to `maxAmount` on the caller's organization, or out of the caller's run's hold. It charges at most the price the caller signed.
+1. The caller signs a contract voucher (`kind: "contract"`) for the call, with the price, `maxAmount` (its `contractCostLimitMicroUsd`), and the `functionName` it calls. A call from a billed run also carries the run's id.
+2. The hosting node checks the voucher as it would a fixed one, and that it names the function called, then asks the operator to authorize a run for the call. The operator holds up to `maxAmount` on the caller's organization, or out of the caller's run's hold, sized by the most that function can execute. It charges at most the price the caller signed.
 3. The node runs the contract. Each paid call the contract makes draws on that run, as a billed script's calls do. Afterwards, the node captures the tokens the contract executed, and what's left of the hold goes back where it came from.
 
 A contract that fails, for example by dividing by zero, is reported as the call's `error`, and its tokens are still charged. A call by the node's own organization isn't billed. Contracts may call other contracts, at most 8 deep. Set `contractCostLimitMicroUsd` above the cost of the paid calls the contracts you call make, since the default, `costLimitMicroUsd`, covers a single call. A contract reads the calling run's token as `jwt` when it's called from a script on the same node, and `null` otherwise.
@@ -357,23 +367,31 @@ The node learns its price from the operator at startup, and checks it again ever
 
 #### Contract state
 
-A contract keeps values between calls in **state variables** (requestscript 1.5.0 or later), declared with `var state` at the top level of its body. Only the contract's own code can change them:
+A contract keeps values between calls in **state variables**, declared with `var state` at the contract's top level, or at the top of a function's body, where a scope can use the function's parameters. Every function of the contract shares them, and only the contract's own code can change them:
 
 ```
-contract com.example.Visits(page: string): int32 {
+contract com.example.Visits {
     var state total: int32 = 0
     var state(caller.org) mine: int32 = 0
 
-    total = total + 1
-    mine = mine + 1
-    return mine
+    pub fn visit(page: string): int32 {
+        var state(page) perPage: int32 = 0
+        total = total + 1
+        mine = mine + 1
+        perPage = perPage + 1
+        return mine
+    }
+
+    pub fn count(): int32 {
+        return total
+    }
 }
 ```
 
-- `var state name = value` is one copy shared by every caller. `var state(scope) name = value` keeps a copy per value of `scope`, any expression that evaluates to a string or an integer. The initializer runs the first time a copy is used.
+- `var state name = value` is one copy shared by every caller and every function. `var state(scope) name = value` keeps a copy per value of `scope`, any expression that evaluates to a string or an integer. The initializer runs the first time a copy is used. Several functions may declare the same variable, with the same type.
 - **`caller`** is a built-in every contract reads: `{ org, node }`, the organization paying for the call and the node that made it. For a call from another node, `org` is the payer the operator authorized and `node` is the key that signed the voucher. For a script on this node, `org` is the run token's organization, or this node's own. So `var state(caller.org) …` gives each paying organization its own copy, which no one else can reach.
 - **State is saved only if the call succeeds.** A call that fails, or would grow a scope past `maxContractStateBytes`, saves nothing, and its tokens are still charged.
-- **Calls to a stateful contract run one at a time on its node.** A call waits at most 30 seconds for earlier ones, which also breaks a cycle of calls between nodes. A contract that calls itself, directly or through other contracts, fails its outer call rather than lose the inner call's update: the call that saves second finds the state changed.
+- **Calls to a stateful contract run one at a time on its node**, whichever of its functions they call. A call waits at most 30 seconds for earlier ones, which also breaks a cycle of calls between nodes. A contract that calls itself, directly or through other contracts, fails its outer call rather than lose the inner call's update: the call that saves second finds the state changed.
 - **State belongs to the contract, not a version**, so a new version keeps it. A stored value is converted to the new version's declared type, and a value that doesn't fit fails the call. Deleting every version deletes the state.
 - **State is private.** A contract shares it through what it returns. Its owner and the node's admin can read all of it with `GET /v1/contracts/:ref/state`.
 
@@ -588,7 +606,7 @@ Deploy a [contract](#contracts) to the provider with the same token. As another 
 ```sh
 curl -s -X POST http://localhost:3002/v1/contracts \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"source": "contract com.example.Outlook(city: string): string {\n  const weather: com.example.Weather\n  return \"${weather.temperature(city: city).value} degrees\"\n}"}'
+  -d '{"source": "contract com.example.Outlook {\n  const weather: com.example.Weather\n  pub fn today(city: string): string {\n    return \"${weather.temperature(city: city).value} degrees\"\n  }\n}"}'
 ```
 
 The provider announces it, so the caller can call it:
@@ -596,7 +614,7 @@ The provider announces it, so the caller can call it:
 ```sh
 curl -s -X POST http://localhost:3003/v1/run \
   -H "Authorization: Bearer $CALLER_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"source": "request Today {\n  const outlook: com.example.Outlook\n\n  return outlook.run(city: \"Oslo\")\n}"}'
+  -d '{"source": "request Today {\n  const outlook: com.example.Outlook\n\n  return outlook.today(city: \"Oslo\")\n}"}'
 ```
 
 ```json

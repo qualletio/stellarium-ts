@@ -85,11 +85,11 @@ describe('PayoutService', () => {
             await organizations.setNodeMoneyLimits(provider.publicKey, { maxContractBalanceMicroUsd: 1_000_000_000 });
             await organizations.setNodeMoneyLimits(payer.publicKey, { maxApiKeyRunValueMicroUsd: 50_000_000, monthlyApiKeyValueCapMicroUsd: 50_000_000 });
             const job = { nodePublicKey: provider.publicKey, name: 'com.example.Job', version: '1' };
-            await service.money.register(provider.publicKey, { name: job.name, version: job.version, payable: true, source: 'payable contract', requestscriptVersion: '1.8.0', dependencies: [] });
+            await service.money.register(provider.publicKey, { name: job.name, version: job.version, payable: true, source: 'payable contract', requestscriptVersion: '2.0.0', dependencies: [] });
             const root = crypto.randomUUID();
             await service.runs.open(payer.publicKey, { runId: root });
             const voucher = signedContractVoucher(payer, { runId: root });
-            await service.runs.authorizeContract(provider.publicKey, { voucher, source: 'contract com.example.Job(a: int32): int32 {\n  return a\n}' });
+            await service.runs.authorizeContract(provider.publicKey, { voucher, source: 'contract com.example.Job {\n  pub fn run(a: int32): int32 {\n  return a\n}\n}' });
             await service.money.stage(payer.publicKey, { runId: root, callIndex: 0, function: 'attach', parameters: { to: job, amount: 20_000_000, attachmentId: crypto.randomUUID(), payees: [PROVIDER_ORGANIZATION] } });
             await service.money.stage(provider.publicKey, { runId: voucher.invocationId, callIndex: 0, contract: { name: job.name, version: job.version }, function: 'pay', parameters: { to: PROVIDER_ORGANIZATION, amount: 20_000_000, from: PAYER_ORGANIZATION } });
             await service.runs.capture(provider.publicKey, { runId: voucher.invocationId, tokens: 0 });

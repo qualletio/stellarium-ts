@@ -193,9 +193,10 @@ const inferenceVoucherSchema = {
 
 const contractVoucherSchema = {
     type: 'object',
-    required: ['kind', 'requestId', 'invocationId', 'maxAmount', 'priceMicroUsdPerMillionTokens', 'recipientOrganizationId', 'signature', 'expiresAt', 'invocationHash', 'publicKey'],
+    required: ['kind', 'requestId', 'invocationId', 'maxAmount', 'priceMicroUsdPerMillionTokens', 'recipientOrganizationId', 'signature', 'expiresAt', 'invocationHash', 'publicKey', 'functionName'],
     properties: {
         kind: { const: 'contract' },
+        functionName: { type: 'string' },
         requestId: { type: 'string' },
         invocationId: { type: 'string' },
         maxAmount: { type: 'integer', minimum: 0 },
@@ -377,12 +378,12 @@ function isValidPaymentVoucher(voucher: PaymentVoucher | InferencePaymentVoucher
 }
 
 /**
- * A contract voucher is valid when it is bound to this exact call, signed by its public key, unexpired, pays
- * this node's organization, and agrees to at least this node's current price.
+ * A contract voucher is valid when it is bound to this exact call, names the function it calls, is signed by
+ * its public key, unexpired, pays this node's organization, and agrees to at least this node's current price.
  */
 function isValidContractVoucher(voucher: ContractPaymentVoucher, request: ResourceRunRequest, organizationId: string | undefined, price: number): boolean {
     const expectedHash = invocationHash(request.resourcePath, request.resourceName, request.functionName, request.parameters, request.resourceVersion);
-    if (voucher.invocationHash !== expectedHash || !organizationId || voucher.recipientOrganizationId !== organizationId) {
+    if (voucher.invocationHash !== expectedHash || voucher.functionName !== request.functionName || !organizationId || voucher.recipientOrganizationId !== organizationId) {
         return false;
     }
     const expiresAt = Date.parse(voucher.expiresAt);
@@ -406,8 +407,8 @@ function contractRef(ref: string): { path: string, name: string, version?: strin
 
 /** A contract as `GET /v1/contracts` lists it. Its source is public, so callers can read what a call does. */
 function contractView(contract: StoredContract) {
-    const { path, name, version, parameters, returnType, ownerOrganizationId, description, source, createdAt } = contract;
-    return { path, name, version, parameters, returnType, ownerOrganizationId, description, source, createdAt };
+    const { path, name, version, functions, ownerOrganizationId, description, source, createdAt } = contract;
+    return { path, name, version, functions, ownerOrganizationId, description, source, createdAt };
 }
 
 /**
@@ -526,6 +527,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
                     },
                     restricted: fn.restricted || undefined,
                     kind: isInferenceFunction(fn) || isContractFunction(fn) ? fn.kind : undefined,
+                    payable: fn.payable || undefined,
                 })),
                 baseUrl: resource.baseUrl,
             })),
@@ -797,7 +799,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             if (depth > MAX_CONTRACT_DEPTH) {
                 return reply.status(400).send({ error: `Contracts may call each other at most ${MAX_CONTRACT_DEPTH} deep` });
             }
-            const result = await options.service.contractService.serve(paymentVoucher, contract, resourceRequest.parameters, depth, resourceRequest.eventLineage, resourceRequest.attachmentId, resourceRequest.senderContract);
+            const result = await options.service.contractService.serve(paymentVoucher, contract, resourceRequest.functionName, resourceRequest.parameters, depth, resourceRequest.eventLineage, resourceRequest.attachmentId, resourceRequest.senderContract);
             if ('refused' in result) {
                 return reply.status(result.refused.status).send({ error: result.refused.error });
             }

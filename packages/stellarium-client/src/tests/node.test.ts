@@ -29,10 +29,12 @@ function keyPair() {
 
 const temperature = 'request GetTemperature {\n  const weather: com.example.Weather\n\n  return weather.temperature(city: "Oslo")\n}';
 // \${...} is RequestScript's interpolation, not JavaScript's.
-const forecast = `contract com.example.Forecast(city: string): string {
+const forecast = `contract com.example.Forecast {
+  pub fn run(city: string): string {
   const weather: com.example.Weather
   const temperature = weather.temperature(city: city)
   return "\${temperature} degrees"
+}
 }`;
 
 /** A real node over HTTP, hosting a free resource, with no operator. */
@@ -104,7 +106,7 @@ describe('against a node', () => {
         await expect(client.contracts.deploy(forecast, { description: 'A forecast' })).resolves.toMatchObject({ path: 'com.example', name: 'Forecast', feeMicroUsd: 0 });
         const contracts = [];
         for await (const contract of client.contracts.all()) contracts.push(contract);
-        expect(contracts).toEqual([expect.objectContaining({ name: 'Forecast', description: 'A forecast', returnType: 'string', source: forecast })]);
+        expect(contracts).toEqual([expect.objectContaining({ name: 'Forecast', description: 'A forecast', functions: [expect.objectContaining({ name: 'run', returnType: 'string', payable: false })], source: forecast })]);
         await expect(client.resources.get('com.example', 'Forecast')).resolves.toMatchObject({ functions: [{ name: 'run', kind: 'contract' }] });
 
         await client.contracts.delete('com.example.Forecast');

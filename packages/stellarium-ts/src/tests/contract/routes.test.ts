@@ -13,7 +13,7 @@ import { DIALECTS, generateBase64KeyPair, ORGANIZATION, openTestDatabase, testCo
 /** 1 micro-USD a token. */
 const PRICE = 1_000_000;
 const FEE = 5_000;
-const SUM = "contract com.example.Sum(a: int32, b: int32): int32 {\n  return a + b\n}";
+const SUM = "contract com.example.Sum {\n  pub fn run(a: int32, b: int32): int32 {\n  return a + b\n}\n}";
 const sumParameters = [{ name: "a", value: 2 }, { name: "b", value: 3 }];
 
 describe.each(DIALECTS)("contracts (%s)", (dialect) => {
@@ -111,10 +111,11 @@ describe.each(DIALECTS)("contracts (%s)", (dialect) => {
 
         test.each([
             ["a request script", "request R {\n  return 1\n}", 400, "not a request"],
-            ["a contract without a return type", "contract com.example.Sum(a: int32) {\n  return a\n}", 400, "return type"],
-            ["a contract without a path", "contract Sum(a: int32): int32 {\n  return a\n}", 400, "path"],
+            ["a contract in RequestScript 1's syntax", "contract com.example.Sum(a: int32): int32 {\n  return a\n}", 400, "parameters belong to its functions"],
+            ["a contract without a pub function", "contract com.example.Sum {\n  fn helper() { }\n}", 400, "at least one entrypoint"],
+            ["a contract without a path", "contract Sum {\n  pub fn run(a: int32): int32 {\n  return a\n}\n}", 400, "path"],
             ["a script that doesn't parse", "contract com.example.Sum(: int32 {", 400, "Invalid contract"],
-            ["a registered resource's name", "contract com.example.Weather: int32 {\n  return 1\n}", 409, "already a resource"],
+            ["a registered resource's name", "contract com.example.Weather {\n  pub fn run(): int32 {\n  return 1\n}\n}", 409, "already a resource"],
         ])("refuses %s", async (_, source, status, error) => {
             const response = await deploy(source);
 
@@ -123,7 +124,7 @@ describe.each(DIALECTS)("contracts (%s)", (dialect) => {
         });
 
         test("registers the contract with the operator, owned by the node's organization for an API-key deploy", async () => {
-            const source = "contract com.example.Sum(a: int32): int32 {\n  return a + 1\n}";
+            const source = "contract com.example.Sum {\n  pub fn run(a: int32): int32 {\n  return a + 1\n}\n}";
             expect((await deploy(source)).statusCode).toBe(201);
             await flushSettlement();
             expect(spies.registerContract).toHaveBeenCalledWith({
@@ -135,7 +136,7 @@ describe.each(DIALECTS)("contracts (%s)", (dialect) => {
         test("registers a client's contract with its run token, which names its owner, and a refusal only logs", async () => {
             spies.registerContract.mockResolvedValue({ ok: false, status: 503, error: "Payment operator is unavailable" });
             const token = await runToken(ORGANIZATION);
-            const source = "contract com.example.Mine(a: int32): int32 {\n  return a\n}";
+            const source = "contract com.example.Mine {\n  pub fn run(a: int32): int32 {\n  return a\n}\n}";
             expect((await deploy(source, token)).statusCode).toBe(201);
             await flushSettlement();
             expect(spies.registerContract).toHaveBeenCalledWith(expect.objectContaining({ name: "com.example.Mine", token }));
@@ -194,7 +195,7 @@ describe.each(DIALECTS)("contracts (%s)", (dialect) => {
 
         test("only the owner adds versions", async () => {
             await deploy(SUM, await runToken("org_caller"));
-            const next = SUM.replace("Sum(", "Sum@2(");
+            const next = SUM.replace("Sum {", "Sum@2 {");
 
             expect((await deploy(next, await runToken("org_other"))).statusCode).toBe(409);
             expect((await deploy(next, await runToken("org_caller"))).statusCode).toBe(201);
@@ -207,7 +208,7 @@ describe.each(DIALECTS)("contracts (%s)", (dialect) => {
 
         test("lets the owner or the admin delete, and no one else", async () => {
             await deploy(SUM, await runToken("org_caller"));
-            await deploy(SUM.replace("Sum(", "Sum@2("), await runToken("org_caller"));
+            await deploy(SUM.replace("Sum {", "Sum@2 {"), await runToken("org_caller"));
 
             expect((await remove("com.example.Sum@2", await runToken("org_other"))).statusCode).toBe(403);
             expect((await remove("com.example.Sum@2", await runToken("org_caller"))).statusCode).toBe(200);
@@ -225,7 +226,7 @@ describe.each(DIALECTS)("contracts (%s)", (dialect) => {
 
     describe("calling a contract on this node", () => {
         test("from an API-key run is free, and the contract sees no jwt", async () => {
-            await deploy("contract com.example.Who: string {\n  if (jwt == null) {\n    return \"admin\"\n  }\n  return jwt.org\n}");
+            await deploy("contract com.example.Who {\n  pub fn run(): string {\n  if (jwt == null) {\n    return \"admin\"\n  }\n  return jwt.org\n}\n}");
             await deploy(SUM);
 
             const response = await run("request R {\n  const sum: com.example.Sum\n  const who: com.example.Who\n  return { sum: sum.run(a: 1, b: 2).value, who: who.run().value }\n}");
@@ -235,7 +236,7 @@ describe.each(DIALECTS)("contracts (%s)", (dialect) => {
         });
 
         test("from a billed run is held from the run, and the contract sees the run's jwt", async () => {
-            await deploy("contract com.example.Who: string {\n  return jwt.org\n}");
+            await deploy("contract com.example.Who {\n  pub fn run(): string {\n  return jwt.org\n}\n}");
 
             const response = await run("request R {\n  const who: com.example.Who\n  return who.run().value\n}", await runToken("org_caller"));
 
@@ -249,7 +250,7 @@ describe.each(DIALECTS)("contracts (%s)", (dialect) => {
         });
 
         test(`stops contracts calling each other ${MAX_CONTRACT_DEPTH} deep`, async () => {
-            await deploy("contract com.example.Loop(n: int32): int32 {\n  const loop: com.example.Loop@1\n  const next = loop.run(n: n + 1)\n  if (next.error != null) {\n    return n\n  }\n  return next.value\n}");
+            await deploy("contract com.example.Loop {\n  pub fn run(n: int32): int32 {\n  const loop: com.example.Loop@1\n  const next = loop.run(n: n + 1)\n  if (next.error != null) {\n    return n\n  }\n  return next.value\n}\n}");
 
             const response = await run("request R {\n  const loop: com.example.Loop\n  return loop.run(n: 1).value\n}");
 
@@ -258,32 +259,32 @@ describe.each(DIALECTS)("contracts (%s)", (dialect) => {
     });
 
     describe("pinned versions", () => {
-        const SUM_2 = "contract com.example.Sum@2(a: int32, b: int32): int32 {\n  return a + b + 100\n}";
+        const SUM_2 = "contract com.example.Sum@2 {\n  pub fn run(a: int32, b: int32): int32 {\n  return a + b + 100\n}\n}";
 
         test("a contract can't be deployed binding another contract without its version", async () => {
             await deploy(SUM);
 
-            const response = await deploy("contract com.example.Twice(a: int32): int32 {\n  if (a > 0) {\n    const sum: com.example.Sum\n    return sum.run(a: a, b: a).value\n  }\n  return 0\n}");
+            const response = await deploy("contract com.example.Twice {\n  pub fn run(a: int32): int32 {\n  if (a > 0) {\n    const sum: com.example.Sum\n    return sum.run(a: a, b: a).value\n  }\n  return 0\n}\n}");
 
             expect(response.statusCode).toBe(400);
             expect(response.json().error).toBe("Invalid contract: com.example.Sum is a contract, so bind it by its version, e.g. 'const ref: com.example.Sum@1'");
         });
 
         test("a contract can't be deployed binding itself without its version", async () => {
-            const response = await deploy("contract com.example.Loop@3(n: int32): int32 {\n  const loop: com.example.Loop\n  return n\n}");
+            const response = await deploy("contract com.example.Loop@3 {\n  pub fn run(n: int32): int32 {\n  const loop: com.example.Loop\n  return n\n}\n}");
 
             expect(response.json().error).toContain("e.g. 'const ref: com.example.Loop@3'");
         });
 
         test("a contract binds resources without versions by name", async () => {
-            const response = await deploy("contract com.example.Hot(city: string): object {\n  const weather: com.example.Weather\n  return weather.temperature(city: city)\n}");
+            const response = await deploy("contract com.example.Hot {\n  pub fn run(city: string): object {\n  const weather: com.example.Weather\n  return weather.temperature(city: city)\n}\n}");
 
             expect(response.statusCode).toBe(201);
         });
 
         test("a contract keeps calling the version it pinned after a new one is deployed, and a request gets the latest", async () => {
             await deploy(SUM);
-            await deploy("contract com.example.Twice(a: int32): int32 {\n  const sum: com.example.Sum@1\n  return sum.run(a: a, b: a).value\n}");
+            await deploy("contract com.example.Twice {\n  pub fn run(a: int32): int32 {\n  const sum: com.example.Sum@1\n  return sum.run(a: a, b: a).value\n}\n}");
             await deploy(SUM_2);
 
             const response = await run("request R {\n  const twice: com.example.Twice@1\n  const sum: com.example.Sum\n  const first: com.example.Sum@1\n  return { twice: twice.run(a: 2).value, latest: sum.run(a: 1, b: 1).value, first: first.run(a: 1, b: 1).value }\n}");
@@ -316,9 +317,111 @@ describe.each(DIALECTS)("contracts (%s)", (dialect) => {
 
             const response = await fastify.inject({ method: "GET", url: `/v1/contracts/${encodeURIComponent("com.example.Sum@1")}` });
 
-            expect(response.json()).toMatchObject({ path: "com.example", name: "Sum", version: "1", parameters: [{ name: "a", type: "int32" }, { name: "b", type: "int32" }], returnType: "int32", source: SUM });
+            expect(response.json()).toMatchObject({ path: "com.example", name: "Sum", version: "1", functions: [{ name: "run", parameters: [{ name: "a", type: "int32" }, { name: "b", type: "int32" }], returnType: "int32", payable: false }], source: SUM });
             expect((await fastify.inject({ method: "GET", url: "/v1/contracts/com.example.Sum@3" })).statusCode).toBe(404);
             expect((await fastify.inject({ method: "GET", url: "/v1/contracts/com.example.Sum" })).statusCode).toBe(400);
+        });
+    });
+
+    describe("contract functions (SIP-1)", () => {
+        const SHOP = [
+            "contract com.example.Shop {",
+            "  var state stock: int32 = 3",
+            "  fn left(): string {",
+            "    return \"${stock} left\"",
+            "  }",
+            "  pub fn buy(n: int32): string {",
+            "    if (n > stock) {",
+            "      fail \"not enough stock\"",
+            "    }",
+            "    stock = stock - n",
+            "    return left()",
+            "  }",
+            "  pub fn count(): int32 {",
+            "    return stock",
+            "  }",
+            "  pub payable fn tip() {",
+            "  }",
+            "}",
+        ].join("\n");
+
+        test("serves each pub function as a function of the contract's resource, and keeps private ones out", async () => {
+            expect((await deploy(SHOP)).statusCode).toBe(201);
+            const resources = (await fastify.inject({ method: "GET", url: "/v1/resources" })).json().resources as StellariumResource[];
+            const shop = resources.find(resource => resource.name === "Shop")!;
+            expect(shop.functions.map(fn => ({ name: fn.name, returnType: fn.returnType, parameters: fn.parameters, payable: (fn as { payable?: boolean }).payable })))
+                .toEqual([
+                    { name: "buy", returnType: "string", parameters: [{ name: "n", type: "int32" }], payable: undefined },
+                    { name: "count", returnType: "int32", parameters: [], payable: undefined },
+                    { name: "tip", returnType: "void", parameters: [], payable: true },
+                ]);
+            const contract = (await fastify.inject({ method: "GET", url: "/v1/contracts/com.example.Shop@1" })).json();
+            expect(contract.functions).toEqual([
+                { name: "buy", parameters: [{ name: "n", type: "int32" }], returnType: "string", payable: false },
+                { name: "count", parameters: [], returnType: "int32", payable: false },
+                { name: "tip", parameters: [], returnType: "void", payable: true },
+            ]);
+        });
+
+        test("registers a contract as payable when one of its functions is", async () => {
+            await deploy(SHOP);
+            expect(spies.registerContract).toHaveBeenCalledWith(expect.objectContaining({ name: "com.example.Shop", payable: true }));
+        });
+
+        test("runs the function a script calls, and its functions share the contract's state", async () => {
+            await deploy(SHOP.replace("  pub payable fn tip() {\n  }\n", ""));
+            const response = await run("request R {\n  const shop: com.example.Shop@1\n  const bought = shop.buy(n: 2).value\n  return { bought: bought, count: shop.count().value, more: shop.buy(n: 5).error.message }\n}");
+            expect(response.statusCode).toBe(200);
+            expect(response.json().returnValue).toMatchObject({ bought: "1 left", count: 1 });
+            expect(response.json().returnValue.more).toContain("not enough stock");
+            const missing = await run("request R {\n  const shop: com.example.Shop@1\n  return shop.left().error\n}");
+            expect(JSON.stringify(missing.json())).toContain("has no function 'left'");
+        });
+
+        test("refuses money attached to a function that isn't payable before staging any", async () => {
+            await deploy(SHOP);
+            const response = await run("request R {\n  const shop: com.example.Shop@1\n  return shop.count{amount: 5, payees: [\"org_shop\"]}().error.message\n}");
+            expect(JSON.stringify(response.json())).toContain("isn't a payable function");
+        });
+
+        test("serves a peer the function its voucher names, and refuses a voucher for another function", async () => {
+            await deploy(SHOP.replace("  pub payable fn tip() {\n  }\n", ""));
+            const call = (functionName: string, voucherFunction: string, parameters: { name: string, value: unknown }[]) => fastify.inject({
+                method: "POST",
+                url: "/v1/run/resource",
+                payload: {
+                    resourcePath: "com.example", resourceName: "Shop", functionName, parameters,
+                    // The hash names the called function, so only the signed functionName differs.
+                    paymentVoucher: { ...callerInvoker.createContractVoucher(ORGANIZATION, PRICE, 50_000, "com.example", "Shop", functionName, parameters), functionName: voucherFunction },
+                },
+            });
+            const counted = await call("count", "count", []);
+            expect(counted.statusCode).toBe(200);
+            expect(counted.json()).toMatchObject({ value: 3, error: null });
+            expect(spies.authorizeContractRun).toHaveBeenCalledWith(expect.objectContaining({ voucher: expect.objectContaining({ functionName: "count" }) }));
+            expect((await call("count", "buy", [])).statusCode).toBe(400);
+            expect((await call("left", "left", [])).json()).toEqual({ error: "Function not found" });
+        });
+
+        test("a function of a payable contract that isn't payable itself still reads who called it", async () => {
+            vi.spyOn(service.operatorClient, "openRun").mockResolvedValue({ ok: true });
+            vi.spyOn(service.operatorClient, "runOutcome").mockResolvedValue({ ok: true, outcome: "applied" } as never);
+            await deploy("contract com.example.Desk {\n  pub payable fn pay() { }\n  pub fn who(): object {\n    return sender\n  }\n}");
+            const response = await run("request R {\n  const desk: com.example.Desk@1\n  return desk.who().value\n}");
+            expect(response.json().returnValue).toEqual({ org: ORGANIZATION, node: config.publicKey, contract: null });
+        });
+
+        test("records the function a run ran in its receipt", async () => {
+            const receipts: { inputs: { function: string } }[] = [];
+            vi.spyOn(service.outbox, "submitReceipts").mockImplementation(async (_runId, submitted) => { receipts.push(...submitted as typeof receipts); });
+            vi.spyOn(service.operatorClient, "openRun").mockResolvedValue({ ok: true });
+            vi.spyOn(service.operatorClient, "runOutcome").mockResolvedValue({ ok: true, outcome: "applied" } as never);
+            await deploy(SHOP);
+            // A payable function's chain always sends its receipts, with or without money attached.
+            const response = await run("request R {\n  const shop: com.example.Shop@1\n  return shop.tip().error\n}");
+            expect(response.json().returnValue).toBeNull();
+            await flushSettlement();
+            expect(receipts.map(receipt => receipt.inputs.function)).toEqual(["tip"]);
         });
     });
 
@@ -328,7 +431,7 @@ describe.each(DIALECTS)("contracts (%s)", (dialect) => {
         });
 
         test("runs the version a pinned call names, with a voucher bound to it", async () => {
-            await deploy("contract com.example.Sum@2(a: int32, b: int32): int32 {\n  return 0\n}");
+            await deploy("contract com.example.Sum@2 {\n  pub fn run(a: int32, b: int32): int32 {\n  return 0\n}\n}");
             const voucher = callerInvoker.createContractVoucher(ORGANIZATION, PRICE, 50_000, "com.example", "Sum", "run", sumParameters, undefined, "1");
 
             const response = await fastify.inject({
@@ -376,7 +479,7 @@ describe.each(DIALECTS)("contracts (%s)", (dialect) => {
         });
 
         test("captures a contract that fails as failed, which reports the failure as the call's error", async () => {
-            await deploy("contract com.example.Div(a: int32): int32 {\n  return 1 / a\n}");
+            await deploy("contract com.example.Div {\n  pub fn run(a: int32): int32 {\n  return 1 / a\n}\n}");
             const parameters = [{ name: "a", value: 0 }];
             const voucher = callerInvoker.createContractVoucher(ORGANIZATION, PRICE, 50_000, "com.example", "Div", "run", parameters);
 

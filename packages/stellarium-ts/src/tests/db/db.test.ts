@@ -20,7 +20,7 @@ describe("openDatabase", () => {
         await (await openDatabase(filename)).close();
         const db = await openDatabase(filename);
 
-        expect(await db.get("PRAGMA user_version")).toEqual({ user_version: 8 });
+        expect(await db.get("PRAGMA user_version")).toEqual({ user_version: 9 });
         await db.close();
     });
 
@@ -68,6 +68,36 @@ describe("openDatabase", () => {
         // Grants are not a cache of anything a peer resends, so a reopen must not drop them.
         const reopened = await openDatabase(filename);
         expect(await reopened.all("SELECT id FROM held_grant")).toEqual([{ id: "g" }]);
+        await reopened.close();
+    });
+
+    test("drops a version 8 database's RequestScript 1 contracts and their state, keeping peers, then keeps contracts on later opens", async () => {
+        const filename = path.join(dir, "v8.db");
+        const old = await open({ filename, driver: sqlite3.Database });
+        await old.exec(`
+            CREATE TABLE contract (path TEXT NOT NULL, name TEXT NOT NULL, version TEXT NOT NULL, source TEXT NOT NULL, parameters TEXT NOT NULL,
+                return_type TEXT NOT NULL, owner_organization_id TEXT, description TEXT, created_at TEXT NOT NULL, PRIMARY KEY (path, name, version));
+            INSERT INTO contract VALUES ('com.p', 'Old', '1', 'contract com.p.Old(a: int32): int32 { return a }', '[]', 'int32', NULL, NULL, 'now');
+            CREATE TABLE contract_state (path TEXT NOT NULL, name TEXT NOT NULL, var_name TEXT NOT NULL, scope_key TEXT NOT NULL, value TEXT NOT NULL,
+                type TEXT NOT NULL, version INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (path, name, var_name, scope_key));
+            INSERT INTO contract_state VALUES ('com.p', 'Old', 'n', '', '1', '{"kind":"int32"}', 1, 'now');
+            CREATE TABLE peer (id INTEGER, base_url TEXT NOT NULL, public_key TEXT NOT NULL, key TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
+            INSERT INTO peer (base_url, public_key, key, expires_at) VALUES ('http://p', 'pk', 'k', 0);
+            PRAGMA user_version = 8;
+        `);
+        await old.close();
+
+        const db = await openDatabase(filename);
+        expect(await db.all("SELECT * FROM contract")).toEqual([]);
+        expect(await db.all("SELECT * FROM contract_state")).toEqual([]);
+        expect(await db.all("SELECT public_key FROM peer")).toEqual([{ public_key: "pk" }]);
+        const columns = await db.all<{ name: string }[]>("PRAGMA table_info(contract)");
+        expect(columns.map(column => column.name)).toContain("functions");
+        await db.run("INSERT INTO contract (path, name, version, source, functions, created_at) VALUES ('com.p', 'New', '1', 's', '[]', 'now')");
+        await db.close();
+
+        const reopened = await openDatabase(filename);
+        expect(await reopened.all("SELECT name FROM contract")).toEqual([{ name: "New" }]);
         await reopened.close();
     });
 

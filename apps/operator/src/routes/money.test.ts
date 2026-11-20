@@ -8,7 +8,7 @@ import { createTestDatabase, generateNodeKeys, ledgerProblems, type NodeKeys, no
 import routes from './index.js';
 
 const COURIER = 'org_courier';
-const SOURCE = 'payable contract com.example.Job(action: string): string { return action }';
+const SOURCE = 'contract com.example.Job {\n  pub payable fn run(action: string): string { return action }\n}';
 
 describe('money routes', () => {
     let db: Database;
@@ -49,7 +49,7 @@ describe('money routes', () => {
     });
 
     test('a node registers a contract, a script funds it, and buyers read it from the operator', async () => {
-        const registration = { name: 'com.example.Job', version: '1', payable: true, source: SOURCE, requestscriptVersion: '1.8.0', dependencies: [] };
+        const registration = { name: 'com.example.Job', version: '1', payable: true, source: SOURCE, requestscriptVersion: '2.0.0', dependencies: [] };
         const registered = await signed(provider, '/v1/money/contracts', registration);
         expect(registered.statusCode).toBe(200);
         expect(registered.json().contract).toMatchObject({ name: 'com.example.Job', ownerOrganizationId: PROVIDER_ORGANIZATION });
@@ -108,7 +108,7 @@ describe('stellarium-ts\'s OperatorClient', () => {
         try {
             const host = new OperatorClient(url, provider.publicKey, provider.privateKey);
             const caller = new OperatorClient(url, payer.publicKey, payer.privateKey);
-            expect(await host.registerContract({ name: 'com.example.Job', version: '1', payable: true, source: SOURCE, requestscriptVersion: '1.8.0', dependencies: [] }))
+            expect(await host.registerContract({ name: 'com.example.Job', version: '1', payable: true, source: SOURCE, requestscriptVersion: '2.0.0', dependencies: [] }))
                 .toEqual({ ok: true });
 
             // The provider runs its own script, which funds its own contract and then reads it.

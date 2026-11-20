@@ -1,7 +1,7 @@
 import { isFreshExpiry, safeVerifyData } from "../crypto/utils.js";
 import { Resource, ResourceFunction, ResourceFunctionCallParameter, ResourceFunctionParameter } from "requestscript";
 import type { NodeDatabase } from "../db/database.js";
-import type { ContractRepository, StoredContract } from "../contract/repository.js";
+import type { ContractFunction, ContractRepository, StoredContract } from "../contract/repository.js";
 import type { StoredPeer } from "../peer/repository.js";
 import { isInferenceManifest } from "./inference.js";
 import { ACCOUNT_RESOURCE, isMoneyPath, RANDOM_RESOURCE } from "../money/account.js";
@@ -48,9 +48,6 @@ export type StellariumResourceFunctionPaymentManifest = StellariumFixedPaymentMa
  */
 export type StellariumResourceFunctionKind = 'fixed' | 'inference' | 'contract';
 
-/** The one function a contract's resource has. It runs the version the resource names. */
-export const CONTRACT_FUNCTION = 'run';
-
 export function isContractManifest(manifest: StellariumResourceFunctionPaymentManifest | undefined): manifest is StellariumContractPaymentManifest {
     return typeof manifest === 'object' && manifest !== null && 'priceMicroUsdPerMillionTokens' in manifest;
 }
@@ -59,7 +56,25 @@ export function isContractFunction(fn: Pick<StellariumResourceFunction, 'kind'>)
     return fn.kind === 'contract';
 }
 
-/** The resource a contract is served as. Its function always has a manifest, so every call needs a voucher. */
+/**
+ * A contract entrypoint as a resource function. It always has a manifest, so every call needs a voucher, and
+ * it runs the version its resource names.
+ */
+export function contractResourceFunction(fn: ContractFunction, manifest: StellariumContractPaymentManifest): StellariumResourceFunction {
+    return {
+        name: fn.name,
+        kind: 'contract',
+        parameters: fn.parameters,
+        returnType: fn.returnType,
+        ...(fn.payable ? { payable: true } : {}),
+        exec: async () => {
+            throw new Error('Contracts are run by the resource invoker');
+        },
+        paymentManifest: manifest,
+    };
+}
+
+/** The resource a contract is served as: a function for each of its `pub` functions. */
 export function contractResource(contract: StoredContract, baseUrl: string, priceMicroUsdPerMillionTokens: number, recipientOrganizationId?: string): StellariumResource {
     return {
         id: 0,
@@ -69,16 +84,7 @@ export function contractResource(contract: StoredContract, baseUrl: string, pric
         name: contract.name,
         version: contract.version,
         description: contract.description ?? undefined,
-        functions: [{
-            name: CONTRACT_FUNCTION,
-            kind: 'contract',
-            parameters: contract.parameters,
-            returnType: contract.returnType,
-            exec: async () => {
-                throw new Error('Contracts are run by the resource invoker');
-            },
-            paymentManifest: { priceMicroUsdPerMillionTokens, recipientOrganizationId },
-        }],
+        functions: contract.functions.map(fn => contractResourceFunction(fn, { priceMicroUsdPerMillionTokens, recipientOrganizationId })),
     };
 }
 
@@ -102,6 +108,11 @@ export interface StellariumResourceFunction extends ResourceFunction {
     paymentManifest?: StellariumResourceFunctionPaymentManifest;
     /** Callers need a grant from the hosting node. Announced to peers so callers can tell. */
     restricted?: boolean;
+    /**
+     * Set on a contract's `pub payable fn`: it accepts money attached to a call. Only this node's own contract
+     * functions carry it; the provider refuses money attached to a function that isn't payable either way.
+     */
+    payable?: boolean;
     /** Absent means 'fixed'. An inference function takes a `maxTokens: int32` parameter and its `exec` returns `{ value, usage }`. */
     kind?: StellariumResourceFunctionKind;
     /**
@@ -174,18 +185,25 @@ function pin<T extends Resource>(resource: T, version: string): T {
 
 /** What a peer's `GET /v1/contracts/:ref` answers about a contract version, after checking its shape. */
 interface ContractVersionDeclaration {
-    parameters: StellariumResourceFunctionParameter[];
-    returnType: string;
+    functions: ContractFunction[];
 }
 
 function contractVersionDeclaration(body: unknown, version: string): ContractVersionDeclaration | undefined {
-    const { version: answered, parameters, returnType } = (body ?? {}) as Record<string, unknown>;
-    const validParameters = Array.isArray(parameters)
+    const { version: answered, functions } = (body ?? {}) as Record<string, unknown>;
+    const validParameters = (parameters: unknown) => Array.isArray(parameters)
         && parameters.every(parameter => typeof parameter?.name === 'string' && typeof parameter?.type === 'string');
-    if (answered !== version || !validParameters || typeof returnType !== 'string') {
+    const valid = Array.isArray(functions) && functions.every(fn => typeof fn?.name === 'string' && validParameters(fn.parameters) && typeof fn.returnType === 'string');
+    if (answered !== version || !valid) {
         return undefined;
     }
-    return { parameters: parameters.map(({ name, type }) => ({ name, type })), returnType };
+    return {
+        functions: functions.map(fn => ({
+            name: fn.name,
+            parameters: (fn.parameters as { name: string, type: string }[]).map(({ name, type }) => ({ name, type })),
+            returnType: fn.returnType,
+            payable: fn.payable === true,
+        })),
+    };
 }
 
 export class ResourceRepository {
@@ -459,17 +477,17 @@ export class ResourceRepository {
         if (version === result.version) {
             return pin(learned, version);
         }
-        // An older version: its node runs it, and says what it takes. Its price is the node's, as for the latest.
+        // An older version: its node runs it, and says which functions it has and what they take. Its price is
+        // the node's, as for the latest.
+        const manifest = (learned.functions as StellariumResourceFunction[]).find(fn => isContractFunction(fn))?.paymentManifest;
+        if (!manifest || !isContractManifest(manifest)) {
+            return undefined;
+        }
         const declaration = await this.remoteContractVersion(result.base_url, path, name, version);
         if (!declaration) {
             return undefined;
         }
-        return pin({
-            ...learned,
-            functions: learned.functions.map(fn => fn.name === CONTRACT_FUNCTION && isContractFunction(fn as StellariumResourceFunction)
-                ? { ...fn, parameters: declaration.parameters, returnType: declaration.returnType }
-                : fn),
-        }, version);
+        return pin({ ...learned, functions: declaration.functions.map(fn => contractResourceFunction(fn, manifest)) }, version);
     }
 
     /**

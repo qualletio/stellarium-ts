@@ -40,14 +40,14 @@ Stripe reviewed this design in November 2026. It fits Stripe Connect as **condit
 | Contract address | A contract version on a node: `path.Name@version` and the node's public key |
 | Immutable code at an address | Contracts call contract versions, `const job: com.example.Job@3`, never "the latest" |
 | Proxy upgrades | Not supported. A new version is a new contract that callers choose to pin |
-| `payable` function | `payable contract` |
+| `payable` function | `pub payable fn` |
 | `msg.value` | `payment.amount` |
 | `msg.sender` | `sender` (`{ org, node, contract }`), with `org` never `null` |
 | `tx.origin` | `caller` (`{ org, node }`) |
 | `address(this).balance` | `account.balance().value` |
 | `recipient.transfer(x)` | `account.pay(to: org, amount: x, from: payer)`, only to the payer's named payees |
 | Withdrawal pattern | `account.canReceive(...)` and `account.tryPay(...)`, so one recipient can't block the others |
-| `other.f{value: x}(...)` | `other.run{amount: x, from: payer}(...)` |
+| `other.f{value: x}(...)` | `other.f{amount: x, from: payer}(...)` |
 | Refunding `msg.sender` | `account.refund(...)`, one step back to whoever sent the money (see [Funding](#funding)) |
 | `revert` | A failed run: no state changes and no money move |
 | Checked arithmetic (Solidity 0.8) | Checked `int64` arithmetic in the [deterministic profile](#deterministic-contracts) |
@@ -66,22 +66,29 @@ Unlike ETH, a contract's money isn't one pool: every amount belongs to the organ
 
 ## Payable contracts
 
-`payable` goes before `contract`, as `restricted` goes before `event`:
+`payable` marks a contract's functions that take money, after `pub` (RequestScript 2.0). A contract with at least one `pub payable fn` is a **payable contract**:
 
 ```
-payable contract com.example.Tip(note: string): int64 {
-    return payment.amount
+contract com.example.Tip {
+    pub payable fn tip(note: string): int64 {
+        return payment.amount
+    }
+
+    pub fn thanks(): string {
+        return "Thank you!"
+    }
 }
 ```
+
+- **Every function of a payable contract** reads `sender` and `now`, its runs are all [verified](#verified-runs), and its chains' state always waits for their money to settle, whichever function a call runs. Only its payable functions take money attached to a call: a call to `thanks` with money attached is refused.
 
 - **`payment`** is a built-in object, like `caller`, and is never `null`:
   - `payment.amount`: the amount attached to this call, an `int64`. It is `0` when nothing was attached.
   - `payment.from`: the organization whose funding the amount carries, or `null` when nothing was attached. A request script's money comes from its run's organization. A contract's money comes from the funder it names (see [Sending money](#sending-money)).
   - `payment.payees`: the organizations the amount may be paid to, a `[]string`, empty when nothing was attached.
 - **`payment.from` isn't `sender`.** On Ethereum, `msg.value` always comes from `msg.sender`. Here, a marketplace contract can attach a buyer's money, so `payment.from` is the buyer and `sender` is the marketplace. Authorize on `sender`, and attribute money with `payment.from`.
-- **Refusals:** a call that attaches money to a contract that isn't `payable` is refused before the contract runs. A non-payable contract still reads `payment.amount`, which is always `0`.
-- **Event contracts** can't be `payable`, because nobody calls them. A deploy of `payable contract X consumes ...` is refused.
-- **Versions:** a contract keeps the same payability across versions, as it keeps its kind.
+- **Refusals:** a call that attaches money to a function that isn't `payable` is refused before the contract runs; on the caller's node, before any money is staged, when the contract is there. A function that isn't payable reads `payment.amount`, which is always `0`, only when the host passes a `payment`.
+- **Event contracts** can't be `payable`, because nobody calls them: their handler, `on`, is never `pub`.
 - **Pinned dependencies.** Every contract binds the contracts it calls by version, so the code it depends on can't change after it's deployed (`const job: com.example.Job@3`). Nodes refuse to deploy a contract that binds another contract by name alone. Host resources, such as `sh.stellarium.stdlib.Uuid`, have no versions.
 - **Deterministic.** A payable contract must follow the [deterministic profile](#deterministic-contracts). Nodes refuse to deploy one that doesn't.
 - **Registered at deploy.** The node registers each payable contract version with the operator before it can receive money (see [Registration](#registration)), so buyers can read its source and dependencies before they fund it.
@@ -126,12 +133,12 @@ Amounts are `int64` micro-USD (1 USD = 1,000,000), at most `Number.MAX_SAFE_INTE
 
 ## Sending money
 
-Money is attached to a call as call options, in braces between `run` and its arguments:
+Money is attached to a call as call options, in braces between the function's name and its arguments:
 
 ```
 request Hire {
     const job: com.example.Job@1
-    return job.run{amount: 20000000, payees: ["org_courier"]}(action: "fund", jobId: "", provider: "org_courier", arbiter: "org_arbiter").value
+    return job.fund{amount: 20000000, payees: ["org_courier"]}(provider: "org_courier", arbiter: "org_arbiter").value
 }
 ```
 
@@ -146,7 +153,7 @@ Where the money comes from depends on who makes the call:
   - An API client has a `maxRunValueMicroUsd`, separate from `maxRunCostMicroUsd`, which **defaults to 0**: an existing client can't send money until an admin raises the limit.
   - Money a client attaches counts toward its `monthlyCapMicroUsd` along with its run costs, so a stolen token can't send the per-run limit again and again.
 - **A request script run with the node's API key:** from the node's organization, up to the node's `maxApiKeyRunValueMicroUsd` per run and `monthlyApiKeyValueCapMicroUsd` per month. An admin sets both on the operator, and **both default to 0**.
-- **A contract:** from its own balance. A contract names whose funding it spends, and optionally its key: `other.run{amount: x, from: payer, key: k}(...)`. `from` is required in contracts. The receiving contract sees `payment.from`, and the funding moves with the money.
+- **A contract:** from its own balance. A contract names whose funding it spends, and optionally its key: `other.f{amount: x, from: payer, key: k}(...)`. `from` is required in contracts. The receiving contract sees `payment.from`, and the funding moves with the money.
 - **A contract on another node:** the caller's `ContractPaymentVoucher` carries the amount and its payees (see [Vouchers](#vouchers)). The provider node asks the operator to hold the amount along with the run.
 
 A request script's money is new funding, so it spends only top-up credit younger than `MAX_FUNDING_SOURCE_AGE_DAYS` (see [Stripe's conditions](#stripes-conditions)).
@@ -274,7 +281,7 @@ The operator tracks where each contract's money came from: how much each organiz
 
 - Money a contract receives is added to `payment.from`'s funding, with its payees and no key until the contract earmarks it. The funding record also notes the **path**: the contract that sent the money, if one did, and the key that contract spent it from.
 - **Earmarking** keeps one funder's payments apart. A contract that holds several jobs for the same buyer earmarks each payment with its job id, and then each job can spend only its own money.
-- `pay(from: payer, key: k)` and `other.run{amount: x, from: payer, key: k}` spend only `payer`'s funding under `k`. The receiving contract's funding is recorded under `payer` too, without a key. One payer's money can never pay for another's, and an earmarked payment can never pay for a different key.
+- `pay(from: payer, key: k)` and `other.f{amount: x, from: payer, key: k}` spend only `payer`'s funding under `k`. The receiving contract's funding is recorded under `payer` too, without a key. One payer's money can never pay for another's, and an earmarked payment can never pay for a different key.
 - `refund(to: org, key: k)` spends only `org`'s funding under `k`.
 - **Refunds go one step back,** as Ethereum refunds go to `msg.sender`. A buyer's script that funds a `Job` gets a cancelled job's money back in its prepaid balance. When a marketplace contract funded the `Job`, the money goes back into the marketplace's balance, under the same funder, key and payees the marketplace spent it from. The marketplace then decides what happens next, for example refunding the buyer itself.
   - **No code runs on the way back.** Like a forced send on Ethereum, the money reaches the marketplace's balance without running it, so refunds can't cause reentrancy. The marketplace sees the money through `fundingOf`.
@@ -408,7 +415,7 @@ With each capture, the node sends a **run receipt**, signed by its key over `run
 
 - **The contract:** its path, name, version and source hash, which must match its [registration](#registration).
 - **The runtime:** the stellarium-ts contract runtime version and the definitions of the structs it used. The RequestScript version comes from the registration, not from the receipt.
-- **The call:** the parameters, with the voucher or attestation that signed them; `payment` (with its payees), `sender`, `caller`, `jwt`; and, for an event contract, the signed event envelope.
+- **The call:** the function it ran (one of the contract's `pub fn`s, or an event contract's `on`) and its parameters, with the voucher or attestation that signed them; `payment` (with its payees), `sender`, `caller`, `jwt`; and, for an event contract, the signed event envelope.
 - **State:** every state variable the run read, with its scope, value and version, and every variable it wrote.
 - **Resource calls,** in order of `callIndex`. Each records the function, the parameters, the pinned version for a contract, and either the provider's signed response, the operator's signed answer for `Account`, or an unsigned failure (see [Signed responses](#signed-responses)). A call to a contract on the same node also has the callee's receipt nested in the tree.
 - **Results:** the return value, the events emitted (by type and data), the money changes staged and the tokens metered.
@@ -586,23 +593,11 @@ Stellarium has no consensus: one node runs a contract, and the operator checks i
 A buyer funds a job. The provider is paid when the buyer or the arbiter confirms delivery. The buyer gets the money back if the provider or the arbiter cancels.
 
 ```
-payable contract com.example.Job(action: string, jobId: string, provider: string, arbiter: string): string {
+contract com.example.Job {
     const account: sh.stellarium.money.Account
     const uuid: sh.stellarium.stdlib.Uuid
 
-    var id: string = jobId
-    if (action == "fund") {
-        const created = uuid.new()
-        if (created.error != null) {
-            fail "couldn't create a job id"
-        }
-        id = created.value
-    }
-    var state(id) payer: string = null
-    var state(id) payee: string = null
-    var state(id) judge: string = null
-
-    if (action == "fund") {
+    pub payable fn fund(provider: string, arbiter: string): string {
         if (payment.amount == 0) {
             fail "fund needs money attached"
         }
@@ -612,32 +607,59 @@ payable contract com.example.Job(action: string, jobId: string, provider: string
         if (account.canReceive(org: provider).value == false) {
             fail "the provider can't receive payouts"
         }
+        const created = uuid.new()
+        if (created.error != null) {
+            fail "couldn't create a job id"
+        }
+        const id = created.value
+        var state(id) payer: string = null
+        var state(id) payee: string = null
+        var state(id) judge: string = null
         account.earmark(key: id)
         payer = payment.from
         payee = provider
         judge = arbiter
         return id
     }
-    if (payer == null) {
-        fail "no such job"
+
+    pub fn release(jobId: string): string {
+        var state(jobId) payer: string = null
+        var state(jobId) payee: string = null
+        var state(jobId) judge: string = null
+        if (payer == null) {
+            fail "no such job"
+        }
+        if (sender.org != payer && sender.org != judge) {
+            fail "not allowed"
+        }
+        const due = remaining(payer: payer, jobId: jobId)
+        if (due > 0) {
+            account.pay(to: payee, amount: due, from: payer, key: jobId)
+        }
+        return jobId
+    }
+
+    pub fn cancel(jobId: string): string {
+        var state(jobId) payer: string = null
+        var state(jobId) payee: string = null
+        var state(jobId) judge: string = null
+        if (payer == null) {
+            fail "no such job"
+        }
+        if (sender.org != payee && sender.org != judge) {
+            fail "not allowed"
+        }
+        const due = remaining(payer: payer, jobId: jobId)
+        if (due > 0) {
+            account.refund(to: payer, amount: due, key: jobId)
+        }
+        return jobId
     }
 
     // The job's own money, after anything the time limit or a dispute already returned.
-    const due = account.fundingOf(org: payer, key: id).value
-
-    if (action == "release" && (sender.org == payer || sender.org == judge)) {
-        if (due > 0) {
-            account.pay(to: payee, amount: due, from: payer, key: id)
-        }
-        return id
+    fn remaining(payer: string, jobId: string): int64 {
+        return account.fundingOf(org: payer, key: jobId).value
     }
-    if (action == "cancel" && (sender.org == payee || sender.org == judge)) {
-        if (due > 0) {
-            account.refund(to: payer, amount: due, key: id)
-        }
-        return id
-    }
-    fail "not allowed"
 }
 ```
 
@@ -646,10 +668,11 @@ The buyer funds it with a pinned version, naming the provider as the only payee 
 ```
 request Hire {
     const job: com.example.Job@1
-    return job.run{amount: 20000000, payees: ["org_courier"]}(action: "fund", jobId: "", provider: "org_courier", arbiter: "org_arbiter").value
+    return job.fund{amount: 20000000, payees: ["org_courier"]}(provider: "org_courier", arbiter: "org_arbiter").value
 }
 ```
 
+- **Each action is its own function.** Only `fund` is payable, so money attached to `release` or `cancel` is refused. All three share the job's state, declared in each function with the job's id as its scope.
 - **The contract chooses job ids,** so nobody can claim a job id before the buyer funds it.
 - **Each job's money is earmarked with its id.** The operator's funding records are the job's balance, so the contract needs no `held` variable, and a release can only pay out its own job's money, even when the same buyer funds several jobs.
 - **Each job is its own state scope,** so jobs don't wait for each other while a run settles (see [Settlement](#settlement)).
@@ -666,23 +689,29 @@ The arbiter can confirm through an event. The arbiter deploys this event contrac
 ```
 contract org.arbiter.ReleaseOnDelivery consumes org.arbiter.JobDelivered@1 {
     const job: com.example.Job@1
-    job.run(action: "release", jobId: jobId, provider: "", arbiter: "")
+
+    fn on(jobId: string) {
+        job.release(jobId: jobId)
+    }
 }
 ```
 
 ### Splitting a payment
 
 ```
-payable contract com.example.Split: int64 {
+contract com.example.Split {
     const account: sh.stellarium.money.Account
-    const author = payment.amount * 70 / 100
-    account.pay(to: "org_author", amount: author, from: payment.from)
-    account.pay(to: "org_data", amount: payment.amount - author, from: payment.from)
-    return payment.amount
+
+    pub payable fn split(): int64 {
+        const author = payment.amount * 70 / 100
+        account.pay(to: "org_author", amount: author, from: payment.from)
+        account.pay(to: "org_data", amount: payment.amount - author, from: payment.from)
+        return payment.amount
+    }
 }
 ```
 
-The buyer names both organizations as payees: `split.run{amount: 1000000, payees: ["org_author", "org_data"]}()`.
+The buyer names both organizations as payees: `split.split{amount: 1000000, payees: ["org_author", "org_data"]}()`.
 
 - **Both payments settle together, or neither does.** A call without enough money attached fails, because `pay` refuses an amount of 0.
 - **Integer division truncates,** so `org_data` gets the remainder, and nothing is lost to rounding.

@@ -16,8 +16,14 @@ export const DEFAULT_DATABASE_PATH = './requestscript.db';
  * Version 7 added contract functions: `resource_function.kind` 'contract', priced per million tokens in
  * `resource_function_payment_manifest.price_micro_usd_per_million_tokens`.
  * Version 8 added `resource.version`: the version a peer announced for a contract, null for other resources.
+ * Version 9 is RequestScript 2.0 (SIP-1): a contract has functions instead of parameters and a return type,
+ * so `contract.functions` replaced `parameters` and `return_type`. Contracts in the old syntax no longer parse,
+ * so the contract tables, and their state, were dropped, to be deployed again.
  */
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
+
+/** The schema version contracts became sets of functions (RequestScript 2.0). */
+const CONTRACT_FUNCTIONS_SCHEMA_VERSION = 9;
 
 export interface OpenDatabaseOptions {
     /** Postgres only: the schema the node's tables live in, created if missing. Lets nodes share a database. */
@@ -79,6 +85,15 @@ export async function createTables(db: NodeDatabase) {
             DROP TABLE IF EXISTS resource_function_parameter;
             DROP TABLE IF EXISTS resource_function;
             DROP TABLE IF EXISTS resource;
+        `);
+    }
+    if (version < CONTRACT_FUNCTIONS_SCHEMA_VERSION) {
+        // RequestScript 2.0 can't run contracts written for 1.x, so they're deployed again (SIP-1).
+        await db.exec(`
+            DROP TABLE IF EXISTS contract_pending_state;
+            DROP TABLE IF EXISTS contract_state;
+            DROP TABLE IF EXISTS event_consumer;
+            DROP TABLE IF EXISTS contract;
         `);
     }
 
@@ -208,15 +223,14 @@ export async function createTables(db: NodeDatabase) {
         CREATE INDEX IF NOT EXISTS seen_nonce_expires_at ON seen_nonce (expires_at);
 
         -- Contracts deployed to this node. Versions are immutable. The latest version of each is one of the
-        -- node's resources, with a single function, run. An owner of null is the node's admin.
+        -- node's resources, with a function for each of its entrypoints. An owner of null is the node's admin.
         CREATE TABLE IF NOT EXISTS contract (
             path TEXT NOT NULL,
             name TEXT NOT NULL,
             version TEXT NOT NULL,
             source TEXT NOT NULL,
-            -- JSON: [{ name, type }]
-            parameters TEXT NOT NULL,
-            return_type TEXT NOT NULL,
+            -- JSON: [{ name, parameters: [{ name, type }], returnType, payable }], its entrypoints
+            functions TEXT NOT NULL,
             owner_organization_id TEXT,
             description TEXT,
             created_at TEXT NOT NULL,

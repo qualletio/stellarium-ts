@@ -33,9 +33,11 @@ The node's API key or a run token from an API client of the node's own organizat
 A request or a contract emits an event with `emit`, naming every field:
 
 ```
-contract com.example.Checkout(orderId: string, total: decimal): string {
-    emit com.example.OrderPlaced(orderId: orderId, total: total)
-    return orderId
+contract com.example.Checkout {
+    pub fn checkout(orderId: string, total: decimal): string {
+        emit com.example.OrderPlaced(orderId: orderId, total: total)
+        return orderId
+    }
 }
 ```
 
@@ -46,26 +48,29 @@ contract com.example.Checkout(orderId: string, total: decimal): string {
   - the script belongs to that organization: a run with the node's API key or by one of its API clients, or a contract it owns;
   - the node can prove its organization with the operator's membership token.
 
-  Other organizations still get to emit through your contracts: anyone may call your `Checkout`, which emits as your organization.
+  Other organizations still get to emit through your contracts: anyone may call your `Checkout.checkout`, which emits as your organization. An `emit` in any of a contract's functions counts, including its private ones.
 - A run may emit at most 16 events (`MAX_EVENTS_PER_RUN`), each with at most 32 KiB of data as JSON (`MAX_EVENT_DATA_BYTES`).
 
 ## Consuming events
 
-An event contract names the event type it `consumes`. It declares no parameters, because the event's fields are its parameters, and no return type. It can't return a value; a bare `return` ends it.
+An event contract names the event type it `consumes`. Its handler is the function `on`, which takes the event's fields it reads as parameters, each with the field's own type. The handler isn't `pub`, has no return type and can't return a value; a bare `return` ends it. The contract may also have private functions, but no `pub` ones.
 
 ```
 contract com.example.OnOrderPlaced consumes com.example.OrderPlaced@1 {
-    var state(orderId) seen: int32 = 0
-    seen = seen + 1
-
     const logger: com.example.Logger
-    logger.info(message: "Order ${orderId}: ${total}, from ${caller.org}")
+
+    fn on(orderId: string, total: decimal) {
+        var state(orderId) seen: int32 = 0
+        seen = seen + 1
+        logger.info(message: "Order ${orderId}: ${total}, from ${caller.org}")
+    }
 }
 ```
 
 - **Version:** the contract consumes the version it names, or the latest one its node knows when it is deployed.
+- **Fields:** a deploy whose handler takes a field the event doesn't have, or takes one as another type, is refused.
 - **Restricted types:** the contract is refused if the type is restricted and its deployer isn't the type's owner.
-- **Built-ins:** besides its fields, the contract reads:
+- **Built-ins:** besides the fields its handler takes, the contract reads:
   - `event`: `{ id, type, version, publishedAt, depth }`
   - `caller`: `{ org, node }`, the event's owner and the node that published it
 - **Not a resource:** an event contract runs only with events, so nobody can call it with made-up data. A contract keeps its kind across versions: an event contract can't get a callable version, or the other way around.
