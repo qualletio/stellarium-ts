@@ -44,15 +44,17 @@ Structs have no `DELETE`. Contracts and event types on other nodes may name any 
 A struct type is the struct's qualified name and its version:
 
 ```
-contract com.example.Ship(customer: com.example.Customer@2): com.example.Address@1 {
-    var first: com.example.Address@1 = customer.addresses[0]
-    return first
+contract com.example.Ship {
+    pub fn ship(customer: com.example.Customer@2): com.example.Address@1 {
+        var first: com.example.Address@1 = customer.addresses[0]
+        return first
+    }
 }
 ```
 
 Struct types can appear wherever a type can:
 
-- contract parameters and return types;
+- contract functions' parameters and return types;
 - `var` annotations, including state variables (`var state(customer.name) last: com.example.Address@1 = null`);
 - event type fields (`event com.example.OrderShipped(to: com.example.Address@1)`);
 - resource function parameters and return types, declared in TypeScript.

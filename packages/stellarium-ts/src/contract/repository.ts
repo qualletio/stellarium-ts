@@ -7,13 +7,23 @@ export interface ContractParameter {
     type: string;
 }
 
+/** One of a contract's entrypoints: a `pub fn`, or an event contract's handler, `on`. */
+export interface ContractFunction {
+    name: string;
+    parameters: ContractParameter[];
+    /** A RequestScript type string, or 'void' for a function that returns nothing. */
+    returnType: string;
+    /** Declared `pub payable fn`: the function accepts money attached to a call. */
+    payable: boolean;
+}
+
 export interface StoredContract {
     path: string;
     name: string;
     version: string;
     source: string;
-    parameters: ContractParameter[];
-    returnType: string;
+    /** Its entrypoints, in source order. */
+    functions: ContractFunction[];
     /** The organization that deployed it, which owns every version. Null when the node's admin did. */
     ownerOrganizationId: string | null;
     description: string | null;
@@ -25,8 +35,7 @@ interface ContractRow {
     name: string;
     version: string;
     source: string;
-    parameters: string;
-    return_type: string;
+    functions: string;
     owner_organization_id: string | null;
     description: string | null;
     created_at: string;
@@ -38,8 +47,7 @@ function toContract(row: ContractRow): StoredContract {
         name: row.name,
         version: row.version,
         source: row.source,
-        parameters: JSON.parse(row.parameters),
-        returnType: row.return_type,
+        functions: JSON.parse(row.functions),
         ownerOrganizationId: row.owner_organization_id,
         description: row.description,
         createdAt: row.created_at,
@@ -87,8 +95,8 @@ export class ContractRepository {
                 return { ok: false as const, refused: 'version_exists' as const };
             }
             await tx.run(
-                'INSERT INTO contract (path, name, version, source, parameters, return_type, owner_organization_id, description, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                [contract.path, contract.name, contract.version, contract.source, JSON.stringify(contract.parameters), contract.returnType, owner, contract.description, new Date().toISOString()],
+                'INSERT INTO contract (path, name, version, source, functions, owner_organization_id, description, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                [contract.path, contract.name, contract.version, contract.source, JSON.stringify(contract.functions), owner, contract.description, new Date().toISOString()],
             );
             return { ok: true as const };
         });

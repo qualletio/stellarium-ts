@@ -65,7 +65,7 @@ export async function seedOrganizations(db: Database, balance = 1_000_000) {
 }
 
 /** A contract voucher signed the way stellarium-ts's contractVoucherPayload does. */
-export function signedContractVoucher(keys: NodeKeys, overrides: { recipientOrganizationId?: string, runId?: string, maxAmount?: number, priceMicroUsdPerMillionTokens?: number } = {}) {
+export function signedContractVoucher(keys: NodeKeys, overrides: { recipientOrganizationId?: string, runId?: string, maxAmount?: number, priceMicroUsdPerMillionTokens?: number, functionName?: string } = {}) {
     const unsigned = {
         kind: 'contract' as const,
         requestId: crypto.randomUUID(),
@@ -76,6 +76,7 @@ export function signedContractVoucher(keys: NodeKeys, overrides: { recipientOrga
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
         invocationHash: 'hash',
         publicKey: keys.publicKey,
+        functionName: overrides.functionName ?? 'run',
         ...(overrides.runId === undefined ? {} : { runId: overrides.runId }),
     };
     return { ...unsigned, signature: signJson(unsigned, keys.privateKey) };

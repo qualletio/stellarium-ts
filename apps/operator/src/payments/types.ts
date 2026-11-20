@@ -85,15 +85,17 @@ export interface ContractVoucher {
     expiresAt: string;
     invocationHash: string;
     publicKey: string;
+    /** The contract function the call runs, one of its `pub fn`s: the hold covers what that function can cost. */
+    functionName: string;
     /** Set when a billed run made the call: that run's hold pays, and the contract's run is held from it. */
     runId?: string;
 }
 
 /** The bytes the caller signed: stellarium-ts's contractVoucherPayload. Key order is part of the signed bytes. */
 export function contractVoucherPayload(voucher: ContractVoucher): object {
-    const { kind, requestId, invocationId, maxAmount, priceMicroUsdPerMillionTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey } = voucher;
+    const { kind, requestId, invocationId, maxAmount, priceMicroUsdPerMillionTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey, functionName } = voucher;
     return {
-        kind, requestId, invocationId, maxAmount, priceMicroUsdPerMillionTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey,
+        kind, requestId, invocationId, maxAmount, priceMicroUsdPerMillionTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey, functionName,
         ...(voucher.runId === undefined ? {} : { runId: voucher.runId }),
     };
 }

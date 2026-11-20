@@ -21,7 +21,7 @@ function freePort(): Promise<number> {
 const PROVIDER_ORGANIZATION = "org_provider";
 const CALLER_ORGANIZATION = "org_caller";
 const GREETED = "event com.example.Greeted(who: string)";
-const ON_GREETED = "contract com.example.OnGreeted consumes com.example.Greeted {\n  var state count: int32 = 0\n  var state last: string = \"\"\n  count = count + 1\n  last = \"${who} from ${caller.org}\"\n}";
+const ON_GREETED = "contract com.example.OnGreeted consumes com.example.Greeted {\n  var state count: int32 = 0\n  var state last: string = \"\"\n  fn on(who: string) {\n    count = count + 1\n    last = \"${who} from ${caller.org}\"\n  }\n}";
 
 /**
  * Two real nodes in two organizations and a fake operator that issues their sessions with membership tokens

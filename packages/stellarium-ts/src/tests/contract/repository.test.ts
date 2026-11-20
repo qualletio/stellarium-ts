@@ -8,9 +8,8 @@ function contract(version: string, overrides: Partial<StoredContract> = {}): Omi
         path: "com.example",
         name: "Sum",
         version,
-        source: `contract com.example.Sum@${version}(a: int32): int32 { return a }`,
-        parameters: [{ name: "a", type: "int32" }],
-        returnType: "int32",
+        source: `contract com.example.Sum@${version} { pub fn sum(a: int32): int32 { return a } }`,
+        functions: [{ name: "sum", parameters: [{ name: "a", type: "int32" }], returnType: "int32", payable: false }],
         ownerOrganizationId: "org_a",
         description: null,
         ...overrides,
@@ -35,7 +34,7 @@ describe.each(DIALECTS)("ContractRepository (%s)", (dialect) => {
             expect(await repository.save(contract(version))).toEqual({ ok: true });
         }
 
-        expect(await repository.latest("com.example", "Sum")).toMatchObject({ version: "1.10", parameters: [{ name: "a", type: "int32" }], returnType: "int32" });
+        expect(await repository.latest("com.example", "Sum")).toMatchObject({ version: "1.10", functions: [{ name: "sum", parameters: [{ name: "a", type: "int32" }], returnType: "int32", payable: false }] });
         expect(await repository.latest("com.example", "Other")).toBeUndefined();
         expect((await repository.allLatest()).map(c => c.version)).toEqual(["1.10"]);
     });
@@ -44,7 +43,7 @@ describe.each(DIALECTS)("ContractRepository (%s)", (dialect) => {
         await repository.save(contract("1"));
 
         expect(await repository.save(contract("1", { source: "changed" }))).toEqual({ ok: false, refused: "version_exists" });
-        expect((await repository.latest("com.example", "Sum"))?.source).toContain("@1(");
+        expect((await repository.latest("com.example", "Sum"))?.source).toContain("@1 {");
     });
 
     test("gives every version to the first deployer's organization, and lets the admin add versions", async () => {
