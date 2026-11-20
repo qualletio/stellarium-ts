@@ -1,4 +1,6 @@
-import { Resource, ResourceFunctionCallParameter, ResourceInvoker } from "requestscript";
+import { type CallAttachment, Resource, ResourceFunctionCallParameter, ResourceInvoker } from "requestscript";
+import type { Frame, StateTransaction } from "../contract/pending.js";
+import { ACCOUNT_BUILTIN, type AccountService, type AccountSession, isMoneyPath, type MoneyRun, RANDOM_BUILTIN } from "../money/account.js";
 import type { OperatorClient } from "../client/operatorClient.js";
 import { hashData, signData } from "../crypto/utils.js";
 import type { GrantService } from "../grant/service.js";
@@ -6,6 +8,7 @@ import type { EventLineage } from "../event/types.js";
 import { estimateInputTokens, inferenceCharge, type InferenceUsage, isInferenceFunction, isInferenceManifest, parseInferenceResult, parseMaxTokens } from "./inference.js";
 import { isContractFunction, isContractManifest, ResourceRepository, type StellariumFixedPaymentManifest, type StellariumInferencePaymentManifest, type StellariumResourceFunction } from "./repository.js";
 import { type InvokeResult, settlePaidCall } from "./settlement.js";
+import type { SettlementOutbox } from "./outbox.js";
 
 export interface PaymentVoucher {
     requestId: string;
@@ -71,15 +74,26 @@ export interface InferenceEstimate {
 /**
  * Hash binding a voucher to one function call. Providers recompute it from the
  * request they receive and compare it to `voucher.invocationHash`.
- * Key order is part of the hashed bytes.
+ * Key order is part of the hashed bytes. `resourceVersion`, the contract version a script pinned, is hashed
+ * last and only when set, so a call that pins no version hashes the same bytes as before it existed.
  */
 export function invocationHash(
     resourcePath: string,
     resourceName: string,
     functionName: string,
     parameters: ResourceFunctionCallParameter[],
+    resourceVersion?: string,
 ): string {
-    return hashData({ resourcePath, resourceName, functionName, parameters });
+    return hashData({ resourcePath, resourceName, functionName, parameters, ...(resourceVersion === undefined ? {} : { resourceVersion }) });
+}
+
+/**
+ * The version a script bound `resource` by, `path.Name@version`, or undefined when it named none. A call to a
+ * pinned contract runs that version, here or on its node, rather than whichever is latest when it's called.
+ */
+export function pinnedVersion(resource: Resource): string | undefined {
+    const pinned = resource.metadata?.pinnedVersion;
+    return typeof pinned === 'string' ? pinned : undefined;
 }
 
 /**
@@ -190,6 +204,24 @@ export interface ScriptContext {
      * here or on another node, which is sent the chain with the call.
      */
     event?: EventLineage;
+    /** The running contract's use of `sh.stellarium.money.Account`. A request script has none, and no balance. */
+    account?: AccountSession;
+    /**
+     * The operator run contracts on this node stage `Account` changes on when they aren't billed, shared down a
+     * chain of free contract calls so their changes settle together (docs/money.md, Settlement).
+     */
+    moneyRun?: MoneyRun;
+    /**
+     * The run's time, in milliseconds, which payable contracts read as `now`. Taken once by the outermost script
+     * or contract on this node, so every contract it calls here reads the same.
+     */
+    now?: number;
+    /** For a contract run: the nonce its calls' run tags are made from, and the next call's index, for signed answers. */
+    attest?: { nonce: string, next: () => number };
+    /** The contract the script is, when it's one: `path.Name@version` and its registered owner. Calls it makes have it as `sender`. */
+    self?: { contract: string, owner: string | null };
+    /** The chain of contract calls on this node the script runs in, whose state writes wait for its money. */
+    state?: { tx: StateTransaction, frame: Frame };
 }
 
 /** Contracts may call each other, so each call goes one deeper, and a call past this depth fails. */
@@ -201,7 +233,7 @@ export interface ContractHost {
      * Runs the contract served as `resource`, one level deeper than `context`. A billed script's call is held
      * from its run's hold, as a call from another node is held from the caller's balance.
      */
-    invokeLocal(resource: Resource, parameters: ResourceFunctionCallParameter[], context: ScriptContext): Promise<InvokeResult>;
+    invokeLocal(resource: Resource, parameters: ResourceFunctionCallParameter[], context: ScriptContext, attachmentId?: string): Promise<InvokeResult>;
 }
 
 /** How this node calls contracts. */
@@ -215,6 +247,8 @@ export interface ContractInvocation {
 /** How a node settles its own paid functions when a billed run calls them. */
 export interface LocalSettlement {
     operatorClient: OperatorClient;
+    /** Keeps the call's capture or release until the operator takes it. */
+    outbox: SettlementOutbox;
     /** The organization this node's functions pay. */
     organizationId?: string;
 }
@@ -238,6 +272,8 @@ export class CombinationResourceInvoker implements ResourceInvoker {
 
     /** Set once the node's contract host exists, since the host calls back into this invoker. */
     contracts?: ContractInvocation;
+    /** Serves `sh.stellarium.money.Account`. Without it, its calls fail. */
+    money?: AccountService;
 
     /**
      * An invoker for one billed run. Its paid calls, remote or to this node's own paid functions, carry
@@ -253,7 +289,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
      * Contracts it calls on this node see its `jwt`.
      */
     forScript(context: ScriptContext): ResourceInvoker {
-        return { invoke: (resource, functionName, parameters) => this.invokeIn(resource, functionName, parameters, context) };
+        return { invoke: (resource, functionName, parameters, attachment) => this.invokeIn(resource, functionName, parameters, context, attachment) };
     }
     /**
      * Invoke a function on a resource.
@@ -272,7 +308,38 @@ export class CombinationResourceInvoker implements ResourceInvoker {
         return this.invokeIn(resource, functionName, parameters, undefined);
     }
 
-    private async invokeIn(resource: Resource, functionName: string, parameters: ResourceFunctionCallParameter[], context: ScriptContext | undefined): Promise<{ value: any, error: { message: string } | null, usage?: InferenceUsage }> {
+    /**
+     * The public key of the peer serving from a base URL, which names the node hosting a contract money is
+     * attached to. Without it, money can only be attached to this node's contracts.
+     */
+    peerKey?: (baseUrl: string) => Promise<string | undefined>;
+
+    private async invokeIn(resource: Resource, functionName: string, parameters: ResourceFunctionCallParameter[], context: ScriptContext | undefined, attachment?: CallAttachment): Promise<{ value: any, error: { message: string } | null, usage?: InferenceUsage }> {
+        if (resource.metadata.builtin === ACCOUNT_BUILTIN) {
+            if (!this.money) {
+                return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: this node has no operator to keep balances` } };
+            }
+            return this.money.invoke(context?.account, functionName, parameters);
+        }
+        if (resource.metadata.builtin === RANDOM_BUILTIN) {
+            if (!this.money) {
+                return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: this node has no operator to draw random values` } };
+            }
+            return this.money.invokeRandom(context?.account, functionName, parameters);
+        }
+        // Built into every node, so a resource under the path from anywhere else is an impostor.
+        if (isMoneyPath(resource.path)) {
+            return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: ${resource.path} is reserved for stellarium-ts's built-in resources` } };
+        }
+        // Money attached to the call is staged on the caller's run before the call is made.
+        let attachmentId: string | undefined;
+        if (attachment) {
+            const staged = await this.stageAttachment(resource, functionName, attachment, context);
+            if ('error' in staged) {
+                return { value: null, error: { message: staged.error } };
+            }
+            attachmentId = staged.attachmentId;
+        }
         // Only a billed run has a run id. Its hold limits what its calls cost, in place of the cost limits.
         const run = context?.runId === undefined ? undefined : { runId: context.runId };
         if (resource.metadata.baseUrl) {
@@ -318,7 +385,20 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                     return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: contracts may call each other at most ${MAX_CONTRACT_DEPTH} deep` } };
                 }
                 const costLimit = this.contracts?.costLimitMicroUsd ?? this.costLimitMicroUsd;
-                requestBody.paymentVoucher = this.createContractVoucher(manifest.recipientOrganizationId!, manifest.priceMicroUsdPerMillionTokens, costLimit, resource.path, resource.name, functionName, parameters, run?.runId);
+                const version = pinnedVersion(resource);
+                // A free chain's run, once opened, makes the contract part of its tree, so their money settles together.
+                const treeRunId = run?.runId ?? context?.moneyRun?.opened;
+                requestBody.paymentVoucher = this.createContractVoucher(manifest.recipientOrganizationId!, manifest.priceMicroUsdPerMillionTokens, costLimit, resource.path, resource.name, functionName, parameters, treeRunId, version);
+                if (attachmentId !== undefined) {
+                    requestBody.attachmentId = attachmentId;
+                }
+                // The operator vouches for the calling contract's owner, which the callee reads as `sender.org`.
+                if (context?.account) {
+                    requestBody.senderContract = context.account.contract;
+                }
+                if (version !== undefined) {
+                    requestBody.resourceVersion = version;
+                }
                 requestBody.contractDepth = depth;
                 if (context?.event) {
                     requestBody.eventLineage = context.event;
@@ -357,26 +437,44 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 requestBody.paymentVoucher = this.createPaymentVoucher(manifest.recipientOrganizationId!, manifest.costMicroUsd, resource.path, resource.name, functionName, parameters, run?.runId);
             }
 
+            // A contract run asks for a signed answer, tagged for this provider alone (docs/money.md, Signed responses).
+            // When the call fails, the receipt still names the provider and tag, so the operator can ask it.
+            let tag: { runTag: string, callIndex: number, publicKey: string } | undefined;
+            if (context?.attest) {
+                const providerKey = await this.peerKey?.(url);
+                if (providerKey) {
+                    tag = { runTag: hashData({ nonce: context.attest.nonce, provider: providerKey }), callIndex: context.attest.next(), publicKey: providerKey };
+                    requestBody.attestation = { runTag: tag.runTag, callIndex: tag.callIndex };
+                }
+            }
+            const unanswered = (message: string) => ({ value: null, error: { message }, ...(tag ? { attestation: { ...tag, failed: true } } : {}) });
+
             // The voucher is created once and reused on every attempt, so the operator's
             // requestId/invocationId check prevents a retried call from being settled twice.
             // The authorization is signed per attempt, since the provider refuses a reused nonce.
-            const result = await fetchWithRetry(`${url}/v1/run/resource`, () => ({
-                method: 'POST',
-                body: JSON.stringify(chain && this.grantService ? { ...requestBody, authorization: this.grantService.authorize(chain, target) } : requestBody),
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-            }), inference || contract ? INFERENCE_INVOKE_TIMEOUT_MS : EXTERNAL_INVOKE_TIMEOUT_MS);
+            let result: Response;
+            try {
+                result = await fetchWithRetry(`${url}/v1/run/resource`, () => ({
+                    method: 'POST',
+                    body: JSON.stringify(chain && this.grantService ? { ...requestBody, authorization: this.grantService.authorize(chain, target) } : requestBody),
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                }), inference || contract ? INFERENCE_INVOKE_TIMEOUT_MS : EXTERNAL_INVOKE_TIMEOUT_MS);
+            } catch (error) {
+                if (!tag) throw error;
+                return unanswered(`Failed to invoke ${resource.name}.${functionName}: ${error instanceof Error ? error.message : String(error)}`);
+            }
 
             if (!result.ok) {
                 // The provider's JSON error is more useful than the status text, which can be empty.
                 const detail = await result.json().then((body) => (body as { error?: unknown } | null)?.error, () => undefined);
                 const reason = typeof detail === 'string' ? detail : `${result.status} ${result.statusText}`.trim();
-                return { value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: ${reason}` } };
+                return unanswered(`Failed to invoke ${resource.name}.${functionName}: ${reason}`);
             }
 
-            const data = await result.json() as { value: any, error: { message: string } | null };
-            return { value: data.value, error: data.error };
+            const data = await result.json() as { value: any, error: { message: string } | null, attestation?: unknown };
+            return { value: data.value, error: data.error, ...(data.attestation ? { attestation: data.attestation } : {}) };
         } else {
             const fn = resource.functions.find(f => f.name === functionName) as StellariumResourceFunction | undefined;
             if (!fn) {
@@ -389,7 +487,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 if (context?.event?.contracts.includes(`${resource.path}.${resource.name}`)) {
                     return { value: null, error: { message: `Failed to invoke ${resource.name}.${fn.name}: it is earlier in this chain of events` } };
                 }
-                return this.contracts.host.invokeLocal(resource, parameters, context ?? {});
+                return this.contracts.host.invokeLocal(resource, parameters, context ?? {}, attachmentId);
             }
             // A billed run pays for this node's own paid functions as a remote caller would.
             if (run && fn.paymentManifest) {
@@ -439,7 +537,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
         } else {
             return failed('it has per-token pricing but isn\'t an inference function');
         }
-        const result = await settlePaidCall(this.localSettlement.operatorClient, voucher, () => this.execLocal(fn, parameters), (error, message) => console.error(message, error));
+        const result = await settlePaidCall(this.localSettlement.operatorClient, this.localSettlement.outbox, voucher, () => this.execLocal(fn, parameters));
         return 'refused' in result ? failed(result.refused.error) : result;
     }
 
@@ -465,6 +563,27 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             return { error: 'the provider returned an invalid estimate' };
         }
         return { inputTokens: inputTokens!, maxAmount: maxAmount! };
+    }
+
+    /**
+     * Stages money attached to a call to a contract, on the caller's run. Only a pinned version of a contract
+     * can be paid, which the interpreter has checked.
+     */
+    private async stageAttachment(resource: Resource, functionName: string, attachment: CallAttachment, context: ScriptContext | undefined): Promise<{ attachmentId: string } | { error: string }> {
+        const failed = (reason: string) => {
+            const error = `Failed to invoke ${resource.name}.${functionName}: ${reason}`;
+            if (context?.account) context.account.failure ??= error;
+            else if (context?.moneyRun) context.moneyRun.failure ??= error;
+            return { error };
+        };
+        if (!this.money) return failed('this node has no operator to move money');
+        const fn = resource.functions.find(candidate => candidate.name === functionName) as StellariumResourceFunction | undefined;
+        const version = pinnedVersion(resource);
+        if (!fn || !isContractFunction(fn) || version === undefined) return failed('money can only be attached to a call to a pinned contract version');
+        const baseUrl = resource.metadata.baseUrl as string | undefined;
+        const nodePublicKey = baseUrl ? await this.peerKey?.(baseUrl) : this.publicKey;
+        if (!nodePublicKey) return failed('the node hosting the contract isn\'t known');
+        return this.money.attach(context?.account, context?.moneyRun, { nodePublicKey, name: `${resource.path}.${resource.name}`, version }, attachment);
     }
 
     /** With `runId`, the voucher is paid from that run's hold. */
@@ -501,8 +620,11 @@ export class CombinationResourceInvoker implements ResourceInvoker {
         return { ...unsigned, signature: signData(inferenceVoucherPayload(unsigned), this.privateKey) };
     }
 
-    /** With `runId`, the run's hold pays, and the contract's run is held from it. */
-    createContractVoucher(recipientOrganizationId: string, priceMicroUsdPerMillionTokens: number, maxAmount: number, resourcePath: string, resourceName: string, functionName: string, parameters: ResourceFunctionCallParameter[], runId?: string): ContractPaymentVoucher {
+    /**
+     * With `runId`, the run's hold pays, and the contract's run is held from it. With `resourceVersion`, the
+     * voucher pays only for a call to that version.
+     */
+    createContractVoucher(recipientOrganizationId: string, priceMicroUsdPerMillionTokens: number, maxAmount: number, resourcePath: string, resourceName: string, functionName: string, parameters: ResourceFunctionCallParameter[], runId?: string, resourceVersion?: string): ContractPaymentVoucher {
         const unsigned: Omit<ContractPaymentVoucher, "signature"> = {
             kind: 'contract',
             requestId: crypto.randomUUID(),
@@ -511,7 +633,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             priceMicroUsdPerMillionTokens,
             recipientOrganizationId,
             expiresAt: new Date(Date.now() + CONTRACT_VOUCHER_LIFETIME_MS).toISOString(),
-            invocationHash: invocationHash(resourcePath, resourceName, functionName, parameters),
+            invocationHash: invocationHash(resourcePath, resourceName, functionName, parameters, resourceVersion),
             publicKey: this.publicKey,
             ...runPayload(runId),
         };

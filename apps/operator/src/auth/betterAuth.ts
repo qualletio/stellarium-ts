@@ -28,7 +28,7 @@ export interface AuthConfig {
  * Better Auth, for the dashboard: email and password sign-in (and GitHub when configured), and organizations
  * with `owner`, `admin` and `member` roles. Its tables are in the operator's schema.
  */
-export function createAuth(db: Database, config: AuthConfig) {
+export function createAuth(db: Database, config: AuthConfig, isPaused: (userId: string) => Promise<boolean> = async () => false) {
     // Not awaited, so how long sending takes doesn't reveal whether an account exists.
     const send = (email: Email) => void config.mailer.send(email);
     const verifyEmail = !config.skipEmailVerification;
@@ -83,6 +83,8 @@ export function createAuth(db: Database, config: AuthConfig) {
             organization({
                 // Balances, nodes and payouts belong to the organization.
                 disableOrganizationDeletion: true,
+                // An account paused by a ban can't start over in a new organization while the ban stands.
+                allowUserToCreateOrganization: async (user) => !await isPaused(user.id),
                 requireEmailVerificationOnInvitation: verifyEmail,
                 sendInvitationEmail: async ({ id, email, organization, inviter }) => send({
                     to: email,

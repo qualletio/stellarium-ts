@@ -1,11 +1,12 @@
 import { eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { Database } from '../db/database.js';
-import { organizationsTable, payoutsTable, receiptsTable } from '../db/schema.js';
+import { moneyChangesTable, nodesTable, organizationsTable, payoutsTable, receiptsTable, runsTable, topUpsTable } from '../db/schema.js';
 import type { OrganizationService } from '../organizations.js';
 import { PaymentService } from '../payments/paymentService.js';
 import { StripeRequestError } from '../stripe/gateway.js';
-import { createTestDatabase, FakeStripe, ledgerProblems, type NodeKeys, PROVIDER_ORGANIZATION, seedOrganizations, signedVoucher } from '../testing.js';
+import { createService } from '../service.js';
+import { createTestDatabase, FakeStripe, generateNodeKeys, ledgerProblems, type NodeKeys, PAYER_ORGANIZATION, PROVIDER_ORGANIZATION, seedOrganizations, signedContractVoucher, signedVoucher, APPLY_BEFORE_VERIFYING } from '../testing.js';
 import { PENDING_RETRY_UNTIL_MS, type PayoutPolicy, PayoutService } from './payoutService.js';
 
 const DAY = 1000 * 60 * 60 * 24;
@@ -57,6 +58,71 @@ describe('PayoutService', () => {
         const [payout] = await db.select().from(payoutsTable);
         expect(payout).toMatchObject({ status: 'paid', amountCents: 1_200, stripeTransferId: expect.stringMatching(/^tr_/) });
         expect(await ledgerProblems(db)).toEqual([]);
+    });
+
+    test('holds a script run\'s charge for the hold window, like a voucher\'s', async () => {
+        const service = createService(db, { money: APPLY_BEFORE_VERIFYING, platformFeeBps: 2000, runTokenPrivateKey: generateNodeKeys().privateKey });
+        // 4 tokens at 5,000,000 micro-USD each: the provider is owed 16,000,000.
+        await db.update(nodesTable).set({ listed: true, priceMicroUsdPerMillionTokens: 5_000_000_000_000 }).where(eq(nodesTable.publicKey, provider.publicKey));
+        const { client } = await service.clients.create(PAYER_ORGANIZATION, { nodePublicKey: provider.publicKey, maxRunCostMicroUsd: 50_000_000 });
+        const { token } = await service.runTokens!.sign({ clientId: client.id, organizationId: PAYER_ORGANIZATION, nodePublicKey: provider.publicKey });
+        const runId = crypto.randomUUID();
+        await service.runs.authorize(provider.publicKey, { token, runId, source: 'request R {\n  return 1 + 2\n}' });
+        await service.runs.capture(provider.publicKey, { runId, tokens: 4 });
+
+        expect(await payouts.runPayouts()).toEqual({ paid: 0, failed: 0, pending: 0 });
+        await db.update(runsTable).set({ capturedAt: new Date(Date.now() - 8 * DAY) }).where(eq(runsTable.runId, runId));
+        expect(await payouts.runPayouts()).toEqual({ paid: 1, failed: 0, pending: 0 });
+        expect(transfers()).toMatchObject([{ amountCents: 1_600 }]);
+    });
+
+    describe('contract payments', () => {
+        /** A payer-funded contract on the provider's node pays the provider 20,000,000 (16,000,000 after the fee). Returns the tree's root run. */
+        async function paidByContract() {
+            const service = createService(db, { money: APPLY_BEFORE_VERIFYING, platformFeeBps: 2000, runTokenPrivateKey: generateNodeKeys().privateKey });
+            await db.insert(topUpsTable).values({ organizationId: PAYER_ORGANIZATION, amountMicroUsd: 50_000_000, status: 'succeeded' });
+            await db.update(nodesTable).set({ listed: true }).where(eq(nodesTable.publicKey, provider.publicKey));
+            await organizations.setNodeMoneyLimits(provider.publicKey, { maxContractBalanceMicroUsd: 1_000_000_000 });
+            await organizations.setNodeMoneyLimits(payer.publicKey, { maxApiKeyRunValueMicroUsd: 50_000_000, monthlyApiKeyValueCapMicroUsd: 50_000_000 });
+            const job = { nodePublicKey: provider.publicKey, name: 'com.example.Job', version: '1' };
+            await service.money.register(provider.publicKey, { name: job.name, version: job.version, payable: true, source: 'payable contract', requestscriptVersion: '1.8.0', dependencies: [] });
+            const root = crypto.randomUUID();
+            await service.runs.open(payer.publicKey, { runId: root });
+            const voucher = signedContractVoucher(payer, { runId: root });
+            await service.runs.authorizeContract(provider.publicKey, { voucher, source: 'contract com.example.Job(a: int32): int32 {\n  return a\n}' });
+            await service.money.stage(payer.publicKey, { runId: root, callIndex: 0, function: 'attach', parameters: { to: job, amount: 20_000_000, attachmentId: crypto.randomUUID(), payees: [PROVIDER_ORGANIZATION] } });
+            await service.money.stage(provider.publicKey, { runId: voucher.invocationId, callIndex: 0, contract: { name: job.name, version: job.version }, function: 'pay', parameters: { to: PROVIDER_ORGANIZATION, amount: 20_000_000, from: PAYER_ORGANIZATION } });
+            await service.runs.capture(provider.publicKey, { runId: voucher.invocationId, tokens: 0 });
+            await service.runs.capture(payer.publicKey, { runId: root, tokens: 0 });
+            expect((await provider_()).payableMicroUsd).toBe(16_000_000);
+            const age = () => db.update(moneyChangesTable).set({ settledAt: new Date(Date.now() - 8 * DAY) });
+            return { service, root, age };
+        }
+
+        test('aren\'t paid out until their tree is verified, and the hold window has passed', async () => {
+            const { service, root, age } = await paidByContract();
+            expect(await service.money.unverifiedTrees()).toMatchObject([{ runId: root }]);
+            expect(await payouts.runPayouts()).toEqual({ paid: 0, failed: 0, pending: 0 });
+            await age();
+            // Past the hold window, but unverified.
+            expect(await payouts.runPayouts()).toEqual({ paid: 0, failed: 0, pending: 0 });
+
+            await service.money.recordVerification(root, 'verified');
+            expect(await service.money.unverifiedTrees()).toEqual([]);
+            expect(await payouts.runPayouts()).toEqual({ paid: 1, failed: 0, pending: 0 });
+            expect(transfers()).toMatchObject([{ amountCents: 1_600 }]);
+            expect(await ledgerProblems(db)).toEqual([]);
+        });
+
+        test('stay held when their tree fails verification, and a result can\'t be changed', async () => {
+            const { service, root, age } = await paidByContract();
+            await age();
+            await service.money.recordVerification(root, 'failed');
+            expect(await payouts.runPayouts()).toEqual({ paid: 0, failed: 0, pending: 0 });
+            await expect(service.money.recordVerification(root, 'verified')).rejects.toMatchObject({ statusCode: 409 });
+            // Recording the same result again changes nothing.
+            await service.money.recordVerification(root, 'failed');
+        });
     });
 
     test('waits for the minimum', async () => {

@@ -44,10 +44,10 @@ describe.each(DIALECTS)("contract state (%s)", (dialect) => {
         service = createService(db, [weatherResource(), gateResource(gate)], config, { runTokenKeys: createLocalJWKSet({ keys: [{ ...jwk, alg: "EdDSA" }] }) });
         const client = service.operatorClient;
         vi.spyOn(client, "authorizeRun").mockResolvedValue({ ok: true, heldMicroUsd: 50_000, maxTokens: 0 });
-        vi.spyOn(client, "captureRun").mockResolvedValue(undefined);
-        vi.spyOn(client, "releaseRun").mockResolvedValue(undefined);
+        vi.spyOn(client, "captureRun").mockResolvedValue({ ok: true });
+        vi.spyOn(client, "releaseRun").mockResolvedValue({ ok: true });
         vi.spyOn(client, "authorize").mockResolvedValue({ ok: true });
-        vi.spyOn(client, "capture").mockResolvedValue(undefined);
+        vi.spyOn(client, "capture").mockResolvedValue({ ok: true });
         authorizeContractRun = vi.spyOn(client, "authorizeContractRun").mockResolvedValue({ ok: true, free: false, payerOrganizationId: "org_peer" });
         fastify = Fastify();
         await fastify.register(routes, { prefix: "/v1", service });
@@ -140,7 +140,7 @@ describe.each(DIALECTS)("contract state (%s)", (dialect) => {
     });
 
     test("a call that re-enters its own contract saves first, and the outer call fails rather than lose it", async () => {
-        await deploy("contract com.example.Again(again: boolean): int32 {\n  var state count: int32 = 0\n  const self: com.example.Again\n  if (again) {\n    const inner = self.run(again: false)\n  }\n  count = count + 1\n  return count\n}");
+        await deploy("contract com.example.Again(again: boolean): int32 {\n  var state count: int32 = 0\n  const self: com.example.Again@1\n  if (again) {\n    const inner = self.run(again: false)\n  }\n  count = count + 1\n  return count\n}");
 
         const result = (await run("request R {\n  const again: com.example.Again\n  return again.run(again: true)\n}")).returnValue;
 

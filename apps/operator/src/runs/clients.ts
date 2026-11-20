@@ -1,7 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { and, desc, eq, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, sql } from "drizzle-orm";
 import type { Database, Transaction } from "../db/database.js";
-import { apiClientsTable, nodesTable, organizationsTable, receiptsTable, runsTable } from "../db/schema.js";
+import { apiClientsTable, moneyChangesTable, nodesTable, organizationsTable, receiptsTable, runsTable } from "../db/schema.js";
 import { newId, sha256Hex } from "../crypto.js";
 import { OperationError } from "../errors.js";
 import type { RunTokenSigner } from "./tokens.js";
@@ -16,6 +16,8 @@ export interface NewApiClient {
     label?: string;
     maxRunCostMicroUsd?: number;
     monthlyCapMicroUsd?: number | null;
+    /** Most one run may attach to contract calls. Defaults to 0: nothing. */
+    maxRunValueMicroUsd?: number;
     createdBy?: string;
 }
 
@@ -23,6 +25,7 @@ export interface NewApiClient {
 export interface ApiClientLimits {
     maxRunCostMicroUsd?: number;
     monthlyCapMicroUsd?: number | null;
+    maxRunValueMicroUsd?: number;
 }
 
 /** The start of the calendar month (UTC) that `now` falls in. Monthly caps reset then. */
@@ -32,7 +35,7 @@ export function monthStart(now: Date = new Date()): Date {
 
 /**
  * What the client's runs authorized since `since` have cost or still hold: their script charges, their
- * calls' charges, and what is still held for both.
+ * calls' charges, what is still held for both, and the money they attached to contract calls, staged or applied.
  */
 export async function clientSpend(db: Database | Transaction, clientId: string, since: Date): Promise<number> {
     const [runs] = await db.select({ total: sql<string>`coalesce(sum(coalesce(${runsTable.amountMicroUsd}, 0) + ${runsTable.heldMicroUsd}), 0)` })
@@ -44,7 +47,17 @@ export async function clientSpend(db: Database | Transaction, clientId: string, 
         .from(receiptsTable)
         .innerJoin(runsTable, eq(receiptsTable.runId, runsTable.id))
         .where(and(eq(runsTable.clientId, clientId), gte(runsTable.createdAt, since)));
-    return Number(runs!.total) + Number(calls!.total);
+    const [attached] = await db.select({ total: sql<string>`coalesce(sum(${moneyChangesTable.amountMicroUsd}), 0)` })
+        .from(moneyChangesTable)
+        .innerJoin(runsTable, eq(moneyChangesTable.runId, runsTable.id))
+        .where(and(
+            eq(runsTable.clientId, clientId),
+            gte(runsTable.createdAt, since),
+            eq(moneyChangesTable.function, 'attach'),
+            inArray(moneyChangesTable.status, ['staged', 'applied']),
+            isNotNull(moneyChangesTable.payerOrganizationId),
+        ));
+    return Number(runs!.total) + Number(calls!.total) + Number(attached!.total);
 }
 
 function secretsEqual(a: string, b: string): boolean {
@@ -77,6 +90,7 @@ export class ApiClientService {
             label: options.label,
             maxRunCostMicroUsd,
             monthlyCapMicroUsd: options.monthlyCapMicroUsd ?? null,
+            maxRunValueMicroUsd: options.maxRunValueMicroUsd ?? 0,
             createdBy: options.createdBy,
         }).returning();
         return { client: client!, clientSecret };
@@ -112,7 +126,8 @@ export class ApiClientService {
             if (monthlyCapMicroUsd !== null && monthlyCapMicroUsd < maxRunCostMicroUsd) {
                 throw new OperationError(400, 'The monthly cap must be at least the maximum run cost');
             }
-            const [updated] = await tx.update(apiClientsTable).set({ maxRunCostMicroUsd, monthlyCapMicroUsd })
+            const maxRunValueMicroUsd = limits.maxRunValueMicroUsd ?? client.maxRunValueMicroUsd;
+            const [updated] = await tx.update(apiClientsTable).set({ maxRunCostMicroUsd, monthlyCapMicroUsd, maxRunValueMicroUsd })
                 .where(eq(apiClientsTable.id, id))
                 .returning();
             return updated!;
@@ -164,7 +179,7 @@ export class ApiClientService {
             .innerJoin(organizationsTable, eq(organizationsTable.id, client.organizationId))
             .where(eq(nodesTable.publicKey, client.nodePublicKey))
             .limit(1);
-        if (row!.organization.frozenAt) {
+        if (row!.organization.frozenAt || row!.organization.bannedAt || row!.organization.closedAt) {
             throw new OperationError(403, 'Organization is frozen');
         }
         if (row!.node.revokedAt || (row!.node.organizationId !== client.organizationId && !row!.node.listed)) {

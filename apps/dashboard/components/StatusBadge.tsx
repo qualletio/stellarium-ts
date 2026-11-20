@@ -15,6 +15,7 @@ const TONES: Record<string, Tone> = {
   succeeded: 'success',
   paid: 'success',
   active: 'success',
+  verified: 'success',
   held: 'warning',
   pending: 'warning',
   released: 'muted',

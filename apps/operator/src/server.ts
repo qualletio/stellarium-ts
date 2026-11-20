@@ -10,6 +10,9 @@ import type { AuthConfig } from './auth/betterAuth.js';
 import { LogMailer, ResendMailer } from './auth/email.js';
 import { DEFAULT_MAXIMUM_TOP_UP_CENTS, DEFAULT_MINIMUM_TOP_UP_CENTS } from './billing/billingService.js';
 import { DEFAULT_COMPOSER_POLICY } from './composer/composerService.js';
+import { DEFAULT_MONEY_POLICY, MAX_CONTRACT_HOLD_LIMIT_MS } from './money/moneyService.js';
+import { DEFAULT_ALERT_POLICY } from './governance/alerts.js';
+import { DEFAULT_IDLE_BALANCE_POLICY } from './organizations.js';
 import { DEFAULT_PLATFORM_FEE_BPS } from './payments/paymentService.js';
 import { DEFAULT_PAYOUT_POLICY } from './payouts/payoutService.js';
 import routes from './routes/index.js';
@@ -112,7 +115,38 @@ const composer = {
   },
   turnHoldMicroUsd: integer('COMPOSER_TURN_HOLD_MICRO_USD', DEFAULT_COMPOSER_POLICY.turnHoldMicroUsd, 1),
 };
-const service = createService(db, { platformFeeBps, stripe, auth, runTokenPrivateKey, composer, dashboardServiceSecret });
+// The dashboard warns organizations whose card top-ups sit unspent, which Stripe's risk checks flag.
+const idleBalance = {
+  ageMs: integer('IDLE_BALANCE_DAYS', DEFAULT_IDLE_BALANCE_POLICY.ageMs / DAY_MS, 1) * DAY_MS,
+  warningMicroUsd: integer('IDLE_BALANCE_WARNING_MICRO_USD', DEFAULT_IDLE_BALANCE_POLICY.warningMicroUsd, 1),
+};
+// Money in contracts (docs/money.md). Stripe's risk checks look at how long a charge waits before it's paid out.
+const money = {
+  maxFundingSourceAgeMs: integer('MAX_FUNDING_SOURCE_AGE_DAYS', DEFAULT_MONEY_POLICY.maxFundingSourceAgeMs / DAY_MS, 1) * DAY_MS,
+  maxContractHoldMs: integer('MAX_CONTRACT_HOLD_DAYS', DEFAULT_MONEY_POLICY.maxContractHoldMs / DAY_MS, 1, MAX_CONTRACT_HOLD_LIMIT_MS / DAY_MS) * DAY_MS,
+  childReceiptDeadlineMs: integer('CHILD_RECEIPT_DEADLINE_MS', DEFAULT_MONEY_POLICY.childReceiptDeadlineMs, 1_000),
+  // Trees moving less are applied first and verified within the payout hold. 0 verifies every tree first.
+  optimisticVerifyLimitMicroUsd: integer('OPTIMISTIC_VERIFY_LIMIT_MICRO_USD', DEFAULT_MONEY_POLICY.optimisticVerifyLimitMicroUsd, 0),
+  maxUnverifiedMicroUsdPerNode: integer('MAX_UNVERIFIED_MICRO_USD_PER_NODE', DEFAULT_MONEY_POLICY.maxUnverifiedMicroUsdPerNode, 0),
+  // Card-fraud limits (docs/money.md, Card fraud): what a payer may attach, and when its identity must be verified.
+  maxPendingMoneyRunsPerContract: integer('MAX_PENDING_MONEY_RUNS_PER_CONTRACT', DEFAULT_MONEY_POLICY.maxPendingMoneyRunsPerContract, 1),
+  maxPendingMoneyRunsPerPayer: integer('MAX_PENDING_MONEY_RUNS_PER_PAYER', DEFAULT_MONEY_POLICY.maxPendingMoneyRunsPerPayer, 1),
+  attachLimitBaseMicroUsd: integer('ATTACH_LIMIT_BASE_MICRO_USD', DEFAULT_MONEY_POLICY.attachLimitBaseMicroUsd, 0),
+  attachWindowMs: integer('ATTACH_WINDOW_DAYS', DEFAULT_MONEY_POLICY.attachWindowMs / DAY_MS, 1) * DAY_MS,
+  payerKycThresholdMicroUsd: integer('PAYER_KYC_THRESHOLD_MICRO_USD', DEFAULT_MONEY_POLICY.payerKycThresholdMicroUsd, 0),
+};
+// Verified runs and governance (docs/money.md). Without staff keys the staff API is off.
+const receiptDeadlineMs = integer('RECEIPT_DEADLINE_MS', 10 * 60 * 1000, 1_000);
+const checkpointIntervalMs = integer('CHECKPOINT_INTERVAL_MS', 60 * 60 * 1000, 60_000);
+// Alerts for staff about what nodes' contracts do with money.
+const alerts = {
+  selfPaymentMicroUsd: integer('SELF_PAYMENT_ALERT_MICRO_USD', DEFAULT_ALERT_POLICY.selfPaymentMicroUsd, 0),
+  outflowJumpMinMicroUsd: integer('OUTFLOW_JUMP_ALERT_MICRO_USD', DEFAULT_ALERT_POLICY.outflowJumpMinMicroUsd, 0),
+};
+const service = createService(db, { platformFeeBps, stripe, auth, runTokenPrivateKey, composer, dashboardServiceSecret, idleBalance, money, receiptDeadlineMs, alerts, staffApiKeys: process.env.STAFF_API_KEYS });
+if (service.staff.size === 0) {
+  fastify.log.warn('STAFF_API_KEYS is not set: verification reviews, bans and appeals can\'t be decided');
+}
 
 // Applies to every operator route. Limits are per client IP.
 await fastify.register(rateLimit, {
@@ -134,6 +168,21 @@ const maintenanceTimer = setInterval(async () => {
     if (released > 0) fastify.log.info({ released }, 'Released expired holds');
     const releasedRuns = await service.runs.releaseExpiredRuns();
     if (releasedRuns > 0) fastify.log.info({ releasedRuns }, 'Released expired runs');
+    const settledTrees = await service.money.settleTrees();
+    if (settledTrees > 0) fastify.log.info({ settledTrees }, 'Settled run trees');
+    const expiredFunding = await service.money.refundExpired();
+    if (expiredFunding > 0) fastify.log.info({ expiredFunding }, 'Refunded contract funding past its time limit');
+    const raised = await service.alerts.check();
+    for (const alert of raised) fastify.log.warn({ alert }, 'Raised an alert for staff');
+    await service.notifications.deliverDue();
+    const matched = await service.governance.screenSanctions();
+    if (matched > 0) fastify.log.warn({ matched }, 'Blocked organizations matching a sanctions list');
+    const verifiedTrees = await service.verification.verifyTrees();
+    if (verifiedTrees > 0) fastify.log.info({ verifiedTrees }, 'Verified run trees');
+    if (service.runTokens && await service.governance.checkpointDue(checkpointIntervalMs)) {
+      const checkpoint = await service.governance.checkpoint();
+      fastify.log.info({ checkpoint: checkpoint.hash }, 'Published a signed checkpoint');
+    }
     const releasedTurns = await service.composer.releaseExpired();
     if (releasedTurns > 0) fastify.log.info({ releasedTurns }, 'Released expired Composer turns');
     if (service.payouts) {

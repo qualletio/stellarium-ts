@@ -10,7 +10,7 @@ import ui from './ui.module.css';
  * An API client's limits, with an Edit button for admins that swaps them for a form. New limits apply from the
  * client's next run: runs already authorized keep their hold.
  */
-export function ClientLimitsForm({ client, editable }: { client: Pick<ApiClient, 'id' | 'maxRunCostMicroUsd' | 'monthlyCapMicroUsd'>; editable: boolean }) {
+export function ClientLimitsForm({ client, editable }: { client: Pick<ApiClient, 'id' | 'maxRunCostMicroUsd' | 'monthlyCapMicroUsd' | 'maxRunValueMicroUsd'>; editable: boolean }) {
   const [editing, setEditing] = useState(false);
   const [state, formAction, pending] = useActionState(updateClientLimitsAction, undefined);
 
@@ -25,6 +25,9 @@ export function ClientLimitsForm({ client, editable }: { client: Pick<ApiClient,
         <span>
           {formatUsd(client.maxRunCostMicroUsd)} per run
           <span className={ui.secondary}>{client.monthlyCapMicroUsd === null ? 'No monthly cap' : `${formatUsd(client.monthlyCapMicroUsd)} a month`}</span>
+          <span className={ui.secondary}>
+            {client.maxRunValueMicroUsd === 0 ? 'Attaches no money' : `Attaches up to ${formatUsd(client.maxRunValueMicroUsd)} per run`}
+          </span>
         </span>
         {editable && (
           <button type="button" className={ui.buttonSecondary} onClick={() => setEditing(true)}>
@@ -66,6 +69,22 @@ export function ClientLimitsForm({ client, editable }: { client: Pick<ApiClient,
             step="0.000001"
             placeholder="None"
             defaultValue={client.monthlyCapMicroUsd === null ? '' : client.monthlyCapMicroUsd / 1_000_000}
+          />
+        </span>
+      </label>
+      <label className={ui.field}>
+        Max attached per run
+        <span className={ui.prefixed}>
+          <span className={ui.prefix}>$</span>
+          <input
+            className={ui.input}
+            name="maxRunValue"
+            type="number"
+            inputMode="decimal"
+            min="0"
+            step="0.000001"
+            defaultValue={client.maxRunValueMicroUsd / 1_000_000}
+            required
           />
         </span>
       </label>

@@ -18,6 +18,7 @@ const GROUPS = [
       { href: '/nodes', label: 'Nodes' },
       { href: '/explore', label: 'Explore' },
       { href: '/clients', label: 'API clients' },
+      { href: '/contracts', label: 'Contracts' },
       { href: '/composer', label: 'Composer' },
     ],
   },
@@ -30,7 +31,10 @@ const GROUPS = [
   },
   {
     label: 'Organization',
-    items: [{ href: '/settings', label: 'Settings' }],
+    items: [
+      { href: '/settings', label: 'Settings' },
+      { href: '/audit', label: 'Audit log' },
+    ],
   },
 ];
 

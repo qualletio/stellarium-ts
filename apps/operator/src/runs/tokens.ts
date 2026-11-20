@@ -1,4 +1,4 @@
-import { createHash, createPrivateKey, createPublicKey, type KeyObject } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, type KeyObject, sign } from "node:crypto";
 import { exportJWK, jwtVerify, SignJWT } from "jose";
 import { OperationError } from "../errors.js";
 
@@ -84,6 +84,19 @@ export class RunTokenSigner {
         } catch {
             throw new OperationError(401, 'Invalid run token');
         }
+    }
+
+    /** The signing key's public half, as SPKI DER base64url, the format node keys use. */
+    get publicKeySpki(): string {
+        return this.publicKey.export({ format: 'der', type: 'spki' }).toString('base64url');
+    }
+
+    /**
+     * An Ed25519 signature over `JSON.stringify(payload)`, as stellarium-ts's `signData` makes them, with the
+     * same key as run tokens. Key insertion order is part of the signed bytes.
+     */
+    signPayload(payload: object): string {
+        return sign(null, Buffer.from(JSON.stringify(payload)), this.privateKey).toString('base64url');
     }
 
     async jwks(): Promise<{ keys: object[] }> {

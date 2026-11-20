@@ -223,6 +223,31 @@ describe("two-node network", { timeout: 15_000 }, () => {
         expect(settlements[0]).toMatchObject({ amount: COST, recipientOrganizationId: ORGANIZATION, runId: voucher.invocationId });
     });
 
+    test("a pinned call runs the provider's older version, whose parameters the caller learns from the provider", async () => {
+        const caller = await startCaller();
+        const deployToProvider = (source: string) => fetch(`${providerUrl}/v1/contracts`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: "Bearer provider-admin" },
+            body: JSON.stringify({ source }),
+        });
+        await deployToProvider("contract com.example.Answer(base: int32): int32 {\n  return base + 1\n}");
+        await deployToProvider("contract com.example.Answer@2(base: int32, extra: int32): int32 {\n  return base + extra\n}");
+        await vi.waitFor(async () => expect((await getJson(`${caller.url}/v1/resources`)).resources).toContainEqual(expect.objectContaining({ name: "Answer", version: "2" })));
+
+        const pinned = await run(caller.url, "request R {\n  const answer: com.example.Answer@1\n  return answer.run(base: 10)\n}");
+        const latest = await run(caller.url, "request R {\n  const answer: com.example.Answer\n  return answer.run(base: 10, extra: 5)\n}");
+
+        expect(pinned.returnValue).toEqual({ value: 11, error: null });
+        expect(latest.returnValue).toEqual({ value: 15, error: null });
+        const deployed = await fetch(`${caller.url}/v1/contracts`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: "Bearer caller-key" },
+            body: JSON.stringify({ source: "contract com.example.Ask: int32 {\n  const answer: com.example.Answer\n  return answer.run(base: 1, extra: 1).value\n}" }),
+        });
+        expect(deployed.status).toBe(400);
+        expect(((await deployed.json()) as { error: string }).error).toContain("e.g. 'const ref: com.example.Answer@2'");
+    });
+
     test("a contract keeps state for the organization paying for a remote call", async () => {
         const caller = await startCaller();
         await fetch(`${providerUrl}/v1/contracts`, {

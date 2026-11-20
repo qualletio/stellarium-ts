@@ -1,12 +1,15 @@
 import type { OperatorClient, PaymentSubmission } from "../client/operatorClient.js";
 import { inferenceCharge, type InferenceUsage } from "./inference.js";
 import { type InferencePaymentVoucher, isInferenceVoucher, type PaymentVoucher } from "./invoker.js";
+import type { SettlementOutbox } from "./outbox.js";
 
 /** What a resource function call evaluates to, with an inference function's usage. */
 export interface InvokeResult {
     value: unknown;
     error: { message: string } | null;
     usage?: InferenceUsage;
+    /** A provider's signed answer to a call in a contract run, or which provider a failed one went to. */
+    attestation?: unknown;
 }
 
 /** The operator refused to hold the voucher, so the call didn't run. */
@@ -26,40 +29,28 @@ function cappedInferenceCharge(voucher: InferencePaymentVoucher, usage: Inferenc
 
 /**
  * Runs a paid call: holds the voucher's amount with the operator first, so a paid function never runs
- * unpaid, then runs `call` and captures the voucher, or releases it for a failed or free call. Settlement is
- * scheduled after returning, so it doesn't delay the caller, and failures go to `onSettleError`.
+ * unpaid, then runs `call` and captures the voucher, or releases it for a failed or free call. The capture or
+ * release is kept in the outbox before this returns, and sent from there.
  */
 export async function settlePaidCall(
     operatorClient: OperatorClient,
+    outbox: SettlementOutbox,
     voucher: PaymentVoucher | InferencePaymentVoucher,
     call: () => Promise<InvokeResult>,
-    onSettleError: (error: unknown, message: string) => void,
 ): Promise<InvokeResult | PaymentRefusal> {
     const authorization = await operatorClient.authorize(voucher);
     if (!authorization.ok) {
         return { refused: { status: authorization.status, error: authorization.error } };
     }
 
-    let capture: PaymentSubmission | undefined;
-    const settle = () => setTimeout(async () => {
-        try {
-            if (capture) {
-                await operatorClient.capture(capture);
-            } else {
-                await operatorClient.release(voucher);
-            }
-        } catch (error) {
-            onSettleError(error, capture ? 'Failed to capture payment' : 'Failed to release payment');
-        }
-    }, 0);
-
     let result: InvokeResult;
     try {
         result = await call();
     } catch (error) {
-        settle();
+        await outbox.releasePayment(voucher);
         throw error;
     }
+    let capture: PaymentSubmission | undefined;
     if (!result.error && !isInferenceVoucher(voucher)) {
         capture = { voucher };
     } else if (!result.error && result.usage && isInferenceVoucher(voucher)) {
@@ -71,30 +62,10 @@ export async function settlePaidCall(
             capture = { voucher, usage };
         }
     }
-    settle();
+    if (capture) {
+        await outbox.capturePayment(capture);
+    } else {
+        await outbox.releasePayment(voucher);
+    }
     return result;
-}
-
-/**
- * Captures a billed run with the tokens it executed, or releases it, after the response: nothing waits on
- * settlement.
- */
-export function settleRunLater(
-    operatorClient: OperatorClient,
-    runId: string,
-    outcome: 'capture' | 'release',
-    tokens: number,
-    onSettleError: (error: unknown, message: string) => void,
-): void {
-    setTimeout(async () => {
-        try {
-            if (outcome === 'capture') {
-                await operatorClient.captureRun({ runId, tokens });
-            } else {
-                await operatorClient.releaseRun({ runId });
-            }
-        } catch (error) {
-            onSettleError(error, `Failed to ${outcome} run ${runId}`);
-        }
-    }, 0);
 }

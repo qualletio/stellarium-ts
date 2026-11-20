@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { authenticateNode } from '../auth/nodeAuth.js';
-import type { ContractRunAuthorizationRequest, EventMandateRequest, EventRunAuthorizationRequest, RunAuthorizationRequest } from '../runs/runService.js';
+import type { ContractRunAuthorizationRequest, EventMandateRequest, EventRunAuthorizationRequest, RunAuthorizationRequest, RunCaptureRequest } from '../runs/runService.js';
+import type { RunReceipt } from '../verification/replay.js';
 import type { RouteOptions } from './index.js';
 
 const runId = { type: 'string', format: 'uuid' } as const;
@@ -18,7 +19,7 @@ const authorizeSchema = {
 const captureSchema = {
     type: 'object',
     required: ['runId', 'tokens'],
-    properties: { runId, tokens: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER } },
+    properties: { runId, tokens: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, failed: { type: 'boolean' } },
 } as const;
 
 const releaseSchema = { type: 'object', required: ['runId'], properties: { runId } } as const;
@@ -46,6 +47,12 @@ const contractAuthorizeSchema = {
             },
         },
         source: { type: 'string', maxLength: 100_000 },
+        senderContract: {
+            type: 'object',
+            required: ['name', 'version'],
+            properties: { name: { type: 'string', minLength: 1, maxLength: 512 }, version: { type: 'string', minLength: 1, maxLength: 64 } },
+            additionalProperties: false,
+        },
     },
 } as const;
 
@@ -92,7 +99,27 @@ const runRoutes: FastifyPluginAsync<RouteOptions> = async function (fastify, { s
         return service.runs.authorizeEvent(request.nodePublicKey!, request.body);
     });
 
-    fastify.post<{ Body: { runId: string, tokens: number } }>('/runs/capture', { schema: { body: captureSchema } }, async (request) => {
+    // A node opens a run for a script it runs for itself before it moves money (docs/money.md, Settlement).
+    fastify.post<{ Body: { runId: string, now?: number } }>('/runs/open', {
+        schema: { body: { type: 'object', required: ['runId'], properties: { runId, now: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER } } } },
+    }, async (request) => {
+        return service.runs.open(request.nodePublicKey!, request.body);
+    });
+
+    // Receipts of the contract runs in a run's tree, which the operator replays (docs/money.md, Verified runs).
+    fastify.post<{ Body: { runId: string, receipts: RunReceipt[], signature: string } }>('/runs/receipts', {
+        schema: { body: { type: 'object', required: ['runId', 'receipts', 'signature'], properties: { runId, receipts: { type: 'array', maxItems: 256, items: { type: 'object' } }, signature: { type: 'string', minLength: 1, maxLength: 255 } } } },
+        bodyLimit: 8 * 1024 * 1024,
+    }, async (request) => {
+        return service.verification.submit(request.nodePublicKey!, request.body);
+    });
+
+    // Whether the money changes in a run's tree were applied, so the node saves or discards pending state.
+    fastify.post<{ Body: { runId: string } }>('/runs/outcome', { schema: { body: releaseSchema } }, async (request) => {
+        return service.money.outcome(request.nodePublicKey!, request.body.runId);
+    });
+
+    fastify.post<{ Body: RunCaptureRequest }>('/runs/capture', { schema: { body: captureSchema } }, async (request) => {
         return service.runs.capture(request.nodePublicKey!, request.body);
     });
 

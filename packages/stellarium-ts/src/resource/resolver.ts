@@ -10,7 +10,8 @@ import { ResourceRepository } from "./repository.js";
 export class CombinationResourceResolver implements ResourceResolver {
     constructor(private readonly resourceRepository: ResourceRepository) {}
 
-    async resolve(key: string): Promise<Resource | undefined> {
-        return await this.resourceRepository.getResource(key);
+    /** With `version`, the script pinned it: `path.Name@version`, which only a contract has. */
+    async resolve(key: string, version?: string): Promise<Resource | undefined> {
+        return await this.resourceRepository.getResource(key, version);
     }
 }

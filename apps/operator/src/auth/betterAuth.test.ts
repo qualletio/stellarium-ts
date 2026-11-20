@@ -68,6 +68,27 @@ describe('Better Auth', () => {
 
     const org = (cookie: string) => fastify.inject({ method: 'GET', url: '/v1/org', headers: { cookie } });
 
+    test('a ban pauses its owner, who can\'t start a new organization, and tells the owners of their others', async () => {
+        const ada = await signUp('ada@example.com');
+        expect((await call('POST', '/organization/create', { body: { name: 'Acme', slug: 'acme' }, cookie: ada })).statusCode).toBe(200);
+        const acme = (await org(ada)).json().id as string;
+        // Ada is also a member of Grace's organization.
+        const grace = await signUp('grace@example.com');
+        const created = await call('POST', '/organization/create', { body: { name: 'Hopper', slug: 'hopper' }, cookie: grace });
+        const invited = await call('POST', '/organization/invite-member', { body: { email: 'ada@example.com', role: 'member', organizationId: created.json().id }, cookie: grace });
+        expect(invited.statusCode).toBe(200);
+        expect((await call('POST', '/organization/accept-invitation', { body: { invitationId: invited.json().id }, cookie: ada })).statusCode).toBe(200);
+
+        await service.governance.propose('alice', 'ban', { organizationId: acme }, 'Proven fraud');
+        await service.governance.approve((await service.governance.actions('proposed'))[0]!.id, 'bob');
+        expect((await call('POST', '/organization/create', { body: { name: 'Acme Two', slug: 'acme-two' }, cookie: ada })).statusCode).toBe(403);
+        expect(mailer.sent.find((email) => email.to === 'grace@example.com' && email.subject.includes('banned'))).toBeDefined();
+
+        // Once the ban is lifted, the account is too.
+        await service.governance.propose('alice', 'lift_ban', { organizationId: acme }, 'Overturned');
+        expect((await call('POST', '/organization/create', { body: { name: 'Acme Two', slug: 'acme-two' }, cookie: ada })).statusCode).toBe(200);
+    });
+
     test('a verified user creates an organization and becomes its owner', async () => {
         const cookie = await signUp('ada@example.com');
         expect((await org(cookie)).statusCode).toBe(403);

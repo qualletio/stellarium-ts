@@ -6,7 +6,8 @@ import { looksLikeJwt, type RunTokenClaims } from './client/runTokens.js';
 import { Peer } from './peer/repository.js';
 import { type ContractPaymentVoucher, contractVoucherPayload, type InferencePaymentVoucher, inferenceVoucherPayload, invocationHash, isContractVoucher, isInferenceVoucher, MAX_CONTRACT_DEPTH, PaymentVoucher, paymentVoucherPayload } from './resource/invoker.js';
 import { estimateInputTokens, inferenceCharge, isInferenceFunction, isInferenceManifest, parseMaxTokens } from './resource/inference.js';
-import { type InvokeResult, settlePaidCall, settleRunLater } from './resource/settlement.js';
+import { type InvokeResult, settlePaidCall } from './resource/settlement.js';
+import { MoneyRun } from './money/account.js';
 import { isContractFunction, isContractManifest, StellariumResource, StellariumResourceFunction, StellariumResourceFunctionPaymentManifest } from './resource/repository.js';
 import type { ContractCaller } from './contract/service.js';
 import type { StoredContract } from './contract/repository.js';
@@ -56,11 +57,19 @@ interface ResourceCallRequest {
 }
 
 interface ResourceRunRequest extends ResourceCallRequest {
+    /** For a contract: the version the caller's script pinned, which the call runs. Absent means the latest. */
+    resourceVersion?: string;
     paymentVoucher?: PaymentVoucher | InferencePaymentVoucher | ContractPaymentVoucher;
     /** For a contract: how many contracts deep the call is, so contracts calling each other across nodes stop. */
     contractDepth?: number;
     /** For a contract called from a script that an event started: the chain of events, so it can't call back into it. */
     eventLineage?: EventLineage;
+    /** For a contract: money the caller attached, which it staged on the operator under this id. */
+    attachmentId?: string;
+    /** For a contract called by a contract: the calling one, whose owner the operator vouches for as `sender`. */
+    senderContract?: { name: string, version: string };
+    /** The call's place in the caller's run, for a signed answer: a tag only this provider sees, and an index. */
+    attestation?: { runTag: string, callIndex: number };
 }
 
 interface RunRequest {
@@ -206,7 +215,21 @@ const resourceRunRequestSchema = {
         ...resourceCallProperties,
         // Inference and contract vouchers have their own `kind`, and no `amount`, so at most one shape matches.
         paymentVoucher: { oneOf: [fixedVoucherSchema, inferenceVoucherSchema, contractVoucherSchema] },
+        resourceVersion: { type: 'string', minLength: 1, maxLength: 64 },
         contractDepth: { type: 'integer', minimum: 1 },
+        attachmentId: { type: 'string', format: 'uuid' },
+        attestation: {
+            type: 'object',
+            required: ['runTag', 'callIndex'],
+            properties: { runTag: { type: 'string', minLength: 1, maxLength: 128 }, callIndex: { type: 'integer', minimum: 0, maximum: 1_000_000 } },
+            additionalProperties: false,
+        },
+        senderContract: {
+            type: 'object',
+            required: ['name', 'version'],
+            properties: { name: { type: 'string', minLength: 1, maxLength: 512 }, version: { type: 'string', minLength: 1, maxLength: 64 } },
+            additionalProperties: false,
+        },
         eventLineage: {
             type: 'object',
             required: ['depth', 'types', 'contracts'],
@@ -320,7 +343,7 @@ function secretsEqual(a: string, b: string): boolean {
  * Whether its `maxAmount` covers the call is checked separately, against the function's estimator.
  */
 function isValidPaymentVoucher(voucher: PaymentVoucher | InferencePaymentVoucher, resourceFunction: StellariumResourceFunction, manifest: StellariumResourceFunctionPaymentManifest, request: ResourceRunRequest, organizationId: string | undefined): boolean {
-    const expectedHash = invocationHash(request.resourcePath, request.resourceName, request.functionName, request.parameters);
+    const expectedHash = invocationHash(request.resourcePath, request.resourceName, request.functionName, request.parameters, request.resourceVersion);
     if (voucher.invocationHash !== expectedHash) {
         return false;
     }
@@ -358,7 +381,7 @@ function isValidPaymentVoucher(voucher: PaymentVoucher | InferencePaymentVoucher
  * this node's organization, and agrees to at least this node's current price.
  */
 function isValidContractVoucher(voucher: ContractPaymentVoucher, request: ResourceRunRequest, organizationId: string | undefined, price: number): boolean {
-    const expectedHash = invocationHash(request.resourcePath, request.resourceName, request.functionName, request.parameters);
+    const expectedHash = invocationHash(request.resourcePath, request.resourceName, request.functionName, request.parameters, request.resourceVersion);
     if (voucher.invocationHash !== expectedHash || !organizationId || voucher.recipientOrganizationId !== organizationId) {
         return false;
     }
@@ -477,6 +500,8 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             resources: resources.map((resource: StellariumResource) => ({
                 path: resource.path,
                 name: resource.name,
+                // A contract's latest version, which a contract calling it must pin.
+                version: resource.version,
                 website: resource.website,
                 description: resource.description,
                 functions: resource.functions.map((fn: StellariumResourceFunction) => ({
@@ -557,22 +582,38 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         const caller = request.runCaller!;
         const billed = caller.kind === 'client' && caller.organizationId !== options.service.config.organizationId;
         const runId = billed ? randomUUID() : undefined;
+        let stamp: number | undefined;
         if (billed) {
             const authorization = await options.service.operatorClient.authorizeRun({ token: caller.token, runId: runId!, source: runRequest.source });
             if (!authorization.ok) {
                 return reply.status(authorization.status).send({ error: authorization.error });
             }
+            stamp = authorization.now;
         }
         // The run token's claims, or null for an API-key run, so the name is always reserved.
         const jwt = caller.kind === 'client' ? caller.payload : null;
         // Contracts the script calls on this node see who pays for the run: the client's organization, or this node's own.
         const { organizationId, publicKey } = options.service.config;
         const runFor = { org: caller.kind === 'client' ? caller.organizationId : organizationId ?? null, node: publicKey };
-        const resourceInvoker: ResourceInvoker = options.service.resourceInvoker.forScript({ runId, jwt, depth: 0, caller: runFor });
+        // The run money moves in: a billed run's own, or else a free one, opened when the script or a contract it
+        // calls here first moves money, so everything the script starts settles together (docs/money.md, Settlement).
+        // The tree's time: the operator's stamp for a billed run, or else when this node started the script, which it
+        // tells the operator if it opens a free run.
+        const now = stamp ?? Date.now();
+        const moneyRun = runId !== undefined
+            ? new MoneyRun(runId)
+            : new MoneyRun(undefined, (id) => options.service.operatorClient.openRun({ runId: id, now }));
+        const resourceInvoker: ResourceInvoker = options.service.resourceInvoker.forScript({ runId, jwt, depth: 0, caller: runFor, moneyRun, now });
 
-        // Nothing waits on settlement, so it doesn't delay the response.
-        const settle = (outcome: 'capture' | 'release', tokens: number) => runId
-            && settleRunLater(options.service.operatorClient, runId, outcome, tokens, (error, message) => fastify.log.error(error, message));
+        // Kept in the outbox before the response, and sent from there. A script that fails is charged for what it
+        // executed, and the money changes in its run's tree are dropped.
+        const settle = async (outcome: 'capture' | 'release', tokens: number, failed = false) => {
+            const settled = runId ?? moneyRun.opened;
+            if (!settled) return;
+            const { outbox } = options.service;
+            await (outcome === 'capture' ? outbox.captureRun(settled, tokens, failed) : outbox.releaseRun(settled))
+                .catch(error => fastify.log.error(error, `Failed to keep the ${outcome} of run ${settled}`));
+        };
 
         // The script's events are published as its organization's, which only this node's own organization may.
         const emitter = options.service.eventService.emitter({ scriptOwner: runFor.org });
@@ -586,8 +627,15 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
                 events: emitter.resolver,
                 structs: options.service.structService.resolver,
             });
-            settle('capture', meter.tokens);
+            // Money the script couldn't attach, or a contract that failed after moving money in the script's run,
+            // fails the script, so nothing moves because a payment was refused.
+            const moneyFailure = moneyRun.failure ?? moneyRun.poisoned;
+            if (moneyFailure !== undefined) {
+                await settle('capture', meter.tokens, true);
+                return reply.status(422).send({ error: 'Script failed', details: moneyFailure, usage: { tokens: meter.tokens } });
+            }
             const unpublishable = emitter.check(result.events);
+            await settle('capture', meter.tokens, unpublishable !== undefined);
             if (unpublishable) {
                 return reply.status(422).send({ error: 'Script failed', details: `${unpublishable}, so no events were published`, usage: { tokens: meter.tokens } });
             }
@@ -596,10 +644,10 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         } catch (error) {
             // A script that fails at runtime is the caller's mistake, and is charged for what it executed.
             if (error instanceof RequestScriptError) {
-                settle('capture', meter.tokens);
+                await settle('capture', meter.tokens, true);
                 return reply.status(422).send({ error: 'Script failed', details: error.message, usage: { tokens: meter.tokens } });
             }
-            settle('release', meter.tokens);
+            await settle('release', meter.tokens);
             fastify.log.error(error);
             return reply.status(500).send({ error: 'Internal server error' });
         }
@@ -609,10 +657,11 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
      * Finds the local function a call names and checks its parameters and, for a restricted function,
      * its authorization. Sends the refusal and returns undefined if a check fails.
      */
-    async function checkCall(resourceRequest: ResourceCallRequest, reply: FastifyReply): Promise<{ resource: StellariumResource, resourceFunction: StellariumResourceFunction } | undefined> {
-        const resource = await options.service.resourceRepository.getInternalResource(resourceRequest.resourcePath, resourceRequest.resourceName);
+    /** With `version`, the call is to that version of a contract, whose parameters it is checked against. */
+    async function checkCall(resourceRequest: ResourceCallRequest, reply: FastifyReply, version?: string): Promise<{ resource: StellariumResource, resourceFunction: StellariumResourceFunction } | undefined> {
+        const resource = await options.service.resourceRepository.getInternalResource(resourceRequest.resourcePath, resourceRequest.resourceName, version);
         if (!resource) {
-            reply.status(400).send({ error: 'Resource not found' });
+            reply.status(400).send({ error: version === undefined ? 'Resource not found' : `Resource not found: this node has no ${resourceRequest.resourcePath}.${resourceRequest.resourceName}@${version} to call` });
             return undefined;
         }
 
@@ -686,9 +735,41 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         config: { rateLimit: options.rateLimit ?? { max: 100, timeWindow: '1 minute' } },
     }, async (request, reply) => {
         const resourceRequest = request.body as ResourceRunRequest;
-        const paymentVoucher = resourceRequest.paymentVoucher;
+        // A call that names its place in a run gets a signed answer, the same one each time it's asked
+        // (docs/money.md, Signed responses), so a host can neither make one up nor call again for another.
+        const attestation = resourceRequest.attestation;
+        const hash = invocationHash(resourceRequest.resourcePath, resourceRequest.resourceName, resourceRequest.functionName, resourceRequest.parameters, resourceRequest.resourceVersion);
+        if (attestation) {
+            const served = await options.service.servedCalls.get(attestation.runTag, attestation.callIndex);
+            if (served) {
+                if (served.invocationHash !== hash) {
+                    return reply.status(409).send({ error: 'This call index of the run was already answered for another call' });
+                }
+                return served.answer;
+            }
+        }
+        const result = await serveResource(resourceRequest, reply);
+        if (result === reply || !attestation) {
+            return result;
+        }
+        return options.service.servedCalls.answer(attestation.runTag, attestation.callIndex, hash, result as InvokeResult);
+    });
 
-        const call = await checkCall(resourceRequest, reply);
+    /** Whether this node answered a call, by its run tag and index: what the operator asks when a host says a call failed. */
+    fastify.get('/served-calls/:runTag/:callIndex', async (request, reply) => {
+        const { runTag, callIndex } = request.params as { runTag: string, callIndex: string };
+        const served = await options.service.servedCalls.get(runTag, Number(callIndex));
+        if (!served) {
+            return reply.status(404).send({ error: 'No call with that tag and index was answered' });
+        }
+        return { responseHash: served.responseHash, signedAt: served.answer.attestation.signedAt };
+    });
+
+    async function serveResource(resourceRequest: ResourceRunRequest, reply: FastifyReply): Promise<unknown> {
+        const paymentVoucher = resourceRequest.paymentVoucher;
+        const version = resourceRequest.resourceVersion;
+
+        const call = await checkCall(resourceRequest, reply, version);
         if (!call) {
             return reply;
         }
@@ -696,7 +777,9 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
 
         // A contract is always paid for with a contract voucher, since its paid calls are paid by its caller.
         if (isContractFunction(resourceFunction)) {
-            const contract = await options.service.contractRepository.latest(resource.path, resource.name);
+            const contract = version === undefined
+                ? await options.service.contractRepository.latest(resource.path, resource.name)
+                : await options.service.contractRepository.callable(resource.path, resource.name, version);
             if (!contract) {
                 return reply.status(400).send({ error: 'Resource not found' });
             }
@@ -714,7 +797,7 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
             if (depth > MAX_CONTRACT_DEPTH) {
                 return reply.status(400).send({ error: `Contracts may call each other at most ${MAX_CONTRACT_DEPTH} deep` });
             }
-            const result = await options.service.contractService.serve(paymentVoucher, contract, resourceRequest.parameters, depth, resourceRequest.eventLineage);
+            const result = await options.service.contractService.serve(paymentVoucher, contract, resourceRequest.parameters, depth, resourceRequest.eventLineage, resourceRequest.attachmentId, resourceRequest.senderContract);
             if ('refused' in result) {
                 return reply.status(result.refused.status).send({ error: result.refused.error });
             }
@@ -760,12 +843,12 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
         if (!paymentManifest || !paymentVoucher) {
             return invoke();
         }
-        const result = await settlePaidCall(options.service.operatorClient, paymentVoucher, invoke, (error, message) => fastify.log.error(error, message));
+        const result = await settlePaidCall(options.service.operatorClient, options.service.outbox, paymentVoucher, invoke);
         if ('refused' in result) {
             return reply.status(result.refused.status).send({ error: result.refused.error });
         }
         return result;
-    });
+    }
 
     // End Run Routes
 
@@ -794,6 +877,22 @@ const routes: FastifyPluginAsync<RouteOptions> = async (fastify, options) => {
     fastify.get('/contracts', { schema: { querystring: pageQuerySchema } }, async (request) => {
         const { items, nextOffset } = await getPage(request.query as PageQuery, (offset, limit) => options.service.contractRepository.list(offset, limit));
         return { contracts: items.map(contractView), nextOffset };
+    });
+
+    /**
+     * One version of a contract callers can call, `path.Name@version`. Peers announce only a contract's latest
+     * version, so a node whose script pins an older one asks for it here to learn its parameters.
+     */
+    fastify.get('/contracts/:ref', async (request, reply) => {
+        const ref = contractRef((request.params as { ref: string }).ref);
+        if (!ref || ref.version === undefined) {
+            return reply.status(400).send({ error: 'Name a contract version as path.Name@version' });
+        }
+        const contract = await options.service.contractRepository.callable(ref.path, ref.name, ref.version);
+        if (!contract) {
+            return reply.status(404).send({ error: `No contract ${ref.path}.${ref.name}@${ref.version} to call` });
+        }
+        return contractView(contract);
     });
 
     /**

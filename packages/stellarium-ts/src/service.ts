@@ -6,6 +6,9 @@ import { CombinationResourceResolver } from "./resource/resolver.js";
 import { ResourceRepository, type StellariumResource } from "./resource/repository.js";
 import { CombinationResourceInvoker } from "./resource/invoker.js";
 import { OperatorClient } from "./client/operatorClient.js";
+import { AccountService } from "./money/account.js";
+import { SettlementOutbox } from "./resource/outbox.js";
+import { ServedCallLog } from "./resource/served.js";
 import { RunTokenVerifier } from "./client/runTokens.js";
 import { GrantRepository } from "./grant/repository.js";
 import { type ApproveGrant, GrantService } from "./grant/service.js";
@@ -75,6 +78,10 @@ export interface Service {
     resourceResolver: ResourceResolver;
     resourceInvoker: CombinationResourceInvoker;
     operatorClient: OperatorClient;
+    /** Captures and releases owed to the operator, until it takes them. */
+    outbox: SettlementOutbox;
+    /** The signed answers this node gave to calls in other nodes' runs. */
+    servedCalls: ServedCallLog;
     grantService: GrantService;
     contractRepository: ContractRepository;
     contractService: ContractService;
@@ -107,14 +114,20 @@ export function createService(db: NodeDatabase, resources: StellariumResource[],
 
     const operatorClient = new OperatorClient(config.operatorUrl, config.publicKey, config.privateKey);
 
+    const outbox = new SettlementOutbox(db, operatorClient);
     const resourceInvoker = new CombinationResourceInvoker(resourceRepository, config.costLimitMicroUsd, config.publicKey, config.privateKey, grantService, config.inferenceCostLimitMicroUsd, {
         operatorClient,
+        outbox,
         organizationId: config.organizationId,
     });
 
     const contractStateRepository = new ContractStateRepository(db);
-    const contractService = new ContractService(contractRepository, contractStateRepository, resourceRepository, resourceResolver, resourceInvoker, operatorClient, config);
+    const contractService = new ContractService(contractRepository, contractStateRepository, resourceRepository, resourceResolver, resourceInvoker, operatorClient, config, outbox);
     resourceInvoker.contracts = { costLimitMicroUsd: config.contractCostLimitMicroUsd ?? config.costLimitMicroUsd, host: contractService };
+    // Contract balances are kept by the operator, so a node without one can't serve sh.stellarium.money.Account.
+    if (config.operatorUrl) {
+        resourceInvoker.money = new AccountService(operatorClient);
+    }
 
     const runTokenVerifier = config.operatorUrl ? new RunTokenVerifier(config.operatorUrl, config.publicKey, options.runTokenKeys) : undefined;
     const eventService = new EventService(new EventRepository(db), config, runTokenVerifier);
@@ -122,15 +135,20 @@ export function createService(db: NodeDatabase, resources: StellariumResource[],
     eventService.contracts = contractService;
     const structService = new StructService(new StructRepository(db), config, runTokenVerifier);
     contractService.structs = structService;
+    const peerRepository = new PeerRepository(db);
+    contractService.peerKey = async (baseUrl) => (await peerRepository.getPeerByBaseUrl(baseUrl))?.publicKey;
+    resourceInvoker.peerKey = contractService.peerKey;
     eventService.structs = structService;
 
     return {
         config,
-        peerRepository: new PeerRepository(db),
+        peerRepository,
         resourceRepository,
         resourceResolver,
         resourceInvoker,
         operatorClient,
+        outbox,
+        servedCalls: new ServedCallLog(db, config.publicKey, config.privateKey),
         grantService,
         contractRepository,
         contractService,

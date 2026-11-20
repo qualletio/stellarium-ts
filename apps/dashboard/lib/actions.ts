@@ -122,12 +122,43 @@ export async function createClientAction(_state: ActionState, formData: FormData
 export async function updateClientLimitsAction(_state: ActionState, formData: FormData): Promise<ActionState> {
   const maxRunCost = microUsd(formData.get('maxRunCost'));
   const monthlyCap = microUsd(formData.get('monthlyCap'));
+  const maxRunValue = microUsd(formData.get('maxRunValue'));
   if (maxRunCost === null || !maxRunCost) return { error: 'Enter a maximum run cost in dollars, such as 1.00.' };
   if (monthlyCap === null || monthlyCap === 0) return { error: 'Enter a monthly cap in dollars, or leave it empty for none.' };
+  if (maxRunValue === null) return { error: 'Enter the most a run may attach to contracts in dollars, or 0 for nothing.' };
   const result = await attempt(() => api.updateClientLimits(String(formData.get('id')), {
     maxRunCostMicroUsd: maxRunCost,
     monthlyCapMicroUsd: monthlyCap ?? null,
+    maxRunValueMicroUsd: maxRunValue ?? 0,
   }));
+  if ('error' in result) return result;
+  refresh();
+  return { saved: true };
+}
+
+/** The owner's emergency stop for a contract version: its funding goes back to its funders, and it refuses money from then on. */
+export async function refundAllAction(_state: ActionState, formData: FormData): Promise<ActionState> {
+  const result = await attempt(() => api.refundAll(Number(formData.get('id'))));
+  if ('error' in result) return result;
+  refresh();
+  return { saved: true };
+}
+
+/** Sets where the operator posts the organization's notifications, or with an empty URL, stops posting them. */
+export async function setWebhookAction(_state: ActionState, formData: FormData): Promise<ActionState> {
+  const url = String(formData.get('url') ?? '').trim();
+  if (url && !url.startsWith('https://')) return { error: 'The webhook URL must start with https://.' };
+  const result = await attempt(() => api.setWebhook(url || null));
+  if ('error' in result) return result;
+  refresh();
+  return { saved: true };
+}
+
+/** The owner's one appeal of the organization's ban. */
+export async function appealBanAction(_state: ActionState, formData: FormData): Promise<ActionState> {
+  const statement = String(formData.get('statement') ?? '').trim();
+  if (!statement) return { error: 'Explain why the ban should be lifted.' };
+  const result = await attempt(() => api.appealBan(statement));
   if ('error' in result) return result;
   refresh();
   return { saved: true };

@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import { isMoneyPath } from "./money/account.js";
+import { DEFAULT_OUTBOX_WORKER_INTERVAL_MS } from "./resource/outbox.js";
 import { FastifyInstance } from 'fastify';
 import { DEFAULT_DATABASE_PATH, isPostgresUrl, openDatabase } from './db/db.js';
 import { assertSchemaName } from './db/postgres.js';
@@ -94,6 +96,8 @@ export interface StellariumNodeOptions {
     maxEventDataBytes?: number;
     /** How often the event queues are checked besides when an event is queued. Defaults to five seconds. */
     eventWorkerIntervalMs?: number;
+    /** How often unsent captures and releases are resent to the operator. Defaults to 5 seconds. */
+    outboxWorkerIntervalMs?: number;
     /**
      * Structs defined with `defineStruct`, declared as the node's organization's when it starts, besides those
      * passed to `registerStruct`. A node with structs waits for its session with the operator before it serves.
@@ -214,6 +218,9 @@ export class StellariumNode {
     private service?: Service;
 
     async register(resource: StellariumResource): Promise<void> {
+        if (isMoneyPath(resource.path)) {
+            throw new Error(`${resource.path} is reserved for stellarium-ts's built-in resources`);
+        }
         this.resources.push(resource);
     }
 
@@ -327,12 +334,27 @@ export class StellariumNode {
 
         // Events are delivered and consumed in the background, retried until they succeed or expire.
         const eventWorkers = service.eventService.startWorkers(options.eventWorkerIntervalMs ?? DEFAULT_EVENT_WORKER_INTERVAL_MS);
+        // Captures and releases the operator hasn't taken yet, including any from before a restart, are resent.
+        const outboxWorker = service.outbox.startWorker(options.outboxWorkerIntervalMs ?? DEFAULT_OUTBOX_WORKER_INTERVAL_MS);
+        // Answers are remembered past the operator's verification, then forgotten.
+        const pruneServedCalls = () => void service.servedCalls.prune().catch(error => fastify.log.error(error, 'Failed to prune served calls'));
+        pruneServedCalls();
+        const servedCallPruner = setInterval(pruneServedCalls, 60 * 60 * 1000);
+        servedCallPruner.unref();
+        // Contract state that was waiting for its money when the node stopped holds its scopes again, and waits on.
+        const resumed = await service.contractService.pending.resume();
+        if (resumed > 0) {
+            fastify.log.info({ resumed }, 'Waiting for the money of contract chains whose state is pending');
+        }
 
         fastify.addHook('onClose', async () => {
             closed = true;
             clearTimeout(refresher);
             clearTimeout(sessionRefresher);
             eventWorkers.stop();
+            outboxWorker.stop();
+            clearInterval(servedCallPruner);
+            service.contractService.pending.close();
         });
 
         await fastify.register(routes, { prefix: '/v1', service, rateLimit: options.rateLimit });

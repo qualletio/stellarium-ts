@@ -2,17 +2,42 @@ import type { Metadata } from 'next';
 import { InvitationActions, InviteForm, LeaveButton, MemberActions, RenameForm } from '@/components/OrganizationSettings';
 import { StatusBadge } from '@/components/StatusBadge';
 import ui from '@/components/ui.module.css';
-import { getFullOrganization, getOrganization, getSession } from '@/lib/api';
-import { formatDate } from '@/lib/format';
+import { WebhookForm } from '@/components/WebhookForm';
+import { getFullOrganization, getOrganization, getSession, listNotifications, type Notification } from '@/lib/api';
+import { formatDate, formatDateTime, formatUsd } from '@/lib/format';
 
 export const metadata: Metadata = { title: 'Organization' };
 
 const ROLE_LABELS: Record<string, string> = { owner: 'Owner', admin: 'Admin', member: 'Member' };
+/** What a notification says, in a sentence. */
+function describeNotification(notification: Notification): string {
+  const details = notification.details;
+  const amount = typeof details.amountMicroUsd === 'number' ? formatUsd(details.amountMicroUsd) : undefined;
+  switch (notification.kind) {
+    case 'funding_returned': {
+      const why: Record<string, string> = {
+        expiry_refund: 'its time limit passed',
+        refund_all: 'its owner refunded everyone',
+        fraud_reversal: 'fraud was found in a run that spent it',
+        closed: 'its host closed',
+      };
+      const from = typeof details.contract === 'string' ? ` from ${details.contract}` : '';
+      return `${amount ?? 'Funding'} came back to your balance${from} because ${why[String(details.reason)] ?? String(details.reason).replace(/_/g, ' ')}.`;
+    }
+    case 'dispute_recovered':
+      return `${amount ?? 'Money'} was taken from your contract funding to cover a card dispute or refund.`;
+    case 'organization_closed':
+      return `The organization was closed${typeof details.refundedMicroUsd === 'number' ? `, and ${formatUsd(details.refundedMicroUsd)} of contract funding came back first` : ''}.`;
+    default:
+      return notification.kind.replace(/_/g, ' ');
+  }
+}
+
 const roleLabel = (role: string | null) => (role ?? 'member').split(',').map((name) => ROLE_LABELS[name.trim()] ?? name).join(', ');
 
 /** The organization's name, members and invitations. Owners and admins move money and manage nodes; members view. */
 export default async function SettingsPage() {
-  const [organization, full, session] = await Promise.all([getOrganization(), getFullOrganization(), getSession()]);
+  const [organization, full, session, notifications] = await Promise.all([getOrganization(), getFullOrganization(), getSession(), listNotifications()]);
   const admin = organization.admin;
   const members = full?.members ?? [];
   const invitations = (full?.invitations ?? []).filter((invitation) => invitation.status === 'pending');
@@ -75,6 +100,58 @@ export default async function SettingsPage() {
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section className={ui.section}>
+        <div className={ui.sectionHead}>
+          <div>
+            <h2 className={ui.sectionTitle}>Verification</h2>
+            <p className={ui.description}>
+              Until we verify who is behind an organization, the money it can attach to contracts each month is limited. To get verified, contact support.
+            </p>
+          </div>
+        </div>
+        <p>
+          <StatusBadge status={organization.identityVerified ? 'verified' : 'pending'} label={organization.identityVerified ? 'verified' : 'not verified'} />{' '}
+          {organization.identityVerified ? 'Identity verified.' : 'Not verified yet.'}
+        </p>
+      </section>
+
+      <section className={ui.section}>
+        <div className={ui.sectionHead}>
+          <div>
+            <h2 className={ui.sectionTitle}>Notifications</h2>
+            <p className={ui.description}>
+              We email your owners when contract funding comes back to you or is taken for a dispute. We can also post each notification to
+              a webhook, signed with the operator&apos;s key in the <code>Stellarium-Signature</code> header.
+            </p>
+          </div>
+        </div>
+        {admin ? <WebhookForm url={organization.webhookUrl} /> : <p>{organization.webhookUrl ?? 'No webhook.'}</p>}
+        {notifications.length === 0 ? <p className={`${ui.empty} ${ui.spacedAbove}`}>No notifications yet.</p> : (
+          <div className={`${ui.tableWrap} ${ui.spacedAbove}`}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>What happened</th>
+                  {organization.webhookUrl && <th>Webhook</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {notifications.map((notification) => (
+                  <tr key={notification.id}>
+                    <td>{formatDateTime(notification.createdAt)}</td>
+                    <td>{describeNotification(notification)}</td>
+                    {organization.webhookUrl && (
+                      <td>{notification.webhookDeliveredAt ? 'Delivered' : notification.webhookAttempts > 0 ? `Retrying (${notification.webhookAttempts} tries)` : 'Waiting'}</td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <section className={ui.section}>
