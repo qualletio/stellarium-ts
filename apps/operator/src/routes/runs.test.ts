@@ -126,7 +126,7 @@ describe('API client and run routes', () => {
         expect(mandateId).toMatch(/^mnd_/);
 
         const runId = crypto.randomUUID();
-        const authorized = await post('/v1/runs/event/authorize', { mandateId, runId, source: 'contract com.example.OnGreeted consumes com.example.Greeted {\n  var x = 1\n}' });
+        const authorized = await post('/v1/runs/event/authorize', { mandateId, runId, source: 'contract com.example.OnGreeted consumes com.example.Greeted {\n  fn on() {\n    var x = 1\n  }\n}' });
         expect(authorized.statusCode).toBe(200);
         expect(authorized.json()).toMatchObject({ status: 'held', maxTokens: expect.any(Number) });
         expect((await post('/v1/runs/capture', { runId, tokens: 2 })).json()).toEqual({ status: 'captured', amountMicroUsd: 2 });

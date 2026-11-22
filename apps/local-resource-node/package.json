@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "fastify": "^5.12.5",
-    "requestscript": "^1.0.5",
+    "requestscript": "2.0.0",
     "stellarium-ts": "workspace:*"
   }
 }

@@ -10,6 +10,8 @@ export interface RunReceipt {
     /** What the run's calls' tags were made from: each provider's is `hashData({ nonce, provider })`. */
     nonce: string;
     inputs: {
+        /** The entrypoint the run ran: one of the contract's `pub fn`s, or an event contract's `on`. */
+        function: string;
         parameters: Record<string, unknown>;
         /** The money attached to the call, as the operator answered for it, and the attachment it read. */
         payment: (AttachmentRead & { attachmentId: string, money: MoneyCallRef }) | null;

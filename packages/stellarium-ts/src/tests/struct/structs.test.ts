@@ -142,7 +142,7 @@ describe.each(DIALECTS)("structs (%s)", (dialect) => {
             ["no version", "struct com.example.Address(street: string)", 400, "must declare its version"],
             ["no path", "struct Address@1(street: string)", 400, "path"],
             ["an unversioned field", "struct com.example.A@1(b: com.example.B)", 400, "must name its version"],
-            ["a contract", "contract com.example.C: int32 {\n return 1\n}", 400, "struct declaration"],
+            ["a contract", "contract com.example.C {\n  pub fn run(): int32 {\n return 1\n}\n}", 400, "struct declaration"],
             ["an unknown struct", "struct com.example.A@1(b: com.example.B@1)", 400, "com.example.B@1, which this node doesn't know"],
             ["too many fields", `struct com.example.Wide@1(${Array.from({ length: MAX_STRUCT_FIELDS + 1 }, (_, i) => `f${i}: int32`).join(", ")})`, 400, `at most ${MAX_STRUCT_FIELDS} fields`],
             ["too much source", `struct com.example.Big@1(x: int32) ${"/".repeat(MAX_STRUCT_SOURCE_BYTES)}`, 413, "at most"],
@@ -208,7 +208,7 @@ describe.each(DIALECTS)("structs (%s)", (dialect) => {
         });
 
         test("deploys and calls a contract with struct types", async () => {
-            const ship = "contract com.example.Ship(customer: com.example.Customer@2): com.example.Address@1 {\n  return customer.addresses[0]\n}";
+            const ship = "contract com.example.Ship {\n  pub fn run(customer: com.example.Customer@2): com.example.Address@1 {\n  return customer.addresses[0]\n}\n}";
             expect((await post("/v1/contracts", { source: ship })).statusCode).toBe(201);
 
             const response = await run('const ship: com.example.Ship\nreturn ship.run(customer: { name: "Ana", addresses: [{ street: "Main", zip: 7 }] })');
@@ -217,7 +217,7 @@ describe.each(DIALECTS)("structs (%s)", (dialect) => {
         });
 
         test("refuses a contract or event type that names an unknown struct", async () => {
-            const contract = await post("/v1/contracts", { source: "contract com.example.Bad(a: com.example.Missing@1): int32 {\n  return 1\n}" });
+            const contract = await post("/v1/contracts", { source: "contract com.example.Bad {\n  pub fn run(a: com.example.Missing@1): int32 {\n  return 1\n}\n}" });
             expect(contract.statusCode).toBe(400);
             expect(contract.json().error).toContain("com.example.Missing@1, which this node doesn't know");
 

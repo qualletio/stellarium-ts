@@ -1,5 +1,5 @@
 import { and, desc, eq, isNull, lt } from "drizzle-orm";
-import { maxTokens, parseScript } from "requestscript";
+import { entrypoints, maxTokens, parseScript } from "requestscript";
 import { newId, verifySignature } from "../crypto.js";
 import type { Database, Transaction } from "../db/database.js";
 import { contractVersionsTable, eventMandatesTable, runsTable } from "../db/schema.js";
@@ -110,13 +110,20 @@ export function scriptMaxTokens(source: string): number {
     return script.declaration.kind === 'request' ? maxTokens(script) : 0;
 }
 
-/** The most tokens one call to the contract in `source` can execute. Throws 400 unless it is a contract. */
-export function contractMaxTokens(source: string): number {
+/**
+ * The most tokens one call to the contract in `source` can execute: a call to its function `functionName`, or
+ * without one, its costliest entrypoint (an event contract's only one, `on`). Throws 400 unless it is a
+ * contract, and 422 when it has no such entrypoint.
+ */
+export function contractMaxTokens(source: string, functionName?: string): number {
     const script = parse(source);
     if (script.declaration.kind !== 'contract') {
         throw new OperationError(400, 'Invalid script: a contract call needs the contract\'s source');
     }
-    return maxTokens(script);
+    if (functionName !== undefined && !entrypoints(script).some(fn => fn.name === functionName)) {
+        throw new OperationError(422, `The contract has no pub function ${functionName}`);
+    }
+    return maxTokens(script, functionName);
 }
 
 // Postgres unique_violation. Drizzle wraps the pg error in DrizzleQueryError.cause.
@@ -437,7 +444,7 @@ export class RunService {
         }
         // The node advertises the price it last learned, so a caller may have signed an older one. It never pays more than it signed.
         const price = Math.min(node.priceMicroUsdPerMillionTokens, voucher.priceMicroUsdPerMillionTokens);
-        const contractTokens = contractMaxTokens(request.source);
+        const contractTokens = contractMaxTokens(request.source, voucher.functionName);
         const tokenBudget = tokenCharge(contractTokens, price);
 
         try {

@@ -31,9 +31,10 @@ const contractAuthorizeSchema = {
         // Signed, so only checked enough for the service to read it. The invocationId becomes the run's id.
         voucher: {
             type: 'object',
-            required: ['kind', 'requestId', 'invocationId', 'maxAmount', 'priceMicroUsdPerMillionTokens', 'recipientOrganizationId', 'signature', 'expiresAt', 'invocationHash', 'publicKey'],
+            required: ['kind', 'requestId', 'invocationId', 'maxAmount', 'priceMicroUsdPerMillionTokens', 'recipientOrganizationId', 'signature', 'expiresAt', 'invocationHash', 'publicKey', 'functionName'],
             properties: {
                 kind: { const: 'contract' },
+                functionName: { type: 'string', minLength: 1, maxLength: 255 },
                 requestId: { type: 'string', minLength: 1, maxLength: 255 },
                 invocationId: runId,
                 maxAmount: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },

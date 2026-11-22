@@ -26,7 +26,7 @@ const vaultSource = 'request OpenVault {\n  const vault: com.example.Vault\n\n  
 const vault = { resourcePath: "com.example", resourceName: "Vault" };
 const HOUR = 3_600_000;
 const CONTRACT_PRICE = 1_000;
-const forecastContract = 'contract com.example.Forecast(city: string): string {\n  const weather: com.example.Weather\n  const temperature = weather.temperature(city: city)\n  return "${temperature.value} degrees"\n}';
+const forecastContract = 'contract com.example.Forecast {\n  pub fn run(city: string): string {\n  const weather: com.example.Weather\n  const temperature = weather.temperature(city: city)\n  return "${temperature.value} degrees"\n}\n}';
 const completeSource = 'request Complete {\n  const model: com.example.Model\n\n  return model.complete(prompt: "Hello world!", maxTokens: 10)\n}';
 
 function freePort(): Promise<number> {
@@ -230,8 +230,8 @@ describe("two-node network", { timeout: 15_000 }, () => {
             headers: { "Content-Type": "application/json", Authorization: "Bearer provider-admin" },
             body: JSON.stringify({ source }),
         });
-        await deployToProvider("contract com.example.Answer(base: int32): int32 {\n  return base + 1\n}");
-        await deployToProvider("contract com.example.Answer@2(base: int32, extra: int32): int32 {\n  return base + extra\n}");
+        await deployToProvider("contract com.example.Answer {\n  pub fn run(base: int32): int32 {\n  return base + 1\n}\n}");
+        await deployToProvider("contract com.example.Answer@2 {\n  pub fn run(base: int32, extra: int32): int32 {\n  return base + extra\n}\n}");
         await vi.waitFor(async () => expect((await getJson(`${caller.url}/v1/resources`)).resources).toContainEqual(expect.objectContaining({ name: "Answer", version: "2" })));
 
         const pinned = await run(caller.url, "request R {\n  const answer: com.example.Answer@1\n  return answer.run(base: 10)\n}");
@@ -242,10 +242,29 @@ describe("two-node network", { timeout: 15_000 }, () => {
         const deployed = await fetch(`${caller.url}/v1/contracts`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: "Bearer caller-key" },
-            body: JSON.stringify({ source: "contract com.example.Ask: int32 {\n  const answer: com.example.Answer\n  return answer.run(base: 1, extra: 1).value\n}" }),
+            body: JSON.stringify({ source: "contract com.example.Ask {\n  pub fn run(): int32 {\n  const answer: com.example.Answer\n  return answer.run(base: 1, extra: 1).value\n}\n}" }),
         });
         expect(deployed.status).toBe(400);
         expect(((await deployed.json()) as { error: string }).error).toContain("e.g. 'const ref: com.example.Answer@2'");
+    });
+
+    test("a pinned call reaches a function of the provider's older version that its latest no longer has", async () => {
+        const caller = await startCaller();
+        const deployToProvider = (source: string) => fetch(`${providerUrl}/v1/contracts`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: "Bearer provider-admin" },
+            body: JSON.stringify({ source }),
+        });
+        await deployToProvider("contract com.example.Menu {\n  pub fn legacy(): string {\n    return \"old\"\n  }\n  pub fn run(): string {\n    return \"one\"\n  }\n}");
+        await deployToProvider("contract com.example.Menu@2 {\n  pub fn run(): string {\n    return \"two\"\n  }\n}");
+        await vi.waitFor(async () => expect((await getJson(`${caller.url}/v1/resources`)).resources).toContainEqual(expect.objectContaining({ name: "Menu", version: "2" })));
+
+        const pinned = await run(caller.url, "request R {\n  const menu: com.example.Menu@1\n  return [menu.legacy().value, menu.run().value]\n}");
+        const latest = await run(caller.url, "request R {\n  const menu: com.example.Menu\n  return menu.legacy().error\n}");
+
+        expect(pinned.returnValue).toEqual(["old", "one"]);
+        expect(JSON.stringify(latest)).toContain("has no function 'legacy'");
+        expect(contractAuthorizations.map(({ voucher }) => voucher.functionName)).toEqual(["legacy", "run"]);
     });
 
     test("a contract keeps state for the organization paying for a remote call", async () => {
@@ -253,7 +272,7 @@ describe("two-node network", { timeout: 15_000 }, () => {
         await fetch(`${providerUrl}/v1/contracts`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: "Bearer provider-admin" },
-            body: JSON.stringify({ source: "contract com.example.Visits: object {\n  var state(caller.org) visits: int32 = 0\n  visits = visits + 1\n  return { visits: visits, by: caller }\n}" }),
+            body: JSON.stringify({ source: "contract com.example.Visits {\n  pub fn run(): object {\n  var state(caller.org) visits: int32 = 0\n  visits = visits + 1\n  return { visits: visits, by: caller }\n}\n}" }),
         });
         await vi.waitFor(async () => expect((await getJson(`${caller.url}/v1/resources`)).resources.map((resource: StellariumResource) => resource.name)).toContain("Visits"));
         const visit = 'request R {\n  const visits: com.example.Visits\n  return visits.run().value\n}';

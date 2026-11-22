@@ -121,7 +121,7 @@ describe("structs between two nodes", { timeout: 20_000 }, () => {
         });
 
         test("the caller's contracts use the provider's struct, and can't declare its path", async () => {
-            const contract = "contract com.caller.Warmest(forecast: com.example.Forecast@1): decimal {\n  return forecast.highs[1]\n}";
+            const contract = "contract com.caller.Warmest {\n  pub fn run(forecast: com.example.Forecast@1): decimal {\n  return forecast.highs[1]\n}\n}";
             expect((await admin(callerUrl, "POST", "/contracts", { source: contract }, "caller-admin")).status).toBe(201);
             // The caller announces its contract, struct-typed parameter and all, and the provider learns it.
             await vi.waitFor(async () => {

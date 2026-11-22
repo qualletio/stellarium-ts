@@ -230,7 +230,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
         body: JSON.stringify({ source }),
     });
 
-    const forecastContract = 'contract com.example.Outlook(city: string): string {\n  const weather: com.example.Weather\n  return "${weather.temperature(city: city).value} degrees"\n}';
+    const forecastContract = 'contract com.example.Outlook {\n  pub fn run(city: string): string {\n  const weather: com.example.Weather\n  return "${weather.temperature(city: city).value} degrees"\n}\n}';
 
     test('a call to another node\'s contract pays for the tokens it executed and for the paid call it makes', async () => {
         const seeded = await seedOrganizations(db, 100_000);
@@ -269,7 +269,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
         await db.update(nodesTable).set({ listed: true }).where(eq(nodesTable.publicKey, seeded.provider.publicKey));
         const callerUrl = await startNode(seeded.payer, { startingPeer: providerUrl });
 
-        expect((await deploy(providerUrl, 'contract com.example.Visits: object {\n  var state(caller.org) visits: int32 = 0\n  visits = visits + 1\n  return { visits: visits, org: caller.org }\n}')).status).toBe(201);
+        expect((await deploy(providerUrl, 'contract com.example.Visits {\n  pub fn run(): object {\n  var state(caller.org) visits: int32 = 0\n  visits = visits + 1\n  return { visits: visits, org: caller.org }\n}\n}')).status).toBe(201);
         await vi.waitFor(async () => {
             const { resources } = await (await fetch(`${callerUrl}/v1/resources`)).json() as { resources: StellariumResource[] };
             expect(resources.map(resource => resource.name)).toContain('Visits');
@@ -306,12 +306,14 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
         const COURIER = 'org_courier';
         const OUTSIDER = 'org_outsider';
         const JOB = [
-            'contract com.example.Job(to: string, amount: int64): int64 {',
+            'contract com.example.Job {',
             '  var state paid: int64 = 0',
             '  const account: sh.stellarium.money.Account',
-            '  const payment = account.pay(to: to, amount: amount, from: "org_payer", key: null)',
-            '  paid = paid + amount',
-            '  return account.balance().value',
+            '  pub fn run(to: string, amount: int64): int64 {',
+            '    const payment = account.pay(to: to, amount: amount, from: "org_payer", key: null)',
+            '    paid = paid + amount',
+            '    return account.balance().value',
+            '  }',
             '}',
         ].join('\n');
 
@@ -333,7 +335,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
             const job = { nodePublicKey: seeded.provider.publicKey, name: 'com.example.Job', version };
             // The node registers the contract after deploying it, owned by its organization.
             await vi.waitFor(async () => expect(await service.money.publicContract(job)).toMatchObject({
-                source: JOB, ownerOrganizationId: PROVIDER_ORGANIZATION, payable: false, dependencies: [], requestscriptVersion: expect.stringMatching(/^1\./),
+                source: JOB, ownerOrganizationId: PROVIDER_ORGANIZATION, payable: false, dependencies: [], requestscriptVersion: expect.stringMatching(/^2\./),
             }));
             // RequestScript 1.7.0 can't declare a contract payable, so the test makes it one.
             await db.update(contractVersionsTable).set({ payable: true }).where(eq(contractVersionsTable.name, 'com.example.Job'));
@@ -391,7 +393,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
             // Starting reports a new base URL, which unlists the node, so it's listed afterwards.
             await db.update(nodesTable).set({ listed: true }).where(eq(nodesTable.publicKey, seeded.provider.publicKey));
             const token = await runToken(PAYER_ORGANIZATION, seeded.provider.publicKey);
-            const source = 'contract com.example.Tenant(a: int32): int32 {\n  return a\n}';
+            const source = 'contract com.example.Tenant {\n  pub fn run(a: int32): int32 {\n  return a\n}\n}';
             expect((await deploy(providerUrl, source, `Bearer ${token}`)).status).toBe(201);
             await vi.waitFor(async () => expect(await service.money.publicContract({ nodePublicKey: seeded.provider.publicKey, name: 'com.example.Tenant', version: '1' }))
                 .toMatchObject({ ownerOrganizationId: PAYER_ORGANIZATION, hostOrganizationId: PROVIDER_ORGANIZATION }));
@@ -404,21 +406,24 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
         });
     });
 
-    describe('payable contracts (RequestScript 1.8)', () => {
+    describe('payable functions (RequestScript 2.0)', () => {
         const COURIER = 'org_courier';
+        // Only fund takes money: release is an ordinary function of the same contract, sharing its funding.
         const JOB = [
-            'payable contract com.example.Job(action: string, jobId: string): string {',
+            'contract com.example.Job {',
             '  const account: sh.stellarium.money.Account',
-            '  if (action == "fund") {',
+            '  pub payable fn fund(): string {',
             '    if (payment.amount == 0) {',
             '      fail "fund needs money attached"',
             '    }',
             '    account.earmark(key: "job-1")',
             '    return "funded ${payment.amount} by ${payment.from} for ${payment.payees[0]}"',
             '  }',
-            '  const due = account.fundingOf(org: "org_payer", key: jobId).value',
-            '  account.pay(to: "org_courier", amount: due, from: "org_payer", key: jobId)',
-            '  return "released ${due}"',
+            '  pub fn release(jobId: string): string {',
+            '    const due = account.fundingOf(org: "org_payer", key: jobId).value',
+            '    account.pay(to: "org_courier", amount: due, from: "org_payer", key: jobId)',
+            '    return "released ${due}"',
+            '  }',
             '}',
         ].join('\n');
 
@@ -434,9 +439,9 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
             const providerUrl = await startNode(seeded.provider);
             await db.update(nodesTable).set({ listed: true }).where(eq(nodesTable.publicKey, seeded.provider.publicKey));
             expect((await deploy(providerUrl, JOB)).status).toBe(201);
-            expect((await deploy(providerUrl, 'contract com.example.Plain(action: string): string {\n  return action\n}')).status).toBe(201);
-            expect((await deploy(providerUrl, 'payable contract com.example.Who: object {\n  return { sender: sender, now: now }\n}')).status).toBe(201);
-            expect((await deploy(providerUrl, 'contract com.example.Wrapper: object {\n  const who: com.example.Who@1\n  return who.run().value\n}')).status).toBe(201);
+            expect((await deploy(providerUrl, 'contract com.example.Plain {\n  pub fn run(action: string): string {\n  return action\n}\n}')).status).toBe(201);
+            expect((await deploy(providerUrl, 'contract com.example.Who {\n  pub payable fn run(): object {\n  return { sender: sender, now: now }\n}\n}')).status).toBe(201);
+            expect((await deploy(providerUrl, 'contract com.example.Wrapper {\n  pub fn run(): object {\n  const who: com.example.Who@1\n  return who.run().value\n}\n}')).status).toBe(201);
             const job = { nodePublicKey: seeded.provider.publicKey, name: 'com.example.Job', version: '1' };
             // A payable contract is registered before its deploy answers.
             expect(await service.money.publicContract(job)).toMatchObject({ payable: true, source: JOB });
@@ -444,7 +449,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
             return { providerUrl, payerUrl, job };
         }
 
-        const fund = 'request Hire {\n  const job: com.example.Job@1\n  return job.run{amount: 20000000, payees: ["org_courier"]}(action: "fund", jobId: "").value\n}';
+        const fund = 'request Hire {\n  const job: com.example.Job@1\n  return job.fund{amount: 20000000, payees: ["org_courier"]}().value\n}';
         const balance = async (job: { nodePublicKey: string, name: string, version: string }) => (await service.money.publicContract(job))!.balanceMicroUsd;
 
         test('a buyer funds a job on another node, and its host pays the courier what was earmarked', async () => {
@@ -453,7 +458,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
             await vi.waitFor(async () => expect(await balance(job)).toBe(20_000_000));
             expect(await organizations.get(PAYER_ORGANIZATION)).toMatchObject({ balanceMicroUsd: 30_000_000, heldMicroUsd: 0 });
 
-            const release = 'request Release {\n  const job: com.example.Job@1\n  return job.run(action: "release", jobId: "job-1").value\n}';
+            const release = 'request Release {\n  const job: com.example.Job@1\n  return job.release(jobId: "job-1").value\n}';
             expect((await run(providerUrl, release)).returnValue).toBe('released 20000000');
             // 20% platform fee in these tests, rounded up.
             await vi.waitFor(async () => expect(await organizations.get(COURIER)).toMatchObject({ payableMicroUsd: 16_000_000 }));
@@ -492,7 +497,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
             expect((await run(setup.payerUrl, fund)).returnValue).toBe('funded 20000000 by org_payer for org_courier');
             await vi.waitFor(async () => expect(await service.money.publicContract(setup.job)).toMatchObject({ balanceMicroUsd: 20_000_000 }));
             if (pause) await stopVerifier();
-            const release = 'request Release {\n  const job: com.example.Job@1\n  return job.run(action: "release", jobId: "job-1").value\n}';
+            const release = 'request Release {\n  const job: com.example.Job@1\n  return job.release(jobId: "job-1").value\n}';
             expect((await run(setup.providerUrl, release)).returnValue).toBe('released 20000000');
             // The release tree's receipt is in, with Job's pay staged.
             await vi.waitFor(async () => {
@@ -535,7 +540,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
             expect((await organizations.listNodes(PROVIDER_ORGANIZATION)).every(node => node.suspendedAt !== null)).toBe(true);
             expect((await service.money.publicContract({ nodePublicKey: root.nodePublicKey, name: 'com.example.Job', version: '1' }))!.refundAllAt).not.toBeNull();
             // A suspended node can't move money.
-            expect((await run(providerUrl, 'request R {\n  const job: com.example.Job@1\n  return job.run(action: "release", jobId: "job-1")\n}')).returnValue.error).not.toBeNull();
+            expect((await run(providerUrl, 'request R {\n  const job: com.example.Job@1\n  return job.release(jobId: "job-1")\n}')).returnValue.error).not.toBeNull();
 
             // The operator proposed a ban, which takes two staff members.
             const [ban] = await service.governance.actions('proposed');
@@ -584,7 +589,7 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
             organizations = seeded.organizations;
             const providerUrl = await startNode(seeded.provider, { provider: true });
             const payerUrl = await startNode(seeded.payer, { startingPeer: providerUrl });
-            expect((await deploy(payerUrl, 'payable contract com.example.Forecast: int32 {\n  const weather: com.example.Weather\n  return weather.temperature(city: "Oslo").value\n}')).status).toBe(201);
+            expect((await deploy(payerUrl, 'contract com.example.Forecast {\n  pub payable fn run(): int32 {\n  const weather: com.example.Weather\n  return weather.temperature(city: "Oslo").value\n}\n}')).status).toBe(201);
             expect((await run(payerUrl, 'request R {\n  const forecast: com.example.Forecast@1\n  return forecast.run().value\n}')).returnValue).toBe(12);
             let receipt: { id: number, rootRunId: number, receipt: { calls: { attestation?: Record<string, unknown>, response: unknown }[] } } | undefined;
             await vi.waitFor(async () => {
@@ -642,17 +647,19 @@ describe('nodes paying through the operator', { timeout: 30_000 }, () => {
         test('a contract requests a random value, and reads it in a later run once its tree is verified and applied', async () => {
             const { providerUrl } = await market();
             const lottery = [
-                'contract com.example.Lottery(action: string): string {',
+                'contract com.example.Lottery {',
                 '  const random: sh.stellarium.random.Random',
-                '  if (action == "draw") {',
+                '  pub fn draw(): string {',
                 '    random.requestValue(key: "round-1")',
                 '    return "requested"',
                 '  }',
-                '  return random.value(key: "round-1").value',
+                '  pub fn reveal(): string {',
+                '    return random.value(key: "round-1").value',
+                '  }',
                 '}',
             ].join('\n');
             expect((await deploy(providerUrl, lottery)).status).toBe(201);
-            const call = (action: string) => run(providerUrl, `request Play {\n  const lottery: com.example.Lottery@1\n  return lottery.run(action: "${action}").value\n}`);
+            const call = (action: string) => run(providerUrl, `request Play {\n  const lottery: com.example.Lottery@1\n  return lottery.${action}().value\n}`);
             expect((await call('draw')).returnValue).toBe('requested');
             const [request] = await vi.waitFor(async () => {
                 const rows = await db.select().from(randomRequestsTable);

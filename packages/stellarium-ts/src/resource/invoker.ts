@@ -61,6 +61,11 @@ export interface ContractPaymentVoucher {
     expiresAt: string;
     invocationHash: string;
     publicKey: string;
+    /**
+     * The contract function the call runs, one of its `pub fn`s, which `invocationHash` covers too. The operator
+     * reads it to hold no more than that function can cost.
+     */
+    functionName: string;
     /** Set for a call made by a billed run: that run's hold pays, and the contract's run is held from it. */
     runId?: string;
 }
@@ -124,8 +129,8 @@ export function inferenceVoucherPayload(voucher: Omit<InferencePaymentVoucher, "
  * Key order is part of the signed bytes.
  */
 export function contractVoucherPayload(voucher: Omit<ContractPaymentVoucher, "signature">) {
-    const { kind, requestId, invocationId, maxAmount, priceMicroUsdPerMillionTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey } = voucher;
-    return { kind, requestId, invocationId, maxAmount, priceMicroUsdPerMillionTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey, ...runPayload(voucher.runId) };
+    const { kind, requestId, invocationId, maxAmount, priceMicroUsdPerMillionTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey, functionName } = voucher;
+    return { kind, requestId, invocationId, maxAmount, priceMicroUsdPerMillionTokens, recipientOrganizationId, expiresAt, invocationHash, publicKey, functionName, ...runPayload(voucher.runId) };
 }
 
 export function isContractVoucher(voucher: unknown): voucher is ContractPaymentVoucher {
@@ -230,10 +235,11 @@ export const MAX_CONTRACT_DEPTH = 8;
 /** Runs the contracts deployed to this node, for scripts on this node. */
 export interface ContractHost {
     /**
-     * Runs the contract served as `resource`, one level deeper than `context`. A billed script's call is held
-     * from its run's hold, as a call from another node is held from the caller's balance.
+     * Runs the function `functionName` of the contract served as `resource`, one level deeper than `context`. A
+     * billed script's call is held from its run's hold, as a call from another node is held from the caller's
+     * balance.
      */
-    invokeLocal(resource: Resource, parameters: ResourceFunctionCallParameter[], context: ScriptContext, attachmentId?: string): Promise<InvokeResult>;
+    invokeLocal(resource: Resource, functionName: string, parameters: ResourceFunctionCallParameter[], context: ScriptContext, attachmentId?: string): Promise<InvokeResult>;
 }
 
 /** How this node calls contracts. */
@@ -354,7 +360,9 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 throw new Error(`Resource ${resource.name} does not have a url`);
             }
 
-            const resourceFunction = await this.resourceRepository.getResourceFunction(resource.path, resource.name, functionName);
+            // A pinned older version of a contract may have functions its latest doesn't: they're on the resource.
+            const resourceFunction = await this.resourceRepository.getResourceFunction(resource.path, resource.name, functionName)
+                ?? (pinnedVersion(resource) === undefined ? undefined : resource.functions.find(fn => fn.name === functionName) as StellariumResourceFunction | undefined);
             if (!resourceFunction) {
                 throw new Error(`Function ${functionName} not found in resource ${resource.name}`);
             }
@@ -487,7 +495,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
                 if (context?.event?.contracts.includes(`${resource.path}.${resource.name}`)) {
                     return { value: null, error: { message: `Failed to invoke ${resource.name}.${fn.name}: it is earlier in this chain of events` } };
                 }
-                return this.contracts.host.invokeLocal(resource, parameters, context ?? {}, attachmentId);
+                return this.contracts.host.invokeLocal(resource, fn.name, parameters, context ?? {}, attachmentId);
             }
             // A billed run pays for this node's own paid functions as a remote caller would.
             if (run && fn.paymentManifest) {
@@ -576,11 +584,13 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             else if (context?.moneyRun) context.moneyRun.failure ??= error;
             return { error };
         };
-        if (!this.money) return failed('this node has no operator to move money');
         const fn = resource.functions.find(candidate => candidate.name === functionName) as StellariumResourceFunction | undefined;
         const version = pinnedVersion(resource);
         if (!fn || !isContractFunction(fn) || version === undefined) return failed('money can only be attached to a call to a pinned contract version');
         const baseUrl = resource.metadata.baseUrl as string | undefined;
+        // This node knows which of its own contract functions are payable; a peer's refuses the call itself.
+        if (!baseUrl && fn.payable !== true) return failed('it isn\'t a payable function, so money can\'t be attached to a call to it');
+        if (!this.money) return failed('this node has no operator to move money');
         const nodePublicKey = baseUrl ? await this.peerKey?.(baseUrl) : this.publicKey;
         if (!nodePublicKey) return failed('the node hosting the contract isn\'t known');
         return this.money.attach(context?.account, context?.moneyRun, { nodePublicKey, name: `${resource.path}.${resource.name}`, version }, attachment);
@@ -635,6 +645,7 @@ export class CombinationResourceInvoker implements ResourceInvoker {
             expiresAt: new Date(Date.now() + CONTRACT_VOUCHER_LIFETIME_MS).toISOString(),
             invocationHash: invocationHash(resourcePath, resourceName, functionName, parameters, resourceVersion),
             publicKey: this.publicKey,
+            functionName,
             ...runPayload(runId),
         };
         return { ...unsigned, signature: signData(contractVoucherPayload(unsigned), this.privateKey) };

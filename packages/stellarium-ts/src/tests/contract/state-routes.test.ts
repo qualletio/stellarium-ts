@@ -9,7 +9,7 @@ import routes from "../../routes.js";
 import { createService, type NodeConfig, type Service } from "../../service.js";
 import { DIALECTS, generateBase64KeyPair, ORGANIZATION, openTestDatabase, testConfig, weatherResource } from "../helpers.js";
 
-const COUNTER = "contract com.example.Counter: int32 {\n  var state count: int32 = 0\n  count = count + 1\n  return count\n}";
+const COUNTER = "contract com.example.Counter {\n  pub fn run(): int32 {\n  var state count: int32 = 0\n  count = count + 1\n  return count\n}\n}";
 const callCounter = "request R {\n  const counter: com.example.Counter\n  return counter.run().value\n}";
 
 /** A free function that waits until the test lets it finish, to hold a call open. */
@@ -96,12 +96,12 @@ describe.each(DIALECTS)("contract state (%s)", (dialect) => {
         expect((await run(callCounter)).returnValue).toBe(1);
         expect((await run(callCounter)).returnValue).toBe(2);
         // A new version can widen the type.
-        await deploy("contract com.example.Counter@2: int64 {\n  var state count: int64 = 0\n  count = count + 10\n  return count\n}");
+        await deploy("contract com.example.Counter@2 {\n  pub fn run(): int64 {\n  var state count: int64 = 0\n  count = count + 10\n  return count\n}\n}");
         expect((await run(callCounter)).returnValue).toBe(12);
     });
 
     test("caller tells a remote caller's organization and node apart from this node's", async () => {
-        await deploy("contract com.example.Who: object {\n  return caller\n}");
+        await deploy("contract com.example.Who {\n  pub fn run(): object {\n  return caller\n}\n}");
 
         expect(await callFromPeer("Who")).toEqual({ value: { org: "org_peer", node: peer.publicKey }, error: null });
         expect((await run("request R {\n  const who: com.example.Who\n  return who.run().value\n}")).returnValue).toEqual({ org: ORGANIZATION, node: config.publicKey });
@@ -110,7 +110,7 @@ describe.each(DIALECTS)("contract state (%s)", (dialect) => {
     });
 
     test("state(caller.org) keeps one copy per paying organization", async () => {
-        await deploy("contract com.example.Visits: int32 {\n  var state(caller.org) visits: int32 = 0\n  visits = visits + 1\n  return visits\n}");
+        await deploy("contract com.example.Visits {\n  pub fn run(): int32 {\n  var state(caller.org) visits: int32 = 0\n  visits = visits + 1\n  return visits\n}\n}");
 
         expect((await callFromPeer("Visits")).value).toBe(1);
         expect((await callFromPeer("Visits")).value).toBe(2);
@@ -123,7 +123,7 @@ describe.each(DIALECTS)("contract state (%s)", (dialect) => {
     });
 
     test("a call that fails saves nothing", async () => {
-        await deploy("contract com.example.Fragile(d: int32): int32 {\n  var state count: int32 = 0\n  count = count + 1\n  return 1 / d\n}");
+        await deploy("contract com.example.Fragile {\n  pub fn run(d: int32): int32 {\n  var state count: int32 = 0\n  count = count + 1\n  return 1 / d\n}\n}");
 
         const result = await callFromPeer("Fragile", [{ name: "d", value: 0 }]);
 
@@ -140,7 +140,7 @@ describe.each(DIALECTS)("contract state (%s)", (dialect) => {
     });
 
     test("a call that re-enters its own contract saves first, and the outer call fails rather than lose it", async () => {
-        await deploy("contract com.example.Again(again: boolean): int32 {\n  var state count: int32 = 0\n  const self: com.example.Again@1\n  if (again) {\n    const inner = self.run(again: false)\n  }\n  count = count + 1\n  return count\n}");
+        await deploy("contract com.example.Again {\n  pub fn run(again: boolean): int32 {\n  var state count: int32 = 0\n  const self: com.example.Again@1\n  if (again) {\n    const inner = self.run(again: false)\n  }\n  count = count + 1\n  return count\n}\n}");
 
         const result = (await run("request R {\n  const again: com.example.Again\n  return again.run(again: true)\n}")).returnValue;
 
@@ -149,7 +149,7 @@ describe.each(DIALECTS)("contract state (%s)", (dialect) => {
     });
 
     test("a call waiting too long for the contract fails, and the earlier call still saves", async () => {
-        await deploy("contract com.example.Slow: int32 {\n  var state count: int32 = 0\n  const gate: com.example.Gate\n  gate.wait()\n  count = count + 1\n  return count\n}");
+        await deploy("contract com.example.Slow {\n  pub fn run(): int32 {\n  var state count: int32 = 0\n  const gate: com.example.Gate\n  gate.wait()\n  count = count + 1\n  return count\n}\n}");
         service.contractService.lockTimeoutMs = 50;
         const callSlow = "request R {\n  const slow: com.example.Slow\n  return slow.run()\n}";
 
@@ -164,7 +164,7 @@ describe.each(DIALECTS)("contract state (%s)", (dialect) => {
 
     test("a call that would grow its state past the cap fails and saves nothing", async () => {
         config.maxContractStateBytes = 16;
-        await deploy("contract com.example.Notes(text: string): string {\n  var state note: string = \"\"\n  note = text\n  return note\n}");
+        await deploy("contract com.example.Notes {\n  pub fn run(text: string): string {\n  var state note: string = \"\"\n  note = text\n  return note\n}\n}");
 
         expect((await callFromPeer("Notes", [{ name: "text", value: "short" }])).value).toBe("short");
         const result = await callFromPeer("Notes", [{ name: "text", value: "a note much longer than the cap" }]);
@@ -187,7 +187,7 @@ describe.each(DIALECTS)("contract state (%s)", (dialect) => {
 
     test("deleting a version keeps state, and deleting the contract deletes it", async () => {
         await deploy(COUNTER);
-        await deploy(COUNTER.replace("Counter:", "Counter@2:"));
+        await deploy(COUNTER.replace("Counter {", "Counter@2 {"));
         await run(callCounter);
         const remove = (ref: string) => fastify.inject({ method: "DELETE", url: `/v1/contracts/${ref}`, headers: { authorization: "Bearer secret" } });
 

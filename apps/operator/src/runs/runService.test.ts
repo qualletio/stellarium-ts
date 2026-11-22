@@ -17,7 +17,7 @@ const PRICE = 250_000_000;
 /** Four tokens: `return`, `1`, `+`, `2`. */
 const SOURCE = 'request R {\n  return 1 + 2\n}';
 /** Also four tokens. */
-const CONTRACT = 'contract com.example.Sum(a: int32): int32 {\n  return a + 2\n}';
+const CONTRACT = 'contract com.example.Sum {\n  pub fn run(a: int32): int32 {\n  return a + 2\n}\n}';
 
 describe('RunService', () => {
     let db: Database;
@@ -304,18 +304,36 @@ describe('RunService', () => {
 
     describe('contract calls', () => {
         /** A voucher a caller node signs to call the provider's contract. */
-        function contractVoucher(options: { keys?: NodeKeys, maxAmount?: number, price?: number, runId?: string, recipientOrganizationId?: string } = {}) {
+        function contractVoucher(options: { keys?: NodeKeys, maxAmount?: number, price?: number, runId?: string, recipientOrganizationId?: string, functionName?: string } = {}) {
             const keys = options.keys ?? payer;
             const invoker = new CombinationResourceInvoker(undefined as never, 0, keys.publicKey, keys.privateKey);
-            return invoker.createContractVoucher(options.recipientOrganizationId ?? PROVIDER_ORGANIZATION, options.price ?? PRICE, options.maxAmount ?? 20_000, 'com.example', 'Sum', 'run', [{ name: 'a', value: 1 }], options.runId);
+            return invoker.createContractVoucher(options.recipientOrganizationId ?? PROVIDER_ORGANIZATION, options.price ?? PRICE, options.maxAmount ?? 20_000, 'com.example', 'Sum', options.functionName ?? 'run', [{ name: 'a', value: 1 }], options.runId);
         }
 
-        const authorizeContract = (voucher: ReturnType<typeof contractVoucher>, node = provider) =>
-            service.authorizeContract(node.publicKey, { voucher, source: CONTRACT });
+        const authorizeContract = (voucher: ReturnType<typeof contractVoucher>, node = provider, source = CONTRACT) =>
+            service.authorizeContract(node.publicKey, { voucher, source });
 
         test('contractMaxTokens prices a contract, and refuses a request script', () => {
             expect(contractMaxTokens(CONTRACT)).toBe(4);
             expect(() => contractMaxTokens(SOURCE)).toThrow('contract');
+        });
+
+        /** `cheap` runs 2 tokens, `costly` 6, and the helper's are counted where it's called. */
+        const TWO = 'contract com.example.Sum {\n  fn add(a: int32): int32 {\n    return a + 1\n  }\n  pub fn cheap(a: int32): int32 {\n    return a\n  }\n  pub fn costly(a: int32): int32 {\n    return add(a: a)\n  }\n}';
+
+        test('contractMaxTokens prices the function a call names, or else the costliest, and refuses one that isn\'t pub', () => {
+            expect(contractMaxTokens(TWO, 'cheap')).toBe(2);
+            expect(contractMaxTokens(TWO, 'costly')).toBeGreaterThan(contractMaxTokens(TWO, 'cheap'));
+            expect(contractMaxTokens(TWO)).toBe(contractMaxTokens(TWO, 'costly'));
+            expect(() => contractMaxTokens(TWO, 'add')).toThrow('no pub function add');
+        });
+
+        test('holds what the function the voucher names can cost', async () => {
+            const cheap = await authorizeContract(contractVoucher({ functionName: 'cheap' }), provider, TWO);
+            const costly = await authorizeContract(contractVoucher({ functionName: 'costly' }), provider, TWO);
+            expect(cheap).toMatchObject({ status: 'held', maxTokens: contractMaxTokens(TWO, 'cheap') });
+            expect(costly).toMatchObject({ status: 'held', maxTokens: contractMaxTokens(TWO, 'costly') });
+            expect(await rejection(authorizeContract(contractVoucher({ functionName: 'add' }), provider, TWO))).toMatchObject({ status: 422 });
         });
 
         test('holds up to maxAmount on the signer\'s organization, and charges the tokens at the node\'s price', async () => {
@@ -426,7 +444,7 @@ describe('RunService', () => {
     });
     describe('event mandates', () => {
         /** Four tokens, like CONTRACT. */
-        const CONSUMER = 'contract com.example.OnSum consumes com.example.Summed {\n  var b = a + 2\n}';
+        const CONSUMER = 'contract com.example.OnSum consumes com.example.Summed {\n  fn on(a: int32) {\n    var b = a + 2\n  }\n}';
 
         async function mandate(consumer = 'com.example.OnSum') {
             return (await service.createEventMandate(provider.publicKey, { token: await token(), consumer })).mandateId;

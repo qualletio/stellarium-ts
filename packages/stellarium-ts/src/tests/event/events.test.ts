@@ -17,8 +17,10 @@ const COUNTER = [
     "contract com.example.CountGreetings consumes com.example.Greeted {",
     "  var state count: int32 = 0",
     "  var state last: object = {}",
-    "  count = count + 1",
-    "  last = { who: who, times: times, id: event.id, org: caller.org, node: caller.node }",
+    "  fn on(who: string, times: int32) {",
+    "    count = count + 1",
+    "    last = { who: who, times: times, id: event.id, org: caller.org, node: caller.node }",
+    "  }",
     "}",
 ].join("\n");
 const GREET = 'request R {\n  emit com.example.Greeted(who: "Ada", times: 2)\n  return 1\n}';
@@ -144,7 +146,7 @@ describe.each(DIALECTS)("events (%s)", (dialect) => {
         });
 
         test.each([
-            ["a contract", "contract com.example.Sum: int32 {\n  return 1\n}", 400, "event declaration"],
+            ["a contract", "contract com.example.Sum {\n  pub fn run(): int32 {\n  return 1\n}\n}", 400, "event declaration"],
             ["an event without a path", "event Greeted(who: string)", 400, "path"],
             ["a declaration that doesn't parse", "event com.example.Greeted(who: string) { }", 400, "no body"],
         ])("refuses %s", async (_, source, status, error) => {
@@ -216,7 +218,7 @@ describe.each(DIALECTS)("events (%s)", (dialect) => {
 
         test("publishes from a contract only if it succeeds", async () => {
             await deploy(COUNTER);
-            await deploy('contract com.example.Greet(who: string, fail: boolean): string {\n  emit com.example.Greeted(who: who, times: 1)\n  if (fail) {\n    var x: int32 = "no"\n  }\n  return who\n}');
+            await deploy('contract com.example.Greet {\n  pub fn run(who: string, fail: boolean): string {\n  emit com.example.Greeted(who: who, times: 1)\n  if (fail) {\n    var x: int32 = "no"\n  }\n  return who\n}\n}');
 
             const call = (fail: boolean) => run(`request R {\n  const greet: com.example.Greet\n  return greet.run(who: "Bo", fail: ${fail})\n}`);
             expect((await call(true)).json().returnValue.error.message).toContain("failed");
@@ -233,7 +235,7 @@ describe.each(DIALECTS)("events (%s)", (dialect) => {
             expect(other.statusCode).toBe(422);
             expect(other.json().details).toContain(`Only ${ORGANIZATION}'s scripts`);
 
-            const deployed = await deploy('contract com.example.Greet: int32 {\n  emit com.example.Greeted(who: "x", times: 1)\n  return 1\n}', await runToken(OTHER_ORGANIZATION));
+            const deployed = await deploy('contract com.example.Greet {\n  pub fn run(): int32 {\n  emit com.example.Greeted(who: "x", times: 1)\n  return 1\n}\n}', await runToken(OTHER_ORGANIZATION));
             expect(deployed.statusCode).toBe(403);
         });
 
@@ -295,8 +297,10 @@ describe.each(DIALECTS)("events (%s)", (dialect) => {
         });
 
         test.each([
-            ["an unknown event type", "contract com.example.On consumes com.example.Missing {\n  return\n}", 400, "doesn't know"],
-            ["its own event", "contract com.example.On consumes com.example.Greeted {\n  emit com.example.Greeted(who: who, times: times)\n}", 400, "the event it consumes"],
+            ["an unknown event type", "contract com.example.On consumes com.example.Missing {\n  fn on() {\n    return\n  }\n}", 400, "doesn't know"],
+            ["a handler that takes a field the event doesn't have", "contract com.example.On consumes com.example.Greeted {\n  fn on(whom: string) { }\n}", 400, "has no such field"],
+            ["a handler that takes a field as another type", "contract com.example.On consumes com.example.Greeted {\n  fn on(times: int64) { }\n}", 400, "declares it int32"],
+            ["its own event", "contract com.example.On consumes com.example.Greeted {\n  fn on(who: string, times: int32) {\n    emit com.example.Greeted(who: who, times: times)\n  }\n}", 400, "the event it consumes"],
         ])("refuses an event contract consuming %s", async (_, source, status, error) => {
             const response = await deploy(source);
             expect(response.statusCode).toBe(status);
@@ -305,14 +309,14 @@ describe.each(DIALECTS)("events (%s)", (dialect) => {
 
         test("keeps a contract an event contract, or not, across versions", async () => {
             await deploy(COUNTER);
-            expect((await deploy("contract com.example.CountGreetings@2: int32 {\n  return 1\n}")).statusCode).toBe(409);
-            await deploy("contract com.example.Sum: int32 {\n  return 1\n}");
-            expect((await deploy("contract com.example.Sum@2 consumes com.example.Greeted {\n  return\n}")).statusCode).toBe(409);
+            expect((await deploy("contract com.example.CountGreetings@2 {\n  pub fn run(): int32 {\n  return 1\n}\n}")).statusCode).toBe(409);
+            await deploy("contract com.example.Sum {\n  pub fn run(): int32 {\n  return 1\n}\n}");
+            expect((await deploy("contract com.example.Sum@2 consumes com.example.Greeted {\n  fn on() {\n    return\n  }\n}")).statusCode).toBe(409);
         });
 
         test("delivers a restricted event only to its owner's event contracts", async () => {
             await declare(RESTRICTED);
-            const consumer = "contract com.example.OnAudit consumes com.example.Audit {\n  var state seen: int32 = 0\n  seen = seen + 1\n}";
+            const consumer = "contract com.example.OnAudit consumes com.example.Audit {\n  var state seen: int32 = 0\n  fn on() {\n    seen = seen + 1\n  }\n}";
 
             expect((await deploy(consumer, await runToken(OTHER_ORGANIZATION))).statusCode).toBe(403);
             expect((await deploy(consumer)).statusCode).toBe(201);
@@ -323,8 +327,8 @@ describe.each(DIALECTS)("events (%s)", (dialect) => {
 
         test("stops a chain from emitting an event type already in it", async () => {
             await declare("event com.example.Answered(who: string)");
-            await deploy("contract com.example.Answer consumes com.example.Greeted {\n  emit com.example.Answered(who: who)\n}");
-            await deploy("contract com.example.Echo consumes com.example.Answered {\n  emit com.example.Greeted(who: who, times: 1)\n}");
+            await deploy("contract com.example.Answer consumes com.example.Greeted {\n  fn on(who: string) {\n    emit com.example.Answered(who: who)\n  }\n}");
+            await deploy("contract com.example.Echo consumes com.example.Answered {\n  fn on(who: string) {\n    emit com.example.Greeted(who: who, times: 1)\n  }\n}");
             await deploy(COUNTER);
 
             await run(GREET);
@@ -338,8 +342,8 @@ describe.each(DIALECTS)("events (%s)", (dialect) => {
         });
 
         test("stops a chain from calling a contract already in it", async () => {
-            await deploy('contract com.example.Greet: int32 {\n  emit com.example.Greeted(who: "x", times: 1)\n  return 1\n}');
-            await deploy("contract com.example.CallBack consumes com.example.Greeted {\n  const greet: com.example.Greet@1\n  var result = greet.run()\n  var state error: string = \"\"\n  error = result.error.message\n}");
+            await deploy('contract com.example.Greet {\n  pub fn run(): int32 {\n  emit com.example.Greeted(who: "x", times: 1)\n  return 1\n}\n}');
+            await deploy("contract com.example.CallBack consumes com.example.Greeted {\n  const greet: com.example.Greet@1\n  var state error: string = \"\"\n  fn on() {\n    var result = greet.run()\n    error = result.error.message\n  }\n}");
 
             await run('request R {\n  const greet: com.example.Greet\n  return greet.run()\n}');
             await service.eventService.processInbox();
@@ -350,7 +354,7 @@ describe.each(DIALECTS)("events (%s)", (dialect) => {
         test("stops a chain past the most events deep", async () => {
             const event = await peerEvent({ type: "com.example.Greeted", ownerOrganizationId: ORGANIZATION, data: { who: "x", times: 1 }, depth: MAX_EVENT_DEPTH }, { publicKey: config.publicKey, privateKey: config.privateKey }, ORGANIZATION);
             await declare("event com.example.Answered(who: string)");
-            await deploy("contract com.example.Answer consumes com.example.Greeted {\n  emit com.example.Answered(who: who)\n}");
+            await deploy("contract com.example.Answer consumes com.example.Greeted {\n  fn on(who: string) {\n    emit com.example.Answered(who: who)\n  }\n}");
 
             expect((await fastify.inject({ method: "POST", url: "/v1/events/deliver", payload: event })).statusCode).toBe(202);
             await service.eventService.processInbox();
@@ -360,7 +364,7 @@ describe.each(DIALECTS)("events (%s)", (dialect) => {
     });
 
     describe("between nodes", () => {
-        const onPing = "contract com.example.OnPing consumes com.example.Pinged {\n  var state last: string = \"\"\n  last = note\n  var state count: int32 = 0\n  count = count + 1\n}";
+        const onPing = "contract com.example.OnPing consumes com.example.Pinged {\n  var state last: string = \"\"\n  var state count: int32 = 0\n  fn on(note: string) {\n    last = note\n    count = count + 1\n  }\n}";
 
         test("learns a peer's event types and event contracts from its signed announcement", async () => {
             const response = await announce(await peerAnnouncement({

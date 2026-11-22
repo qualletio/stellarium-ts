@@ -168,7 +168,7 @@ importers:
     devDependencies:
       turbo:
         specifier: latest
-        version: 2.11.11
+        version: 2.11.13
 
   apps/dashboard:
     dependencies:
@@ -188,8 +188,8 @@ importers:
         specifier: 19.3.1
         version: 19.3.1(react@19.3.1)
       requestscript:
-        specifier: 1.8.1
-        version: 1.8.1(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        specifier: 2.0.0
+        version: 2.0.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       server-only:
         specifier: ^0.0.1
         version: 0.0.1
@@ -216,8 +216,8 @@ importers:
         specifier: ^5.12.7
         version: 5.12.7
       requestscript:
-        specifier: ^1.1.0
-        version: 1.5.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        specifier: 2.0.0
+        version: 2.0.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       stellarium-ts:
         specifier: workspace:*
         version: link:../../packages/stellarium-ts
@@ -232,8 +232,8 @@ importers:
         specifier: ^5.12.5
         version: 5.12.7
       requestscript:
-        specifier: ^1.0.5
-        version: 1.5.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        specifier: 2.0.0
+        version: 2.0.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       stellarium-ts:
         specifier: workspace:*
         version: link:../../packages/stellarium-ts
@@ -269,8 +269,8 @@ importers:
         specifier: ^8.23.1
         version: 8.23.1
       requestscript:
-        specifier: 1.8.1
-        version: 1.8.1(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        specifier: 2.0.0
+        version: 2.0.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       stripe:
         specifier: ^23.0.1
         version: 23.0.1(@types/node@26.6.5)
@@ -339,8 +339,8 @@ importers:
         specifier: ^8.23.1
         version: 8.23.1
       requestscript:
-        specifier: 1.8.1
-        version: 1.8.1(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
+        specifier: 2.0.0
+        version: 2.0.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       sqlite:
         specifier: ^5.1.1
         version: 5.1.1
@@ -1071,8 +1071,8 @@ packages:
   '@swc/helpers@0.5.23':
     resolution: {integrity: sha512-5lSsMOTXURePglDfvuAQUqkGek9Hg2kksOYay2m0+XR++b2NWYL/4sWyuvVBIs8oKnJaxkdi9whaL/sqN13afw==}
 
-  '@turbo/darwin-64@2.11.11':
-    resolution: {integrity: sha512-HMMeUIEAsmyIbSYn1ySvF/4gGMa0joiTMq4dQDuloIAnOpbtFT3JEiVsYnASdTWDXvplbRbZlqjU1EBeSR9G1A==}
+  '@turbo/darwin-64@2.11.13':
+    resolution: {integrity: sha512-5IT29i4j55E5O66+la7L8Y46ut7dFaNZqrgUIYYNtcpMt9Ql7aYnSQb/6tZ+prE2AfX1RBCAtRJE41txS2rG3w==}
     cpu: [x64]
     os: [darwin]
 
@@ -1081,8 +1081,8 @@ packages:
     cpu: [x64]
     os: [darwin]
 
-  '@turbo/darwin-arm64@2.11.11':
-    resolution: {integrity: sha512-+8iySNgqYWY6PZYUQzYu6zn0C04z2OEq1vQ6oMGsJ9sxN6wOpg1gzi1AJ5VKDHviWvMUjhqng51hTEQZOuiqYQ==}
+  '@turbo/darwin-arm64@2.11.13':
+    resolution: {integrity: sha512-YFJPayVNlhSPRIZSeERiZYGKKqPs6N6qGhim8J3GtBdv5ZjUNF1ixfnAAyCVTqFEnMSkn1W7F0Y07kca8EjWsg==}
     cpu: [arm64]
     os: [darwin]
 
@@ -1091,8 +1091,8 @@ packages:
     cpu: [arm64]
     os: [darwin]
 
-  '@turbo/linux-64@2.11.11':
-    resolution: {integrity: sha512-uImTKFYCFKsoFxjaXeJXlMPv4uU3OIIDjyzoIwYVqOtu9LnCZ/5/fzu/WP6+G9YfwGAPRplTHkKFfcI5t97RGw==}
+  '@turbo/linux-64@2.11.13':
+    resolution: {integrity: sha512-R5RIQflV4ffBDNuUwjmtmzIr6Y2UeyeeHTtultYF7cnFn3tG1RZ4GRBlpjUhHB6JxuR7l1B450hlbzdtlD3ghg==}
     cpu: [x64]
     os: [android, linux]
 
@@ -1101,8 +1101,8 @@ packages:
     cpu: [x64]
     os: [android, linux]
 
-  '@turbo/linux-arm64@2.11.11':
-    resolution: {integrity: sha512-Y7xffSVfyyYRGzNy6PLdrFL4xXN6iTuR3W0SyJvH/yd3d4defA6dansZwJpPDVnIpD8a2Qn256DwY/Qin4Ip4g==}
+  '@turbo/linux-arm64@2.11.13':
+    resolution: {integrity: sha512-AwV8pVO/cH/lwx1B7SGfzUA/3e6vmPaygFp9NOSRESs6t3Wr63zrBuXlluDogAOIxIMlHDB2ZbBueDsBnQxh2Q==}
     cpu: [arm64]
     os: [android, linux]
 
@@ -1111,8 +1111,8 @@ packages:
     cpu: [arm64]
     os: [android, linux]
 
-  '@turbo/windows-64@2.11.11':
-    resolution: {integrity: sha512-e2WqNtkPGo3QDwNNwwBo89Dx3PtSJ9Wp9QuRNzn80rrRnSHB+1mfBMZTpdHjA8/G/sG9rl76TdWdpgVsimjRdg==}
+  '@turbo/windows-64@2.11.13':
+    resolution: {integrity: sha512-PGXYTaFaN3FZloe4RffNGJmfB+TIWlqQgKK1PVyKwPN+PUzxGa+byxHBWFHredMaVbnUc6L/F6/QR4iHyM/wug==}
     cpu: [x64]
     os: [win32]
 
@@ -1121,8 +1121,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@turbo/windows-arm64@2.11.11':
-    resolution: {integrity: sha512-LURivfmgv34Osm8NR1gZGx4vdlux9KAgRM+FoooXNG0838ff0+akWZ76iPSke0NS2rsf7Z4Gw+YSaygzNTZuRA==}
+  '@turbo/windows-arm64@2.11.13':
+    resolution: {integrity: sha512-YdRHWstBUHWt/eChOEM4f9LT0dPiWK5SNgtV77bLCr3JNke9M5E7metqelNYj+tXe36dH0BZrk2CMnFlWqHKng==}
     cpu: [arm64]
     os: [win32]
 
@@ -2220,13 +2220,8 @@ packages:
   real-require@1.0.0:
     resolution: {integrity: sha512-P4nbQYQfePJxRSmY+v/KINxVucm4NF3p3s7pJveMTtom52FR4YGltUQLB8idDXwDDWW+eYrWDFbuzUnjoWHF7g==}
 
-  requestscript@1.5.0:
-    resolution: {integrity: sha512-qrN7vgwi2SFFNnreYRQ5PLItG3CkhAtNJAR75xFnHKHoiJTcS7doFNHnkle3o4nUKwASIej48NYMCSgTQBA58Q==}
-    engines: {node: '>=20'}
-    hasBin: true
-
-  requestscript@1.8.1:
-    resolution: {integrity: sha512-AbXjtzTAcV1zhKsOWxDCKQZAu7SK4eD6mYYK7zgBjNQ6LbiaKyw5ckpqBEgrPAc34Wl2yhceirnlGXyjwUwyig==}
+  requestscript@2.0.0:
+    resolution: {integrity: sha512-TPyoQMIPneVbqP6wW+jysI60zi3U/s1RnFWAtxKe+dU024P4GxG7WuqLk5AhMDod1JEJwnLGrbssblmoRVq/Mw==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -2443,8 +2438,8 @@ packages:
   tunnel-agent@0.6.0:
     resolution: {integrity: sha512-McnNiV1l8RYeY8tBgEpuodCC1mLUdbSN+CYBL7kJsJNInOP8UjDDEwdk6Mw60vdLLrr5NHKZhMAOSrR2NZuQ+w==}
 
-  turbo@2.11.11:
-    resolution: {integrity: sha512-AI4UJbUE/2cVZdoXJ4PODc8qvrjhQQX9Fa93eKGOI6Ims/w7+kUIb9T1jhlgSnZcf+gtUruci/ohSwqtNNC5Yw==}
+  turbo@2.11.13:
+    resolution: {integrity: sha512-2EZ8StW6tqaj71HGF60oUOmJrPQHidmZ5dcwv2VORofya9JthVrfZhxbzRMx/QxjPwYi754i2h5RFsZSDzpnaQ==}
     hasBin: true
 
   turbo@2.11.8:
@@ -3021,37 +3016,37 @@ snapshots:
     dependencies:
       tslib: 2.8.1
 
-  '@turbo/darwin-64@2.11.11':
+  '@turbo/darwin-64@2.11.13':
     optional: true
 
   '@turbo/darwin-64@2.11.8':
     optional: true
 
-  '@turbo/darwin-arm64@2.11.11':
+  '@turbo/darwin-arm64@2.11.13':
     optional: true
 
   '@turbo/darwin-arm64@2.11.8':
     optional: true
 
-  '@turbo/linux-64@2.11.11':
+  '@turbo/linux-64@2.11.13':
     optional: true
 
   '@turbo/linux-64@2.11.8':
     optional: true
 
-  '@turbo/linux-arm64@2.11.11':
+  '@turbo/linux-arm64@2.11.13':
     optional: true
 
   '@turbo/linux-arm64@2.11.8':
     optional: true
 
-  '@turbo/windows-64@2.11.11':
+  '@turbo/windows-64@2.11.13':
     optional: true
 
   '@turbo/windows-64@2.11.8':
     optional: true
 
-  '@turbo/windows-arm64@2.11.11':
+  '@turbo/windows-arm64@2.11.13':
     optional: true
 
   '@turbo/windows-arm64@2.11.8':
@@ -3946,62 +3941,7 @@ snapshots:
 
   real-require@1.0.0: {}
 
-  requestscript@1.5.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7):
-    dependencies:
-      drizzle-orm: 1.0.0-rc.4(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
-      express: 5.3.0
-      pg: 8.23.1
-    transitivePeerDependencies:
-      - '@aws-sdk/client-rds-data'
-      - '@cloudflare/workers-types'
-      - '@effect/sql-d1'
-      - '@effect/sql-libsql'
-      - '@effect/sql-mysql2'
-      - '@effect/sql-pg'
-      - '@effect/sql-pglite'
-      - '@effect/sql-sqlite-bun'
-      - '@effect/sql-sqlite-do'
-      - '@effect/sql-sqlite-node'
-      - '@effect/sql-sqlite-wasm'
-      - '@electric-sql/pglite'
-      - '@libsql/client'
-      - '@libsql/client-wasm'
-      - '@neondatabase/serverless'
-      - '@op-engineering/op-sqlite'
-      - '@opentelemetry/api'
-      - '@planetscale/database'
-      - '@sinclair/typebox'
-      - '@sqlitecloud/drivers'
-      - '@tidbcloud/serverless'
-      - '@tursodatabase/database'
-      - '@tursodatabase/database-common'
-      - '@tursodatabase/database-wasm'
-      - '@tursodatabase/serverless'
-      - '@tursodatabase/sync'
-      - '@types/better-sqlite3'
-      - '@types/mssql'
-      - '@types/pg'
-      - '@types/sql.js'
-      - '@upstash/redis'
-      - '@vercel/postgres'
-      - '@xata.io/client'
-      - arktype
-      - better-sqlite3
-      - bun-types
-      - effect
-      - expo-sqlite
-      - mssql
-      - mysql2
-      - pg-native
-      - postgres
-      - sql.js
-      - sqlite3
-      - supports-color
-      - typebox
-      - valibot
-      - zod
-
-  requestscript@1.8.1(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7):
+  requestscript@2.0.0(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7):
     dependencies:
       drizzle-orm: 1.0.0-rc.4(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(pg@8.23.1)(sqlite3@6.0.1)(zod@4.6.7)
       express: 5.3.0
@@ -4313,14 +4253,14 @@ snapshots:
     dependencies:
       safe-buffer: 5.2.1
 
-  turbo@2.11.11:
+  turbo@2.11.13:
     optionalDependencies:
-      '@turbo/darwin-64': 2.11.11
-      '@turbo/darwin-arm64': 2.11.11
-      '@turbo/linux-64': 2.11.11
-      '@turbo/linux-arm64': 2.11.11
-      '@turbo/windows-64': 2.11.11
-      '@turbo/windows-arm64': 2.11.11
+      '@turbo/darwin-64': 2.11.13
+      '@turbo/darwin-arm64': 2.11.13
+      '@turbo/linux-64': 2.11.13
+      '@turbo/linux-arm64': 2.11.13
+      '@turbo/windows-64': 2.11.13
+      '@turbo/windows-arm64': 2.11.13
 
   turbo@2.11.8:
     optionalDependencies:

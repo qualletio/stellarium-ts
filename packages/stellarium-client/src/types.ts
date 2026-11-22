@@ -66,6 +66,8 @@ export interface ResourceFunction {
     /** Only callers holding a grant from the provider may call it. */
     restricted?: boolean;
     kind?: 'inference' | 'contract';
+    /** Set on a contract's `pub payable fn`: a call to it may attach money. Announced only by the contract's own node. */
+    payable?: boolean;
 }
 
 /** A resource a node hosts, or learned from the peer at `baseUrl`. */
@@ -97,13 +99,23 @@ export interface ContractParameter {
     type: string;
 }
 
+/** One of a contract's entrypoints: a `pub fn`, or an event contract's handler, `on`. */
+export interface ContractFunction {
+    name: string;
+    parameters: ContractParameter[];
+    /** A RequestScript type, or 'void' for a function that returns nothing. */
+    returnType: string;
+    /** Declared `pub payable fn`: a call to it may attach money. */
+    payable: boolean;
+}
+
 /** A version of a contract deployed on a node. */
 export interface Contract {
     path: string;
     name: string;
     version: string;
-    parameters: ContractParameter[];
-    returnType: string;
+    /** Its entrypoints, which callers call as `ref.name(...)`. */
+    functions: ContractFunction[];
     /** The organization that deployed it, which owns every version. Null when the node's admin did. */
     ownerOrganizationId: string | null;
     description: string | null;

@@ -1,5 +1,5 @@
 import {
-    type CallAttachment, createStructResolver, Decimal, interpretParsed, parseScript, RequestScriptError, type Resource,
+    type CallAttachment, createStructResolver, Decimal, entrypoint, entrypoints, interpretParsed, parseScript, RequestScriptError, type Resource,
     type ResourceFunctionCallParameter, type StateScope, TokenMeter,
 } from "requestscript";
 import requestscriptPackage from "requestscript/package.json" with { type: "json" };
@@ -13,6 +13,8 @@ export interface RunReceipt {
     contract: { name: string, version: string, sourceHash: string };
     nonce: string;
     inputs: {
+        /** The entrypoint the run ran: one of the contract's `pub fn`s, or an event contract's `on`. */
+        function: string;
         parameters: Record<string, unknown>;
         payment: { amount: number, from: string, payees: string[], attachmentId: string, money: MoneyCallRef } | null;
         now: number | null;
@@ -73,12 +75,12 @@ export const REPLAY_REQUESTSCRIPT_VERSION: string = requestscriptPackage.version
 
 /**
  * Whether the operator can replay a contract registered as running on `version`: the same major and minor
- * version, from 1.8, whose releases all pass the same deterministic conformance suite.
+ * version, from 2.0 (SIP-1's contract functions), whose releases all pass the same deterministic conformance suite.
  */
 export function canReplay(version: string): boolean {
     const [major, minor] = version.split('.').map(Number);
     const [ownMajor, ownMinor] = REPLAY_REQUESTSCRIPT_VERSION.split('.').map(Number);
-    return major === ownMajor && minor === ownMinor && (major! > 1 || minor! >= 8);
+    return major === ownMajor && minor === ownMinor && major! >= 2;
 }
 
 /** JSON with every host value written exactly, as `encodeHostValue` writes them. */
@@ -128,7 +130,9 @@ export type ReplayResult = { ok: true } | { ok: false, reason: string };
 export async function replay(receipt: RunReceipt, source: string): Promise<ReplayResult> {
     const script = parseScript(source);
     if (script.declaration.kind !== 'contract') return { ok: false, reason: 'the registered source is not a contract' };
-    const payable = script.declaration.payable === true;
+    if (!entrypoint(script, receipt.inputs.function)) return { ok: false, reason: `the registered source has no entrypoint ${receipt.inputs.function}` };
+    // Every function of a payable contract reads `sender` and `now`, as stellarium-ts's isPayableContract decides.
+    const payable = entrypoints(script).some(fn => fn.payable);
     let divergence: string | undefined;
     let next = 0;
 
@@ -166,6 +170,7 @@ export async function replay(receipt: RunReceipt, source: string): Promise<Repla
                 },
             },
             meter,
+            function: receipt.inputs.function,
             parameters: parametersAsJson(receipt.inputs.parameters) as Record<string, unknown>,
             builtins: {
                 jwt: receipt.inputs.jwt,

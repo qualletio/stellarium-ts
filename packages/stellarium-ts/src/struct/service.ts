@@ -217,10 +217,10 @@ export class StructService {
         if (typed.length === 0) {
             return undefined;
         }
-        const script = parseScript(`contract Check(${typed.map(parameter => `${parameter.name}: ${parameter.type}`).join(', ')}) { }`);
+        const script = parseScript(`contract Check { pub fn check(${typed.map(parameter => `${parameter.name}: ${parameter.type}`).join(', ')}) { } }`);
         const values = Object.fromEntries(typed.map(parameter => [parameter.name, parameters.find(candidate => candidate.name === parameter.name)?.value ?? null]));
         try {
-            await interpretParsed(script, { parameters: values, structs: this.resolver });
+            await interpretParsed(script, { function: 'check', parameters: values, structs: this.resolver });
         } catch (error) {
             if (error instanceof RequestScriptError) {
                 return error.message;

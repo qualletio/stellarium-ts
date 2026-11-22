@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { interpretParsed, parseScript, RequestScriptError, type Resource, type ResourceFunctionCallParameter, type ResourceResolver, type Script, type StateScope, type Statement, structReferences, TokenMeter, typeToString } from "requestscript";
+import { emittedEvents, entrypoint, entrypoints, EVENT_HANDLER, interpretParsed, parseScript, RequestScriptError, type Resource, type ResourceFunctionCallParameter, type ResourceResolver, type Script, type StateScope, structReferences, TokenMeter, typeToString, walkStatements } from "requestscript";
 import type { AttachmentRead, CallSender, MoneyContractRef, OperatorClient } from "../client/operatorClient.js";
 import { hashData, signData } from "../crypto/utils.js";
 import { encodeHostValue, type MoneyCallRef, ReceiptRecorder, receiptsPayload } from "./receipt.js";
@@ -9,11 +9,11 @@ import type { EventContractHost, EventService } from "../event/service.js";
 import { type EventEnvelope, type EventLineage, qualifiedName } from "../event/types.js";
 import type { AccountSession } from "../money/account.js";
 import { type CallerIdentity, type CombinationResourceInvoker, type ContractHost, type ContractPaymentVoucher, MAX_CONTRACT_DEPTH, pinnedVersion, type ScriptContext } from "../resource/invoker.js";
-import { CONTRACT_FUNCTION, type ResourceRepository } from "../resource/repository.js";
+import type { ResourceRepository } from "../resource/repository.js";
 import { type InvokeResult, settlePaidCall } from "../resource/settlement.js";
 import type { SettlementOutbox } from "../resource/outbox.js";
 import type { NodeConfig } from "../service.js";
-import type { ContractRepository, StoredContract } from "./repository.js";
+import type { ContractFunction, ContractRepository, StoredContract } from "./repository.js";
 import type { StructService } from "../struct/service.js";
 import { isMoneyPath, MoneyRun } from "../money/account.js";
 import { type ContractStateRepository, type ContractStateRow, DEFAULT_MAX_CONTRACT_STATE_BYTES } from "./state.js";
@@ -23,8 +23,10 @@ export const DEFAULT_MAX_CONTRACT_SOURCE_BYTES = 64 * 1024;
 /** The longest a call waits for earlier calls of the same stateful contract on this node. */
 export const CONTRACT_LOCK_TIMEOUT_MS = 30_000;
 
-/** What a contract runs with: its built-ins, its depth, the contracts it runs inside, and the run that pays. */
+/** What a contract runs with: its function, its built-ins, its depth, the contracts it runs inside, and the run that pays. */
 interface RunContext {
+    /** The entrypoint the call runs: one of the contract's `pub fn`s, or an event contract's `on`. */
+    function: string;
     jwt: unknown;
     caller: CallerIdentity;
     depth: number;
@@ -65,40 +67,58 @@ const refuse = (status: number, error: string): ContractRefusal => ({ ok: false,
 /** The RequestScript version this node runs contracts with, which the operator records to replay them. */
 export const REQUESTSCRIPT_VERSION: string = createRequire(import.meta.url)('requestscript/package.json').version;
 
-/** The `path.Name` and version of every contract the statements bind by version, `const r: path.Name@version`, in order. */
-function pinnedResources(statements: Statement[]): { key: string, version: string }[] {
-    return statements.flatMap((statement): { key: string, version: string }[] => {
-        switch (statement.kind) {
-            case 'resourceDecl': {
-                const version = (statement as { version?: string }).version;
-                return version === undefined ? [] : [{ key: [...statement.resourcePath, statement.resourceName].join('.'), version }];
-            }
-            case 'if':
-                return [...statement.branches.flatMap(branch => pinnedResources(branch.body)), ...pinnedResources(statement.elseBody ?? [])];
-            default:
-                return [];
+/** The `path.Name` and version of every contract the script binds by version, `const r: path.Name@version`, in order. */
+function pinnedResources(script: Script): { key: string, version: string }[] {
+    const pinned: { key: string, version: string }[] = [];
+    walkStatements(script, statement => {
+        if (statement.kind === 'resourceDecl' && statement.version !== undefined) {
+            pinned.push({ key: [...statement.resourcePath, statement.resourceName].join('.'), version: statement.version });
         }
     });
+    return pinned;
 }
 
-/** The `path.Name` of every resource the statements bind without a version, `const r: path.Name`, in order. */
-function unpinnedResources(statements: Statement[]): string[] {
-    return statements.flatMap((statement): string[] => {
-        switch (statement.kind) {
-            case 'resourceDecl':
-                // `version` is set by requestscript 1.8.0's parser, for `const r: path.Name@version`.
-                return (statement as { version?: string }).version === undefined ? [[...statement.resourcePath, statement.resourceName].join('.')] : [];
-            case 'if':
-                return [...statement.branches.flatMap(branch => unpinnedResources(branch.body)), ...unpinnedResources(statement.elseBody ?? [])];
-            default:
-                return [];
+/** The `path.Name` of every resource the script binds without a version, `const r: path.Name`, in order. */
+function unpinnedResources(script: Script): string[] {
+    const unpinned: string[] = [];
+    walkStatements(script, statement => {
+        if (statement.kind === 'resourceDecl' && statement.version === undefined) {
+            unpinned.push([...statement.resourcePath, statement.resourceName].join('.'));
         }
     });
+    return unpinned;
+}
+
+/** Whether the script declares a state variable, at its top level or in a function. */
+function hasState(script: Script): boolean {
+    let stateful = false;
+    walkStatements(script, statement => {
+        if (statement.kind === 'varDecl' && statement.state !== undefined) stateful = true;
+    });
+    return stateful;
+}
+
+/**
+ * Whether a contract is payable: it has a `pub payable fn`. Every run of it is verified, and reads `sender` and
+ * `now`, though only its payable functions take money. Copied in the operator's verification/replay.ts.
+ */
+export function isPayableContract(script: Script): boolean {
+    return entrypoints(script).some(fn => fn.payable);
+}
+
+/** A contract's entrypoints, as it's stored and served: its `pub fn`s, or an event contract's `on`. */
+export function contractFunctions(script: Script): ContractFunction[] {
+    return entrypoints(script).map(fn => ({
+        name: fn.name,
+        parameters: fn.parameters.map(parameter => ({ name: parameter.name, type: typeToString(parameter.type) })),
+        returnType: fn.returnType ? typeToString(fn.returnType) : 'void',
+        payable: fn.payable,
+    }));
 }
 
 /**
  * Deploys, deletes and runs the contracts on this node. A contract's latest version is one of the node's
- * resources, with one function, `run`. Calls to it are billed by the tokens it executes, through a run the
+ * resources, with a function for each of its `pub fn`s. Calls to them are billed by the tokens it executes, through a run the
  * operator holds on the caller's organization or on the caller's own run, which also pays for the paid calls
  * the contract makes.
  */
@@ -161,9 +181,6 @@ export class ContractService implements ContractHost, EventContractHost {
         if (isMoneyPath(declaration.path.join('.'))) {
             return refuse(400, 'Invalid contract: sh.stellarium.money and sh.stellarium.random are reserved for stellarium-ts\'s built-in resources');
         }
-        if (!declaration.returnType && !declaration.consumes) {
-            return refuse(400, 'Invalid contract: declare its return type, such as contract com.example.Name(...): string');
-        }
         const path = declaration.path.join('.');
         const { name, version } = declaration;
         const structs = this.structs
@@ -174,7 +191,7 @@ export class ContractService implements ContractHost, EventContractHost {
         }
         // A contract runs the versions it was deployed against, so the code it calls can't change under it.
         // The interpreter refuses the binding when it runs, too; this catches it before anyone depends on it.
-        for (const key of unpinnedResources(script.body)) {
+        for (const key of unpinnedResources(script)) {
             const current = key === `${path}.${name}` ? version : (await this.resolver.resolve(key) as { version?: string } | undefined)?.version;
             if (current !== undefined) {
                 return refuse(400, `Invalid contract: ${key} is a contract, so bind it by its version, e.g. 'const ref: ${key}@${current}'`);
@@ -208,6 +225,18 @@ export class ContractService implements ContractHost, EventContractHost {
             if (!consumed.ok) {
                 return consumed;
             }
+            // The handler takes fields of the event, each with the field's type; caught here rather than per event.
+            const eventLabel = qualifiedName(consumed.eventType.path, consumed.eventType.name);
+            for (const parameter of entrypoint(script, EVENT_HANDLER)?.parameters ?? []) {
+                const field = consumed.eventType.fields.find(candidate => candidate.name === parameter.name);
+                const type = typeToString(parameter.type);
+                if (!field) {
+                    return refuse(400, `Invalid contract: its handler takes ${parameter.name}, but ${eventLabel} has no such field`);
+                }
+                if (field.type !== type) {
+                    return refuse(400, `Invalid contract: its handler takes ${parameter.name} as ${type}, but ${eventLabel} declares it ${field.type}`);
+                }
+            }
             consumer = {
                 path,
                 name,
@@ -222,15 +251,15 @@ export class ContractService implements ContractHost, EventContractHost {
         if (emits) {
             return emits;
         }
-        if (!this.events && script.body.some(function emits(statement): boolean {
-            return statement.kind === 'emit' || (statement.kind === 'if' && [...statement.branches.flatMap(branch => branch.body), ...statement.elseBody ?? []].some(emits));
-        })) {
+        if (!this.events && emittedEvents(script).length > 0) {
             return refuse(400, 'Invalid contract: this node doesn\'t publish events');
         }
         // The operator keeps the contract's owner, source and dependencies, which buyers read before funding a
         // payable contract (docs/money.md, Registration). A payable contract can't hold money until it's
-        // registered, so its deploy waits for it; any other contract is registered after it's saved.
-        const payable = (declaration as { payable?: boolean }).payable === true;
+        // registered, so its deploy waits for it; any other contract is registered after it's saved. A contract
+        // is payable when any of its entrypoints is.
+        const functions = contractFunctions(script);
+        const payable = isPayableContract(script);
         const registration = async (): Promise<{ ok: true } | ContractRefusal> => {
             const dependencies = await this.dependencies(script, path, name, version);
             if (!dependencies.ok) return dependencies;
@@ -270,9 +299,7 @@ export class ContractService implements ContractHost, EventContractHost {
                 name,
                 version,
                 source,
-                parameters: declaration.parameters.map(parameter => ({ name: parameter.name, type: typeToString(parameter.type) })),
-                // An event contract returns nothing.
-                returnType: declaration.returnType ? typeToString(declaration.returnType) : '',
+                functions,
                 ownerOrganizationId,
                 description: description ?? null,
             });
@@ -339,7 +366,7 @@ export class ContractService implements ContractHost, EventContractHost {
      */
     private async dependencies(script: Script, path: string, name: string, version: string): Promise<{ ok: true, dependencies: MoneyContractRef[] } | ContractRefusal> {
         const dependencies: MoneyContractRef[] = [];
-        for (const pinned of pinnedResources(script.body)) {
+        for (const pinned of pinnedResources(script)) {
             const key = `${pinned.key}@${pinned.version}`;
             if (dependencies.some(dependency => `${dependency.name}@${dependency.version}` === key)) continue;
             if (pinned.key === `${path}.${name}` && pinned.version === version) {
@@ -396,12 +423,12 @@ export class ContractService implements ContractHost, EventContractHost {
     }
 
     /**
-     * Runs a contract for another node's call, paid by its voucher, which the route has checked. The operator
+     * Runs a contract's function for another node's call, paid by its voucher, which the route has checked. The operator
      * holds the call's cost as a run named by the voucher's `invocationId`, unless the caller is in this
      * node's organization. `depth` is how many contracts deep the call is. The contract sees the payer the
      * operator authorized, and the voucher's key, as `caller`.
      */
-    async serve(voucher: ContractPaymentVoucher, contract: StoredContract, parameters: ResourceFunctionCallParameter[], depth: number, event?: EventLineage, attachmentId?: string, senderContract?: { name: string, version: string }): Promise<InvokeResult | { refused: { status: number, error: string } }> {
+    async serve(voucher: ContractPaymentVoucher, contract: StoredContract, functionName: string, parameters: ResourceFunctionCallParameter[], depth: number, event?: EventLineage, attachmentId?: string, senderContract?: { name: string, version: string }): Promise<InvokeResult | { refused: { status: number, error: string } }> {
         if (event?.contracts.includes(`${contract.path}.${contract.name}`)) {
             return { refused: { status: 400, error: `${contract.path}.${contract.name} is earlier in this chain of events, so it can't be called` } };
         }
@@ -416,7 +443,7 @@ export class ContractService implements ContractHost, EventContractHost {
             contract: authorization.sender ? authorization.sender.contract : senderContract ? `${senderContract.name}@${senderContract.version}` : null,
         };
         // The tree's time is the operator's stamp when the call is part of a tree; otherwise it starts here.
-        const context = { jwt: null, depth, caller: { org: authorization.payerOrganizationId ?? null, node: voucher.publicKey }, event, attachmentId, now: authorization.now ?? Date.now(), sender };
+        const context = { function: functionName, jwt: null, depth, caller: { org: authorization.payerOrganizationId ?? null, node: voucher.publicKey }, event, attachmentId, now: authorization.now ?? Date.now(), sender };
         // A free call from a run is still part of the run's tree: the operator gives it a run, at no price, for
         // its Account changes, which this node settles like a billed one.
         if (authorization.free && voucher.runId === undefined) {
@@ -425,8 +452,8 @@ export class ContractService implements ContractHost, EventContractHost {
         return this.runBilled(voucher.invocationId, contract, parameters, context);
     }
 
-    async invokeLocal(resource: Resource, parameters: ResourceFunctionCallParameter[], context: ScriptContext, attachmentId?: string): Promise<InvokeResult> {
-        const failed = (reason: string) => ({ value: null, error: { message: `Failed to invoke ${resource.name}.${CONTRACT_FUNCTION}: ${reason}` } });
+    async invokeLocal(resource: Resource, functionName: string, parameters: ResourceFunctionCallParameter[], context: ScriptContext, attachmentId?: string): Promise<InvokeResult> {
+        const failed = (reason: string) => ({ value: null, error: { message: `Failed to invoke ${resource.name}.${functionName}: ${reason}` } });
         const depth = (context.depth ?? 0) + 1;
         if (depth > MAX_CONTRACT_DEPTH) {
             return failed(`contracts may call each other at most ${MAX_CONTRACT_DEPTH} deep`);
@@ -445,7 +472,7 @@ export class ContractService implements ContractHost, EventContractHost {
         const sender: CallSender = context.self
             ? { org: context.self.owner, node: this.config.publicKey, contract: context.self.contract }
             : { org: caller.org, node: this.config.publicKey, contract: null };
-        const runContext = { jwt: context.jwt ?? null, depth, caller, contracts: context.contracts, event: context.event, moneyRun: context.moneyRun, state: context.state, attachmentId, now: context.now ?? Date.now(), sender };
+        const runContext = { function: functionName, jwt: context.jwt ?? null, depth, caller, contracts: context.contracts, event: context.event, moneyRun: context.moneyRun, state: context.state, attachmentId, now: context.now ?? Date.now(), sender };
         if (context.runId === undefined) {
             return this.run(contract, parameters, runContext);
         }
@@ -455,7 +482,7 @@ export class ContractService implements ContractHost, EventContractHost {
             return failed('this node is not enrolled in an organization that can be paid');
         }
         const costLimit = this.config.contractCostLimitMicroUsd ?? this.config.costLimitMicroUsd;
-        const voucher = this.invoker.createContractVoucher(organizationId, this.config.priceMicroUsdPerMillionTokens ?? 0, costLimit, resource.path, resource.name, CONTRACT_FUNCTION, parameters, context.runId, version);
+        const voucher = this.invoker.createContractVoucher(organizationId, this.config.priceMicroUsdPerMillionTokens ?? 0, costLimit, resource.path, resource.name, functionName, parameters, context.runId, version);
         const authorization = await this.operatorClient.authorizeContractRun({ voucher, source: contract.source });
         if (!authorization.ok) {
             return failed(authorization.error);
@@ -475,6 +502,7 @@ export class ContractService implements ContractHost, EventContractHost {
         }
         const label = qualifiedName(consumer.path, consumer.name);
         const context: RunContext = {
+            function: EVENT_HANDLER,
             jwt: null,
             depth: 1,
             now: Date.now(),
@@ -537,7 +565,11 @@ export class ContractService implements ContractHost, EventContractHost {
         const label = `${contract.path}.${contract.name}`;
         const failed = (reason: string) => ({ value: null, error: { message: `Contract ${label}@${contract.version} failed: ${reason}` } });
         const script = parseScript(contract.source);
-        const stateful = script.body.some(statement => statement.kind === 'varDecl' && statement.state !== undefined);
+        const entry = entrypoint(script, context.function);
+        if (!entry) {
+            return failed(`it has no function ${context.function}`);
+        }
+        const stateful = hasState(script);
         let release: (() => void) | undefined;
         if (stateful && !context.contracts?.includes(label)) {
             release = await this.lock(label);
@@ -556,12 +588,14 @@ export class ContractService implements ContractHost, EventContractHost {
         const ownsState = context.state === undefined;
         const tx = context.state?.tx ?? new StateTransaction();
         const frame = new Frame(context.state?.frame);
-        // A payable contract's chain always moves money, so its state always waits (requestscript 1.8.0's `payable`).
-        if ((script.declaration as { payable?: boolean }).payable === true) {
+        // A contract with a `pub payable fn` is a payable contract, whichever function runs: its chain always
+        // moves money, so its state always waits, and every function reads `sender` and `now`. Only a payable
+        // function takes money attached to the call.
+        const payable = isPayableContract(script);
+        if (payable) {
             tx.money = true;
         }
         const account: AccountSession = { run: moneyRun, contract: { name: label, version: contract.version }, onStaged: () => { tx.money = true; }, ledger: [] };
-        const payable = (script.declaration as { payable?: boolean }).payable === true;
         // A read of a scope another chain holds waits for it, giving up the contract meanwhile, so calls that use
         // other scopes carry on.
         const waitForScope = async (scope: StateScope) => {
@@ -586,8 +620,8 @@ export class ContractService implements ContractHost, EventContractHost {
             }
             let payment: (AttachmentRead & { money: MoneyCallRef }) | undefined;
             if (context.attachmentId !== undefined) {
-                if (!payable) {
-                    outcome = failed('it isn\'t payable, so money can\'t be attached to a call to it');
+                if (!entry.payable) {
+                    outcome = failed(`${context.function} isn't payable, so money can't be attached to a call to it`);
                     return outcome;
                 }
                 const read = this.invoker.money
@@ -641,11 +675,11 @@ export class ContractService implements ContractHost, EventContractHost {
         script: Script, contract: StoredContract, parameters: ResourceFunctionCallParameter[], context: RunContext, label: string,
         emitter: ReturnType<EventService['emitter']> | undefined, account: AccountSession, state: { tx: StateTransaction, frame: Frame },
         waitForScope: (scope: StateScope) => Promise<void>, meter?: TokenMeter,
-        // Only a payable contract reads `payment` and `now`, so an older contract's own variables of those names still work.
+        // Only a payable contract reads `payment`, `sender` and `now`, so other contracts' own variables of those names still work.
         money?: { payment: (AttachmentRead & { money: MoneyCallRef }) | undefined, now: number | undefined },
     ): Promise<InvokeResult> {
         const failed = (reason: string) => ({ value: null, error: { message: `Contract ${label}@${contract.version} failed: ${reason}` } });
-        const stateful = script.body.some(statement => statement.kind === 'varDecl' && statement.state !== undefined);
+        const stateful = hasState(script);
         // Everything the run reads and calls, for the operator to replay once its chain moves money.
         const recorder = new ReceiptRecorder(account.ledger ?? []);
         try {
@@ -653,6 +687,7 @@ export class ContractService implements ContractHost, EventContractHost {
             const moneyRun = runId === undefined ? account.run : undefined;
             const scriptParameters = context.consuming ? context.consuming.data : Object.fromEntries(parameters.map(parameter => [parameter.name, parameter.value]));
             const result = await interpretParsed(script, {
+                function: context.function,
                 resourceResolver: this.resolver,
                 resourceInvoker: recorder.invoker(this.invoker.forScript({
                     jwt, caller, depth, runId, event, contracts: [...context.contracts ?? [], label], account, moneyRun, state, attest: recorder.attest,
@@ -710,6 +745,7 @@ export class ContractService implements ContractHost, EventContractHost {
                 receipt: recorder.receipt(
                     { name: label, version: contract.version, sourceHash: hashData(contract.source) },
                     {
+                        function: context.function,
                         parameters: encodeHostValue(scriptParameters) as Record<string, unknown>,
                         payment: money?.payment && context.attachmentId ? { ...money.payment, attachmentId: context.attachmentId } : null,
                         now: money?.now ?? null,
